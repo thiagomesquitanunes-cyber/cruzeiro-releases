@@ -1709,6 +1709,7 @@ function createWindow(showImmediately = false) {
     width:1280, height:800, minWidth:900, minHeight:600,
     webPreferences: { preload: path.join(__dirname,'preload.js'), contextIsolation:true, nodeIntegration:false },
     title:'Cruzeiro',
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     show: showImmediately,
     backgroundColor: '#0f172a', // prevent white flash
   });
@@ -3427,15 +3428,38 @@ ipcMain.handle('pat:import-history-full', (_, { assets }) => {
 });
 
 // ── SETTINGS: PASSWORD & DATA DIR ──
+function getCatsPath() {
+  return getDbPath().replace('.db', '_categories.json');
+}
+
 ipcMain.handle('categories:get', () => {
+  // Primary: file next to DB (follows dataDir / Dropbox)
+  const filePath = getCatsPath();
+  if (fs.existsSync(filePath)) {
+    try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch(e) {}
+  }
+  // Fallback: legacy location in _settings.json
   const s = loadSettings();
-  return s.categories || null; // null means use default hardcoded list
+  if (s.categories && s.categories.length > 0) {
+    // Migrate to new location silently
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(s.categories));
+      delete s.categories;
+      saveSettings(s);
+      console.log('[Cruzeiro] categories migrated from settings to', filePath);
+    } catch(e) {}
+    return s.categories;
+  }
+  return null;
 });
 ipcMain.handle('categories:save', (_, { categories }) => {
-  const s = loadSettings();
-  s.categories = categories;
-  saveSettings(s);
-  return { ok: true };
+  try {
+    fs.writeFileSync(getCatsPath(), JSON.stringify(categories));
+    // Remove from settings if still there (cleanup migration)
+    const s = loadSettings();
+    if (s.categories) { delete s.categories; saveSettings(s); }
+    return { ok: true };
+  } catch(e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('settings:get', () => {
