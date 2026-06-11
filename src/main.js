@@ -3072,60 +3072,16 @@ ipcMain.handle('pat:accounts-set', (_, { accountIds }) => {
 
 // Retirement planning: yearly patrimônio and savings data
 ipcMain.handle('apos:yearly-data', () => {
-  const now = new Date();
+  // NOTE: patrimônio totals are computed in the renderer (window._patTotalByMonth)
+  // This IPC only provides the evolução data (Média 12m Lucro) per year
+  // The renderer's aposCalc() reads _patTotalByMonth directly for the pat values
+
+  const now      = new Date();
   const curYear  = now.getFullYear();
   const curMonth = String(now.getMonth()+1).padStart(2,'0');
   const curM     = `${curYear}-${curMonth}`;
 
-  // ── 1. Account balances per month (using opening_balance + cumulative transactions)
-  // This matches what the patrimônio tab shows
-  const accounts = all(`SELECT id, opening_balance FROM accounts WHERE type != 'investment'`);
-  const accBalByM = {}; // month -> total balance across all accounts
-
-  accounts.forEach(acc => {
-    const txRows = all(
-      `SELECT substr(date,1,7) as m, SUM(amount) as net
-       FROM transactions WHERE account_id=?
-       GROUP BY m ORDER BY m`,
-      [acc.id]
-    );
-    let bal = acc.opening_balance || 0;
-    const monthBal = {};
-    txRows.forEach(r => { bal += r.net; monthBal[r.m] = bal; });
-    // Carry forward into accBalByM
-    const months = Object.keys(monthBal).sort();
-    months.forEach(m => {
-      accBalByM[m] = (accBalByM[m] || 0) + monthBal[m];
-    });
-  });
-
-  // ── 2. Investment totals by month (atualizacao, carried forward, excl. caixa)
-  const cashAssetIds = new Set(
-    all(`SELECT id FROM inv_assets WHERE category IN ('valor_em_caixa','caixa')`).map(r => r.id)
-  );
-  const invTx = all(
-    `SELECT asset_id, substr(month,1,7) as m, total_value as val
-     FROM inv_transactions WHERE tx_type='atualizacao'
-     ORDER BY month, id`
-  );
-  const invLastVal = {};
-  const invByM = {};
-  invTx.forEach(r => {
-    if (cashAssetIds.has(r.asset_id)) return;
-    invLastVal[r.asset_id] = r.val;
-    invByM[r.m] = Object.values(invLastVal).reduce((s,v) => s+v, 0);
-  });
-
-  // ── 3. Pat assets (immovable) by month — from pat_history
-  const patTx = all(`SELECT asset_id, substr(month,1,7) as m, value FROM pat_history ORDER BY month`);
-  const patLastVal = {};
-  const patByM = {};
-  patTx.forEach(r => {
-    patLastVal[r.asset_id] = r.value;
-    patByM[r.m] = Object.values(patLastVal).reduce((s,v) => s+v, 0);
-  });
-
-  // ── 4. Evolução: monthly lucro for Média 12m
+  // Evolução: monthly lucro for Média 12m (excl. transfers)
   const evRows = all(
     `SELECT substr(date,1,7) as month,
        SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) as income,
@@ -3133,68 +3089,36 @@ ipcMain.handle('apos:yearly-data', () => {
      FROM transactions
      WHERE transfer_id IS NULL
        AND category NOT IN ('Transferência','Transferências')
-       AND category NOT LIKE '⇄%'
      GROUP BY month ORDER BY month`
   );
+
   const evByM = {};
   evRows.forEach(r => { evByM[r.month] = r.income - r.expenses; });
 
-  // All months with any data
-  const allMonths = [...new Set([
-    ...Object.keys(accBalByM),
-    ...Object.keys(invByM),
-    ...Object.keys(patByM),
-    ...Object.keys(evByM),
-  ])].sort();
-
   // Moving 12m average of lucro
-  const lucroArr = allMonths.map(m => evByM[m] ?? 0);
-  const ma12ByM = {};
-  allMonths.forEach((m, i) => {
+  const evMonths = Object.keys(evByM).sort();
+  const lucroArr = evMonths.map(m => evByM[m] ?? 0);
+  const ma12ByM  = {};
+  evMonths.forEach((m, i) => {
     const w = lucroArr.slice(Math.max(0,i-11), i+1).filter(v => !isNaN(v));
     ma12ByM[m] = w.length ? w.reduce((s,v)=>s+v,0)/w.length : 0;
   });
 
-  // ── 5. Carry forward investment and pat values to fill gaps
-  // For each month in allMonths, use latest known value
-  let lastInv = 0, lastPat = 0;
-  const invFwd = {}, patFwd = {};
-  allMonths.forEach(m => {
-    if (invByM[m] !== undefined) lastInv = invByM[m];
-    if (patByM[m] !== undefined) lastPat = patByM[m];
-    invFwd[m] = lastInv;
-    patFwd[m] = lastPat;
-  });
-
-  // ── 6. Compile yearly data
-  const years = [...new Set(allMonths.map(m => m.slice(0,4)))].sort();
-  const yearlyData = {};
-
+  // Compile yearly: ma12Lucro at December (or last available month)
+  const years = [...new Set(evMonths.map(m => m.slice(0,4)))].sort();
+  const yearlyEv = {};
   years.forEach(y => {
-    const yMonths = allMonths.filter(m => m.startsWith(y));
+    const yMonths = evMonths.filter(m => m.startsWith(y));
     if (!yMonths.length) return;
-
-    const decM  = `${y}-12`;
-    const lastM = yMonths[yMonths.length-1];
-    const refM  = yMonths.includes(decM) ? decM : lastM;
-
-    // Grand total = accounts + investments + pat assets at year-end
-    const accVal = accBalByM[refM] ?? 0;
-    const invVal = invFwd[refM]    ?? 0;
-    const patVal = patFwd[refM]    ?? 0;
-    const total  = accVal + invVal + patVal;
-
-    yearlyData[y] = {
-      total:     total > 0 ? total : null,
-      ma12Lucro: ma12ByM[refM] ?? null,
-      refM,
-    };
+    const decM = `${y}-12`;
+    const refM = yMonths.includes(decM) ? decM : yMonths[yMonths.length-1];
+    yearlyEv[y] = { ma12Lucro: ma12ByM[refM] ?? null, refM };
   });
 
-  return { yearlyData, curM, curYear: String(curYear) };
+  return { yearlyEv, curM, curYear: String(curYear) };
 });
 
-// Get monthly account balances for selected accounts
+
 ipcMain.handle('pat:account-balances', () => {
   const includedIds = all('SELECT account_id FROM pat_accounts WHERE included=1 ORDER BY sort_order, account_id').map(r => r.account_id);
   if (!includedIds.length) return [];

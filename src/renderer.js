@@ -9750,6 +9750,13 @@ function refreshPatrimonioTable() {
   // inv rows
   const invRows = buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden);
 
+  // Store monthly totals for use by Aposentadoria tab
+  // This is the same "Total Patrimônio" shown in the table's last row
+  window._patTotalByMonth = {};
+  months.forEach(m => {
+    window._patTotalByMonth[m] = assetTotalByMonth[m] + accTotalByMonth[m] + (invTotalByMonth[m]||0);
+  });
+
   // Update grand total to include investments
   const grandTotalRow2 = `<tbody><tr style="font-weight:700;font-size:14px;background:var(--accent-bg);border-top:2px solid var(--accent)">
     <td style="position:sticky;z-index:3;background:var(--accent-bg);left:0;min-width:350px;padding:10px 12px;color:var(--accent)" colspan="4">📊 Total Patrimônio</td>
@@ -12178,40 +12185,43 @@ async function aposCalc() {
   const needPMT = pvGrown >= metaPatrimonio ? 0
     : (metaPatrimonio - pvGrown) * rM / (Math.pow(1 + rM, n) - 1);
 
-  // Fetch all real historical data from IPC
-  let yearlyData = {}, curYear = new Date().getFullYear();
+  // Get evolução data (Média 12m Lucro) from IPC
+  let yearlyEv = {}, curYear = new Date().getFullYear();
   try {
     const d = await ff.aposYearlyData();
-    yearlyData = d.yearlyData || {};
-    curYear = parseInt(d.curYear) || curYear;
+    yearlyEv  = d.yearlyEv  || {};
+    curYear   = parseInt(d.curYear) || curYear;
   } catch(e) { console.error('aposYearlyData:', e); }
 
-  // Compute avg savings for future projection using last N months of Média 12m Lucro
-  // Use the ma12Lucro value from the most recent months available
-  const recentYears = Object.entries(yearlyData)
-    .filter(([y, d]) => parseInt(y) <= curYear && d.ma12Lucro !== null)
-    .sort(([a],[b]) => b.localeCompare(a)); // newest first
+  // Patrimônio by month — read directly from what Patrimônio tab already computed.
+  // window._patTotalByMonth is populated by refreshInvTable — exact same values as "Total Patrimônio" row.
+  // If not yet computed (tab not opened), falls back to empty object.
+  const patByMonth = window._patTotalByMonth || {};
 
-  let avgSavings = 0;
-  if (recentYears.length) {
-    if (!savingsMonths) {
-      // All history
-      avgSavings = recentYears.reduce((s,[,d]) => s + d.ma12Lucro, 0) / recentYears.length;
-    } else {
-      // Use most recent year's ma12Lucro as the best estimate
-      // (it already IS a 12-month rolling avg — no need to re-average years)
-      avgSavings = recentYears[0][1].ma12Lucro;
-    }
-  }
+  // Year-end patrimônio: prefer December, else last available month of year
+  const patByYear = {};
+  Object.entries(patByMonth).forEach(([m, v]) => {
+    const y = m.slice(0,4);
+    if (!patByYear[y] || m.slice(5,7) === '12') patByYear[y] = v;
+  });
 
-  // Find first year with data
-  const allYears = Object.keys(yearlyData).map(Number).sort();
-  const firstYear = allYears.length ? allYears[0] : curYear;
+  // avgSavings = most recent year's Média 12m Lucro (already a 12m rolling avg)
+  const recentEvYears = Object.entries(yearlyEv)
+    .filter(([y, d]) => parseInt(y) <= curYear && d.ma12Lucro !== null && d.ma12Lucro !== 0)
+    .sort(([a],[b]) => b.localeCompare(a));
+  const avgSavings = recentEvYears.length ? recentEvYears[0][1].ma12Lucro : 0;
+
+  // First year with any data
+  const allHistYears = [...new Set([
+    ...Object.keys(patByYear).map(Number),
+    ...Object.keys(yearlyEv).map(Number),
+  ])].sort();
+  const firstYear = allHistYears.length ? allHistYears[0] : curYear;
   const retYear   = curYear + yearsTotal;
 
   // Build rows
   const rows = [];
-  let projPat = patAtual; // starts from current patrimônio
+  let projPat = patAtual;
 
   for (let year = firstYear; year <= retYear; year++) {
     const age       = ageNow + (year - curYear);
@@ -12220,37 +12230,23 @@ async function aposCalc() {
     const isFuture  = year > curYear;
     const isRetired = age >= ageRet;
 
-    const yd = yearlyData[String(year)];
-
-    // Patrimônio real: from historical data (past + current year)
-    const patReal = (isPast || isCur) ? (yd?.total ?? null) : null;
-
-    // Poupança realizada: média 12m lucro de dezembro de cada ano passado
-    const savingReal = isPast ? (yd?.ma12Lucro ?? null) : null;
-
-    // Poupança necessária: só para anos futuros não aposentados
+    const yStr       = String(year);
+    const patRealVal = patByYear[yStr] ?? null;
+    const savingReal  = isPast ? (yearlyEv[yStr]?.ma12Lucro ?? null) : null;
     const savingNeeded = (isFuture && !isRetired) ? needPMT : null;
 
-    // % da meta
-    const refPat = isFuture ? projPat : (patReal ?? projPat);
-    const pctMeta = refPat / metaPatrimonio;
+    // patReal: historical for past years, patAtual for current year, null for future
+    const patReal = isPast ? patRealVal : isCur ? patAtual : null;
+    const pctMeta = (patReal ?? projPat) / metaPatrimonio;
 
-    rows.push({
-      year, age, isPast, isCur, isFuture, isRetired,
-      patReal,       // coluna "Patrimônio real" (passado)
-      projPat: isFuture ? projPat : null, // coluna "Patrimônio projetado" (futuro)
-      savingReal,    // poupança realizada (passado = média 12m dez)
-      savingNeeded,  // poupança necessária (futuro)
-      pctMeta,
-    });
+    rows.push({ year, age, isPast, isCur, isFuture, isRetired,
+      patReal, projPat: isFuture ? projPat : null,
+      savingReal, savingNeeded, pctMeta });
 
-    // Advance projPat for next year
+    // Advance projPat
     if (isPast) {
-      // Use actual patrimônio as base for next year if available
-      if (yd?.total != null) projPat = yd.total;
-      else projPat = projPat * (1 + rateReal);
+      projPat = patRealVal != null ? patRealVal : projPat * (1 + rateReal);
     } else if (isCur) {
-      // Current year: project from patAtual
       projPat = patAtual * (1 + rateReal) + avgSavings * 12;
     } else if (!isRetired) {
       projPat = projPat * (1 + rateReal) + avgSavings * 12;
@@ -12258,7 +12254,6 @@ async function aposCalc() {
       projPat = projPat * (1 + rateReal) - metaPatrimonio * rateReal;
     }
   }
-
   renderAposKPIs({ needPMT, metaPatrimonio, goalType, goalRaw, rateReal, yearsTotal, pvGrown, avgSavings });
   if (_aposView === 'table') renderAposTable(rows);
   else renderAposCharts(rows, metaPatrimonio);
@@ -12403,6 +12398,10 @@ function aposTglView(view) {
 
 async function aposInit() {
   aposLoadConfig();
+  // Ensure patrimônio tab data is loaded so _patTotalByMonth is available
+  if (!window._patTotalByMonth || Object.keys(window._patTotalByMonth).length === 0) {
+    try { await refreshPatrimonio(); } catch(e) {}
+  }
   aposCalc();
 }
 
