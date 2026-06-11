@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Cruzeiro — Gerador de Licenças</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 32px 16px; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 14px; padding: 32px; max-width: 560px; margin: 0 auto; }
+  .logo { font-size: 28px; font-weight: 900; color: #f9a825; margin-bottom: 4px; }
+  h1 { font-size: 18px; color: #60a5fa; margin-bottom: 4px; }
+  .sub { font-size: 13px; color: #64748b; margin-bottom: 28px; }
+  label { font-size: 12px; color: #94a3b8; display: block; margin-bottom: 5px; }
+  input { width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 14px; outline: none; margin-bottom: 16px; }
+  input:focus { border-color: #3b82f6; }
+  button { width: 100%; padding: 12px; border-radius: 8px; border: none; background: #004d40; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; margin-bottom: 16px; }
+  button:hover { background: #00695c; }
+  .result { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 16px; margin-bottom: 16px; display: none; }
+  .code { font-family: 'Courier New', monospace; font-size: 22px; font-weight: 700; color: #f9a825; letter-spacing: 2px; text-align: center; padding: 12px; background: #1a2332; border-radius: 6px; margin: 10px 0; }
+  .copy-btn { background: #1d4ed8; font-size: 13px; padding: 8px; margin: 0; }
+  .copy-btn:hover { background: #1e40af; }
+  .history { margin-top: 24px; }
+  .history h2 { font-size: 14px; color: #94a3b8; margin-bottom: 10px; border-top: 1px solid #334155; padding-top: 16px; }
+  .history-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: #0f172a; border-radius: 6px; margin-bottom: 6px; font-size: 12px; }
+  .history-email { color: #60a5fa; }
+  .history-code { font-family: monospace; color: #f9a825; font-size: 13px; }
+  .history-date { color: #64748b; font-size: 11px; }
+  .clear-btn { background: transparent; border: 1px solid #334155; color: #64748b; font-size: 11px; padding: 4px 10px; width: auto; margin: 0; }
+  .note { font-size: 11px; color: #64748b; line-height: 1.5; border-top: 1px solid #1e293b; padding-top: 12px; margin-top: 4px; }
+  .tag { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .tag-free { background: #052e16; color: #4ade80; }
+  .tag-paid { background: #1e3a5f; color: #60a5fa; }
+  .note-box { background: #1a2332; border-left: 3px solid #f9a825; padding: 10px 14px; border-radius: 0 6px 6px 0; margin-bottom: 20px; font-size: 12px; color: #94a3b8; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">C$</div>
+  <h1>Cruzeiro — Gerador de Licenças</h1>
+  <p class="sub">Uso exclusivo do administrador. Não compartilhe esta página.</p>
+
+  <div class="note-box">
+    Cada licença é <strong>vinculada ao email</strong> do usuário. O app valida o par email + código.<br>
+    Uma mesma licença funciona em quantos computadores o usuário tiver (sem limite de dispositivos).
+  </div>
+
+  <label>Email do usuário</label>
+  <input type="email" id="email-inp" placeholder="usuario@email.com" autocomplete="off">
+
+  <label>Tipo de licença</label>
+  <div style="display:flex;gap:10px;margin-bottom:16px">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#e2e8f0;margin:0">
+      <input type="radio" name="type" value="free" checked style="width:auto;margin:0"> 
+      <span class="tag tag-free">Gratuita</span> (amigos/família)
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#e2e8f0;margin:0">
+      <input type="radio" name="type" value="paid" style="width:auto;margin:0">
+      <span class="tag tag-paid">Paga</span> (cliente)
+    </label>
+  </div>
+
+  <label>Notas (opcional — só aparecem no histórico)</label>
+  <input type="text" id="notes-inp" placeholder="Ex: Primo João, comprou em 11/06/2026">
+
+  <button onclick="generate()">⚡ Gerar código de licença</button>
+
+  <div class="result" id="result">
+    <div style="font-size:12px;color:#94a3b8;margin-bottom:4px">Código gerado para <span id="res-email" style="color:#60a5fa"></span></div>
+    <div class="code" id="res-code"></div>
+    <button class="copy-btn" onclick="copyCode()">📋 Copiar código</button>
+    <div style="font-size:11px;color:#64748b;margin-top:4px">
+      Envie o email e o código acima para o usuário. Ele insere em <strong>Configurações → Licença → Ativar licença</strong>.
+    </div>
+  </div>
+
+  <div class="history">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="border:none;padding:0;margin:0">Histórico</h2>
+      <button class="clear-btn" onclick="clearHistory()">Limpar</button>
+    </div>
+    <div id="history-list" style="margin-top:10px"></div>
+    <div id="history-empty" style="font-size:12px;color:#475569;padding:8px 0">Nenhuma licença gerada ainda.</div>
+  </div>
+
+  <div class="note">
+    <strong>Segurança:</strong> os códigos são derivados do email via HMAC-SHA256 com chave privada.
+    Qualquer email sempre gera o mesmo código — não é necessário banco de dados.
+    A chave privada está em <code>src/main.js</code> (constante <code>LICENSE_SECRET</code>).
+    <br><br>
+    <strong>Limitação conhecida:</strong> quem descompilar o app pode extrair a <code>LICENSE_SECRET</code>
+    e gerar códigos para qualquer email. Para o seu uso atual (controle pessoal), isso é aceitável.
+  </div>
+</div>
+
+<script>
+// !! IMPORTANT: this must match LICENSE_SECRET in src/main.js exactly !!
+const LICENSE_SECRET = 'cruzeiro-lic-2026-thiago';
+
+async function hmacSha256(secret, message) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+async function generateCode(email) {
+  const raw   = (await hmacSha256(LICENSE_SECRET, email.toLowerCase().trim())).toUpperCase();
+  const chars = raw.replace(/[^A-Z0-9]/g,'').slice(0, 16);
+  return `${chars.slice(0,4)}-${chars.slice(4,8)}-${chars.slice(8,12)}-${chars.slice(12,16)}`;
+}
+
+async function generate() {
+  const email = document.getElementById('email-inp').value.trim();
+  const notes = document.getElementById('notes-inp').value.trim();
+  const type  = document.querySelector('input[name="type"]:checked').value;
+  if (!email || !email.includes('@')) { alert('Informe um email válido.'); return; }
+
+  const code = await generateCode(email);
+  document.getElementById('res-email').textContent = email;
+  document.getElementById('res-code').textContent  = code;
+  document.getElementById('result').style.display  = 'block';
+
+  // Save to localStorage history
+  const history = JSON.parse(localStorage.getItem('cruzeiro_lic_history') || '[]');
+  history.unshift({ email, code, type, notes, date: new Date().toLocaleDateString('pt-BR') });
+  localStorage.setItem('cruzeiro_lic_history', JSON.stringify(history.slice(0, 100)));
+  renderHistory();
+}
+
+function copyCode() {
+  const code = document.getElementById('res-code').textContent;
+  navigator.clipboard.writeText(code).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = '✅ Copiado!';
+    setTimeout(() => btn.textContent = '📋 Copiar código', 2000);
+  });
+}
+
+function renderHistory() {
+  const history = JSON.parse(localStorage.getItem('cruzeiro_lic_history') || '[]');
+  const el   = document.getElementById('history-list');
+  const emp  = document.getElementById('history-empty');
+  emp.style.display = history.length ? 'none' : '';
+  el.innerHTML = history.map(h => `
+    <div class="history-item">
+      <div>
+        <span class="tag ${h.type === 'free' ? 'tag-free' : 'tag-paid'}" style="margin-right:6px">${h.type === 'free' ? 'Grátis' : 'Paga'}</span>
+        <span class="history-email">${h.email}</span>
+        ${h.notes ? `<span style="color:#64748b;margin-left:6px;font-size:11px">— ${h.notes}</span>` : ''}
+      </div>
+      <div style="text-align:right">
+        <div class="history-code">${h.code}</div>
+        <div class="history-date">${h.date}</div>
+      </div>
+    </div>`).join('');
+}
+
+function clearHistory() {
+  if (confirm('Apagar todo o histórico?')) {
+    localStorage.removeItem('cruzeiro_lic_history');
+    renderHistory();
+  }
+}
+
+// Allow Enter key
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.activeElement?.id === 'email-inp') generate();
+});
+
+renderHistory();
+</script>
+</body>
+</html>

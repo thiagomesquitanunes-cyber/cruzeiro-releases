@@ -1,5 +1,5 @@
 {
-  "tourDone": true,
+  "tourDone": false,
   "categories": [],
   "language": "pt",
   "benchmarks": {
@@ -7,9 +7,5 @@
     "ibov": {},
     "lastUpdate": null
   },
-  "firstRun": "2026-06-11",
-  "recoveryOtpHash": "6c08068c8b6c1fc502833f96c8ab056d283a8b237e366634c6281ceac4c9b9b9",
-  "recoveryOtpExpires": 1781199194125,
-  "hasEncryptedDB": true,
-  "recoveryEmail": "thiagomesquitanunes@gmail.com"
+  "firstRun": "2026-06-11"
 }

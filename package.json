@@ -1,6 +1,6 @@
 {
   "name": "cruzeiro",
-  "version": "4.1.16",
+  "version": "4.1.28",
   "description": "Gestão financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
@@ -84,7 +84,7 @@
       "icon": "assets/icon.icns",
       "target": [
         {
-          "target": "dmg",
+          "target": "zip",
           "arch": [
             "x64",
             "arm64"
@@ -92,23 +92,7 @@
         }
       ],
       "category": "public.app-category.finance",
-      "artifactName": "Cruzeiro-${version}-${arch}.dmg"
-    },
-    "dmg": {
-      "title": "Cruzeiro ${version}",
-      "icon": "assets/icon.icns",
-      "contents": [
-        {
-          "x": 130,
-          "y": 220
-        },
-        {
-          "x": 410,
-          "y": 220,
-          "type": "link",
-          "path": "/Applications"
-        }
-      ]
+      "artifactName": "Cruzeiro-${version}-${arch}-mac.zip"
     }
   }
 }

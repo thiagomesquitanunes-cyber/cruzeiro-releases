@@ -161,6 +161,7 @@ let colConfig = [
 
 // ── INIT ──
 (async () => {
+  try {
   await fetchFxRates();
   await loadAccounts();
   await loadOverviewSettings();
@@ -190,6 +191,7 @@ let colConfig = [
       console.error('[DB Error]', data.message);
     });
   } catch(e) {}
+
 
   // No aggressive focus recovery — it causes more freezes than it fixes
 
@@ -265,6 +267,17 @@ let colConfig = [
   setDefaultDates();
   initSidebarResize();
   refreshUndoBtn();
+  } catch(e) {
+    console.error('[Cruzeiro] Init error:', e);
+    // Show error in UI rather than blank screen
+    const body = document.body;
+    if (body) {
+      const errDiv = document.createElement('div');
+      errDiv.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1e293b;color:#f87171;padding:32px;border-radius:12px;font-family:monospace;max-width:600px;z-index:9999;white-space:pre-wrap';
+      errDiv.textContent = 'Erro ao iniciar o Cruzeiro:\n\n' + (e.stack || e.message);
+      body.appendChild(errDiv);
+    }
+  }
 })();
 
 function initSidebarResize() {
@@ -3084,19 +3097,127 @@ async function doImportFromTable() {
     memo:     r.memo || '',
   })).filter(p => p.assetId && p.month);
 
+  // ── Round 2: memo+category duplicates (recurring placeholders with variable amount) ──
+  try {
+    const memoDupResult = await ff.bankCheckMemoDups({
+      accountId,
+      rows: finalRows.map(r => ({ dateISO: r.dateISO, memo: r.memo, category: r.category || '' })),
+    });
+    if (memoDupResult?.matches?.length > 0) {
+      showMemoDupUI(memoDupResult.matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks);
+      return; // user decides; finishMemoDupImport continues the flow
+    }
+  } catch(e) { /* on error, proceed without round-2 check */ }
+
+  await finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks);
+}
+
+// Shared tail of the import flow (called directly or after memo-dup resolution)
+async function finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks) {
   await doImport(finalRows, updatedInstallments, accountId, checkDailySaldo);
 
-  // After import, create pat_transactions for linked rows
-  for (const p of patLinks) {
+  for (const p of (patLinks || [])) {
     await ff.patTxSave({
       id: null, assetId: p.assetId, month: p.month,
       tx_type: p.txType, total_value: p.amount, notes: p.memo || null,
     }).catch(() => {});
   }
-  if (patLinks.length) {
+  if (patLinks?.length) {
     _pat.txAll = await ff.patTxAll().catch(() => _pat.txAll);
     if (currentPage === 'patrimonio') refreshPatrimonioTable();
   }
+}
+
+// ── Round-2 dup resolution UI: same memo+category, variable amount ──
+function showMemoDupUI(matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks) {
+  const dupMap = {};
+  matches.forEach(m => { dupMap[m.rowIndex] = m.existing || []; });
+
+  const preview = G('bank-preview');
+  const fmtDate = iso => (iso || '').split('-').reverse().join('/');
+
+  preview.innerHTML = `
+    <div style="margin-bottom:10px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:4px">
+        🔁 ${matches.length} lançamento(s) futuro(s) correspondente(s)
+      </div>
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">
+        Estas linhas têm o <strong>mesmo memorando e categoria</strong> de lançamentos futuros já registrados
+        (ex: recorrências com valor variável), com até 7 dias de diferença.
+        <br><strong>🔄 Substituir</strong>: apaga o lançamento futuro e importa o valor real (recomendado)
+        &nbsp;·&nbsp; <strong>✅ Manter ambos</strong> &nbsp;·&nbsp; <strong>🚫 Pular</strong>: mantém o futuro, descarta a importação.
+      </div>
+
+      <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px">
+        <div style="display:grid;grid-template-columns:1fr 1fr 150px;background:var(--bg4);border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">
+          <div style="padding:8px 10px;border-right:1px solid var(--border2)">🆕 Importando (valor real)</div>
+          <div style="padding:8px 10px;border-right:1px solid var(--border2);background:#eff6ff">📅 Lançamento futuro existente</div>
+          <div style="padding:8px 10px;text-align:center">Ação</div>
+        </div>
+        ${matches.map(m => {
+          const r  = finalRows[m.rowIndex];
+          const ex = m.existing[0];
+          const amtCls = v => v < 0 ? 'color:#dc2626' : 'color:#16a34a';
+          return `<div style="display:grid;grid-template-columns:1fr 1fr 150px;border-bottom:1px solid var(--border)">
+            <div style="padding:7px 10px;border-right:1px solid var(--border2);font-size:12px">
+              <div style="color:var(--text3);font-size:10px">${fmtDate(r.dateISO)}</div>
+              <div style="font-weight:500">${esc(r.memo || '')}</div>
+              <div style="${amtCls(r.amount)};font-family:'DM Mono',monospace">${fmtBRL(r.amount)}</div>
+            </div>
+            <div style="padding:7px 10px;border-right:1px solid var(--border2);font-size:12px;background:#f8fafc">
+              <div style="color:var(--text3);font-size:10px">${fmtDate(ex.date)} · não conferido</div>
+              <div style="color:#1d4ed8">${esc(ex.memo || '')}</div>
+              <div style="${amtCls(ex.amount)};font-family:'DM Mono',monospace">${fmtBRL(ex.amount)}</div>
+            </div>
+            <div style="padding:6px 8px;display:flex;flex-direction:column;gap:3px;justify-content:center;font-size:11px">
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#1d4ed8;font-weight:500">
+                <input type="radio" name="mdup-${m.rowIndex}" value="replace" checked> 🔄 Substituir
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#16a34a">
+                <input type="radio" name="mdup-${m.rowIndex}" value="both"> ✅ Manter ambos
+              </label>
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#dc2626">
+                <input type="radio" name="mdup-${m.rowIndex}" value="skip"> 🚫 Pular
+              </label>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn primary" onclick="confirmMemoDupImport()">✓ Confirmar e importar</button>
+        <button class="btn" onclick="cancelBankImport()">Cancelar</button>
+      </div>
+    </div>`;
+
+  preview._memoDup = { matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks };
+  preview.style.display = 'block';
+  preview.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function confirmMemoDupImport() {
+  const preview = G('bank-preview');
+  const ctx = preview?._memoDup;
+  if (!ctx) return;
+  const { matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks } = ctx;
+
+  const skipIdx = new Set();
+  for (const m of matches) {
+    const action = document.querySelector(`input[name="mdup-${m.rowIndex}"]:checked`)?.value || 'replace';
+    if (action === 'replace') {
+      // Delete the existing future placeholder(s), import the real one
+      for (const ex of m.existing) {
+        try { await ff.deleteTx(ex.id); } catch(e) {}
+      }
+    } else if (action === 'skip') {
+      skipIdx.add(m.rowIndex);
+    }
+    // 'both': nothing to do — import alongside the placeholder
+  }
+
+  const rowsToImport = finalRows.filter((_, i) => !skipIdx.has(i));
+  preview._memoDup = null;
+  await finishImportWithPatLinks(rowsToImport, updatedInstallments, accountId, checkDailySaldo, patLinks);
 }
 
 async function doImport(finalRows, parcelInstallments, accountId, checkDailySaldo) {

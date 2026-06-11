@@ -25,6 +25,7 @@ function getDbPath() {
 }
 
 let SQL, db, win;
+let _loggingIn       = false; // true while transitioning from login to main window
 let _encryptedDBBuf  = null;  // raw encrypted buffer waiting for password
 let _dbPendingDecrypt = false; // true when DB is encrypted and not yet unlocked
 const dbPath = (() => {
@@ -1700,30 +1701,30 @@ function createLoginWindow() {
   fs.writeFileSync(tmpPath, html);
   loginWin.loadFile(tmpPath);
   loginWin.once('ready-to-show', () => loginWin.show());
-  loginWin.on('closed', () => { if (!win || !win.isVisible()) app.quit(); });
+  loginWin.on('closed', () => { console.log('[loginWin.closed] win=', !!win, '_loggingIn=', _loggingIn); if (!win && !_loggingIn) { console.log('[loginWin.closed] calling app.quit()'); app.quit(); } });
 }
 
-function createWindow() {
+function createWindow(showImmediately = false) {
   win = new BrowserWindow({
     width:1280, height:800, minWidth:900, minHeight:600,
-    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     webPreferences: { preload: path.join(__dirname,'preload.js'), contextIsolation:true, nodeIntegration:false },
-    title:'Cruzeiro', show:false,
+    title:'Cruzeiro',
+    show: showImmediately,
+    backgroundColor: '#0f172a', // prevent white flash
   });
   win.loadFile(path.join(__dirname,'index.html'));
-  win.once('ready-to-show', () => {
-    const settings = loadSettings();
-    if (!settings.passwordHash && !settings.hasEncryptedDB && !_dbPendingDecrypt) {
-      win.show();
-      setupAutoUpdater();
-    } else {
-      // Password set — window is pre-loaded, will be shown by login:ok
-      // If login:ok already fired before ready-to-show, show now
-      if (!loginWin) {
-        win.show();
-        setupAutoUpdater();
-      }
+  if (!showImmediately) {
+    win.once('ready-to-show', () => win.show());
+  }
+  // Log renderer errors instead of crashing
+  win.webContents.on('render-process-gone', (e, details) => {
+    console.error('[Renderer crashed]', details.reason, details.exitCode);
+    if (details.reason !== 'clean-exit') {
+      dialog.showErrorBox('Erro no app', `O app encontrou um erro: ${details.reason}\nCódigo: ${details.exitCode}`);
     }
+  });
+  win.webContents.on('did-fail-load', (e, code, desc) => {
+    console.error('[Load failed]', code, desc);
   });
   win.on('closed', () => { if (loginWin) loginWin.close(); });
 }
@@ -1743,14 +1744,14 @@ app.whenReady().then(async () => {
   // Show login if DB is encrypted OR legacy passwordHash exists
   if (settings.hasEncryptedDB || _dbPendingDecrypt || settings.passwordHash) {
     createLoginWindow();
-    createWindow(); // pre-load in background, shown after successful login
+    // Don't pre-create main window — create it AFTER login so it loads with real DB
   } else {
     createWindow();
     setupAutoUpdater();
   }
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length===0) createWindow(); });
 });
-app.on('window-all-closed', () => { if (process.platform!=='darwin') app.quit(); });
+app.on('window-all-closed', () => { console.log('[window-all-closed] platform=', process.platform, '_loggingIn=', _loggingIn); if (process.platform!=='darwin' && !_loggingIn) app.quit(); });
 
 // ── AUTO UPDATE (electron-updater) ──
 let _autoUpdaterInitialized = false;
@@ -1848,6 +1849,30 @@ ipcMain.handle('import-defaults:save', (_, defaults) => {
 });
 // The renderer reads the file using FileReader + XLSX (already in index.html via CDN)
 // and sends parsed rows here for DB insertion with duplicate detection.
+// ── Round-2 duplicate check: same memo + category, ±7 days, any amount ──
+// Targets recurring placeholders (uncleared future txns) whose amount varies
+// month to month (condomínio, contas de consumo, etc).
+ipcMain.handle('bank:check-memo-dups', (_, { accountId, rows }) => {
+  const matches = [];
+  for (let i = 0; i < (rows || []).length; i++) {
+    const r = rows[i];
+    if (!r || !r.memo || !r.dateISO) continue;
+    try {
+      const existing = all(
+        `SELECT id, date, amount, memo, category FROM transactions
+         WHERE account_id=? AND cleared=0
+           AND LOWER(TRIM(memo)) = LOWER(TRIM(?))
+           AND LOWER(TRIM(COALESCE(category,''))) = LOWER(TRIM(?))
+           AND ABS(julianday(date) - julianday(?)) <= 7
+         LIMIT 3`,
+        [accountId, r.memo, r.category || '', r.dateISO]
+      );
+      if (existing.length) matches.push({ rowIndex: i, existing });
+    } catch(e) { /* skip row on error */ }
+  }
+  return { matches };
+});
+
 ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, dryRun }) => {
   // dryRun: only check for dups, don't insert anything
   // skipIds = array of row indices the user chose to skip (confirmed duplicates)
@@ -1865,11 +1890,12 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
 
     if (skipSet.has(i)) continue; // user chose to skip this one
 
-    // Check DB for same account + amount within ±7 days (handles banking delays)
+    // Check DB for same account + similar amount (±R$1,00) within ±7 days
+    // Tolerance of R$1 catches last-installment cent adjustments
     const existing = all(
       `SELECT id, memo FROM transactions WHERE account_id=?
        AND ABS(julianday(date) - julianday(?)) <= 7
-       AND ABS(amount-?)<=0.01 LIMIT 3`,
+       AND ABS(amount-?)<=1.00 LIMIT 3`,
       [accountId, date, r.amount]
     );
 
@@ -3624,6 +3650,14 @@ ipcMain.handle('export:data', () => {
   }
 });
 
+// Alias for legacy/mismatched preload versions
+ipcMain.handle('settings:save', (_, data) => {
+  const s = loadSettings();
+  if (data && typeof data === 'object') Object.assign(s, data);
+  saveSettings(s);
+  return { ok: true };
+});
+
 ipcMain.handle('settings:save-data', (_, data) => {
   const s = loadSettings();
   Object.assign(s, data);
@@ -3924,8 +3958,33 @@ ipcMain.handle('settings:check-password', (_, pw) => {
 });
 
 ipcMain.handle('settings:login-ok', () => {
-  if (loginWin) { loginWin.destroy(); loginWin = null; }
-  if (win) { win.show(); setupAutoUpdater(); }
+  console.log('[login-ok] START, win=', !!win, 'loginWin=', !!loginWin);
+  _loggingIn = true;
+  if (loginWin) {
+    loginWin.destroy();
+    loginWin = null;
+    console.log('[login-ok] loginWin destroyed');
+  }
+  console.log('[login-ok] about to createWindow, app.isReady=', app.isReady());
+  try {
+    if (!win) {
+      createWindow(true);
+      console.log('[login-ok] createWindow called, win=', !!win);
+      if (win) {
+        console.log('[login-ok] win.isDestroyed=', win.isDestroyed(), 'win.isVisible=', win.isVisible());
+      }
+      try { setupAutoUpdater(); } catch(e) { console.error('[login-ok] autoUpdater:', e.message); }
+    } else {
+      win.show();
+      try { setupAutoUpdater(); } catch(e) {}
+      win.webContents.send('db:reloaded');
+    }
+  } catch(e) {
+    console.error('[login-ok] FATAL error:', e);
+  } finally {
+    _loggingIn = false;
+    console.log('[login-ok] END');
+  }
   return { ok: true };
 });
 
