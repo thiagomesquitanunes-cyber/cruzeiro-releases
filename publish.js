@@ -66,6 +66,17 @@ if (!isRepo) {
 }
 
 try {
+  // Check git identity — required for commit
+  const gitEmail = runSilent('git config --global user.email');
+  const gitName  = runSilent('git config --global user.name');
+  if (!gitEmail || !gitName) {
+    console.error('\n❌ Identidade git não configurada.');
+    console.error('   Execute estes dois comandos e tente novamente:\n');
+    console.error('   git config --global user.email "seu@email.com"');
+    console.error('   git config --global user.name "Seu Nome"\n');
+    process.exit(1);
+  }
+
   // Stage and commit
   run('git add -A');
   const status = runSilent('git status --short');
