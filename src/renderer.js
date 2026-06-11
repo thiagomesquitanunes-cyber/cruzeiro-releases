@@ -1256,15 +1256,21 @@ function renderLedgerBody(txs, startingBalance = 0) {
     return;
   }
 
+  // Tiebreaker within same date: income (positive) before expenses (negative), then by id
+  const sameDateSort = (a, b) =>
+    a.date.localeCompare(b.date) ||
+    (a.amount >= 0 ? 0 : 1) - (b.amount >= 0 ? 0 : 1) ||
+    a.id - b.id;
+
   // Compute running balance from startingBalance, sorted chronologically
-  const sorted = [...txs].sort((a,b) => a.date.localeCompare(b.date) || a.id-b.id);
+  const sorted = [...txs].sort(sameDateSort);
   const balMap = {};
   let running = startingBalance;
   sorted.forEach(t => { running += t.amount; balMap[t.id] = running; });
 
   // Group by past/future
-  const past   = txs.filter(t => t.date <= today).sort((a,b) => a.date.localeCompare(b.date) || a.id-b.id);
-  const future = txs.filter(t => t.date >  today).sort((a,b) => a.date.localeCompare(b.date) || a.id-b.id);
+  const past   = txs.filter(t => t.date <= today).sort(sameDateSort);
+  const future = txs.filter(t => t.date >  today).sort(sameDateSort);
 
   let ordered;
   if (sortOrder === 'future') {
