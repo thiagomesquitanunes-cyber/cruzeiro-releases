@@ -304,7 +304,7 @@ function save() {
   try {
     const data = db.export();
     const plain = Buffer.from(data);
-    const toWrite = _dbKey ? encryptDB(plain, _dbKey) : plain;
+    const toWrite = _dbKey ? encryptDB(plain, _dbKey, _dbSalt) : plain;
     fs.writeFileSync(getDbPath(), toWrite);
   } catch(e) {
     console.error('[Cruzeiro] Erro ao salvar banco:', e.message);
@@ -819,6 +819,19 @@ function migrateRecurring() {
   try { db.run('ALTER TABLE recurring ADD COLUMN end_date TEXT'); } catch(e) {}
   // Fix: rename category 'caixa' → 'valor_em_caixa' in inv_assets (modal used wrong value)
   try { db.run("UPDATE inv_assets SET category='valor_em_caixa' WHERE category='caixa'"); } catch(e) {}
+  // Fix: remove duplicate uncleared past recurring transactions (keep cleared ones, delete extra uncleared)
+  // This cleans up the bug where syncRecurringTxns generated entries from next_date instead of today
+  try {
+    db.run(`DELETE FROM transactions
+      WHERE cleared=0
+        AND recurring_id IS NOT NULL
+        AND date < date('now')
+        AND id NOT IN (
+          SELECT MIN(id) FROM transactions
+          WHERE cleared=0 AND recurring_id IS NOT NULL AND date < date('now')
+          GROUP BY recurring_id, date
+        )`);
+  } catch(e) {}
   // Track dates manually deleted from a recurring series (so syncRecurring respects them)
   try {
     db.run(`CREATE TABLE IF NOT EXISTS recurring_excludes (
@@ -853,16 +866,24 @@ function nextOccurrence(dateStr, freq) {
 }
 
 function generateFutureDates(rec) {
-  const today   = new Date().toISOString().slice(0,10);
-  // Horizon: end_date if set, otherwise 90 days ahead
+  const today  = new Date().toISOString().slice(0,10);
   const cutoff = addDays(today, 90);
   const horizon = rec.end_date ? (rec.end_date < cutoff ? rec.end_date : cutoff) : cutoff;
-  const dates   = [];
+  const dates  = [];
+  // Start from next_date, but advance past any dates before today
   let cur = rec.next_date;
-  while (cur <= horizon && dates.length < 200) {
+  // Fast-forward to first occurrence >= today
+  let safety = 0;
+  while (cur < today && safety++ < 500) {
+    const next = nextOccurrence(cur, rec.frequency);
+    if (next <= cur) break;
+    cur = next;
+  }
+  // Generate future dates up to horizon
+  while (cur <= horizon && dates.length < 12) { // max 12 = ~1 year of monthly
     dates.push(cur);
     const next = nextOccurrence(cur, rec.frequency);
-    if (next <= cur) break; // safety
+    if (next <= cur) break;
     cur = next;
   }
   return dates;
@@ -876,10 +897,8 @@ function syncRecurringTxns(rec) {
     rows.forEach(r => excludedDates.add(r.date));
   } catch(e) {}
 
-  // Remove all future uncleared transactions for this recurring
+  // Remove ALL uncleared future transactions for this recurring (including past-next_date)
   run('DELETE FROM transactions WHERE recurring_id=? AND cleared=0 AND date>=date("now")', [rec.id]);
-  // Also remove matching transfer partner legs for those deleted
-  // (they have a transfer_id but no recurring_id — find via memo+date+account)
 
   // Insert fresh, skipping excluded dates
   const dates = generateFutureDates(rec);
@@ -1369,7 +1388,8 @@ function hashPassword(pw) {
 const DB_MAGIC  = Buffer.from('CRUZEIRO1'); // 9 bytes — detects encrypted files
 const REC_MAGIC = Buffer.from('CRUZEROREC');// 10 bytes — recovery file marker
 
-let _dbKey           = null;  // AES-256 key in memory, never on disk
+let _dbKey           = null;  // AES-256 key
+let _dbSalt          = null;  // salt used to derive _dbKey (must match salt in encrypted file)in memory, never on disk
 
 // ── Key derivation ──────────────────────────────────────────────────────
 function deriveKey(password, salt, iterations = 100_000) {
@@ -1390,13 +1410,15 @@ function getDeviceId() {
 }
 
 // ── AES-256-GCM encrypt/decrypt ─────────────────────────────────────────
-function aesEncrypt(plainBuf, key, magic = DB_MAGIC) {
-  const salt   = crypto.randomBytes(32);
-  const iv     = crypto.randomBytes(12);
+function aesEncrypt(plainBuf, key, magic = DB_MAGIC, salt = null) {
+  // salt must be the SAME salt used to derive the key via deriveKey()
+  // If not provided, generate one — but then the caller must re-derive the key from it
+  const s    = salt || crypto.randomBytes(32);
+  const iv   = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  const enc    = Buffer.concat([cipher.update(plainBuf), cipher.final()]);
-  const tag    = cipher.getAuthTag(); // 16 bytes
-  return Buffer.concat([magic, salt, iv, tag, enc]);
+  const enc  = Buffer.concat([cipher.update(plainBuf), cipher.final()]);
+  const tag  = cipher.getAuthTag();
+  return Buffer.concat([magic, s, iv, tag, enc]);
 }
 
 function aesDecrypt(encBuf, key, magic = DB_MAGIC) {
@@ -1415,8 +1437,9 @@ function aesDecrypt(encBuf, key, magic = DB_MAGIC) {
 }
 
 // ── DB-level helpers ────────────────────────────────────────────────────
-function encryptDB(plainBuf, key) {
-  return aesEncrypt(plainBuf, key, DB_MAGIC);
+function encryptDB(plainBuf, key, salt) {
+  // salt must be the same salt that was used to derive key
+  return aesEncrypt(plainBuf, key, DB_MAGIC, salt);
 }
 
 function decryptDBWithPassword(encBuf, password) {
@@ -1426,7 +1449,8 @@ function decryptDBWithPassword(encBuf, password) {
   const key  = deriveKey(password, salt);
   // aesDecrypt will throw if wrong password (GCM auth tag fails)
   const plain = aesDecrypt(encBuf, key, DB_MAGIC);
-  _dbKey = key; // cache for subsequent saves
+  _dbKey  = key;   // cache for subsequent saves
+  _dbSalt = salt;  // same salt that's in the file — needed for save()
   return plain;
 }
 
@@ -3657,10 +3681,11 @@ ipcMain.handle('settings:set-password', async (_, { current, newPassword, email 
     // Write emergency plaintext backup before encrypting
     writeEmergencyBackup(plain);
 
-    // Derive new key and encrypt DB
+    // Derive new key — same salt goes into both key derivation and the encrypted file
     const newSalt = crypto.randomBytes(32);
     const newKey  = deriveKey(newPassword, newSalt);
-    _dbKey = newKey;
+    _dbKey  = newKey;
+    _dbSalt = newSalt; // save() will pass this to encryptDB so salts match
 
     // Save encrypted DB immediately
     save();
