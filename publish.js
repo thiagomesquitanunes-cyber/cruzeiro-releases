@@ -66,6 +66,18 @@ if (!isRepo) {
 }
 
 try {
+  // Generate package-lock.json if missing (required by GitHub Actions npm ci)
+  const lockPath = path.join(__dirname, 'package-lock.json');
+  if (!fs.existsSync(lockPath)) {
+    console.log('  📦 Gerando package-lock.json...');
+    try {
+      execSync('npm install --package-lock-only', { stdio: 'pipe' });
+      console.log('  ✅ package-lock.json gerado.\n');
+    } catch(e) {
+      console.log('  ⚠️  Não foi possível gerar package-lock.json — continuando sem ele.\n');
+    }
+  }
+
   // Check git identity — required for commit
   const gitEmail = runSilent('git config --global user.email');
   const gitName  = runSilent('git config --global user.name');
@@ -77,8 +89,29 @@ try {
     process.exit(1);
   }
 
+  // Safety: never commit .env or secret files
+  const dangerFiles = ['.env', '.env.local', '.env.production'];
+  dangerFiles.forEach(f => {
+    const fp = path.join(__dirname, f);
+    if (fs.existsSync(fp)) {
+      // Make sure it's in .gitignore before staging
+      const gi = path.join(__dirname, '.gitignore');
+      const giContent = fs.existsSync(gi) ? fs.readFileSync(gi,'utf8') : '';
+      if (!giContent.includes(f) && !giContent.includes('.env')) {
+        fs.appendFileSync(gi, '\n.env\n.env.*\n');
+        console.log(`  ✅ ${f} adicionado ao .gitignore`);
+      }
+    }
+  });
+
   // Stage and commit
   run('git add -A');
+  // Verify .env is NOT staged
+  const staged = runSilent('git diff --cached --name-only') || '';
+  if (staged.includes('.env')) {
+    run('git reset HEAD .env');
+    console.log('  ⚠️  .env removido do staging (não será commitado)\n');
+  }
   const status = runSilent('git status --short');
   if (status) {
     run(`git commit -m "Release ${tag}"`);
@@ -96,6 +129,13 @@ try {
 
   // Create and push tag
   run(`git tag ${tag}`);
+  // Pull remote changes first (in case remote has commits we don't have locally)
+  try {
+    runSilent('git pull origin main --rebase --allow-unrelated-histories');
+    console.log('  ✅ Sincronizado com remote.\n');
+  } catch(e) {
+    console.log('  (pull ignorado — repositório novo ou sem histórico remoto)\n');
+  }
   run('git push origin HEAD --set-upstream');
   run(`git push origin ${tag}`);
 

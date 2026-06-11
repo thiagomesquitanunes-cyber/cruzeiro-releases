@@ -3,14 +3,13 @@ name: Build & Publish Cruzeiro
 on:
   push:
     tags:
-      - 'v*'          # Triggered by any tag like v4.0.16
-  workflow_dispatch:  # Manual trigger from GitHub UI
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
-  contents: write     # Required to create GitHub Releases
+  contents: write
 
 jobs:
-  # ── Windows build (runs on Windows runner) ──────────────────────────────
   build-windows:
     name: Build Windows
     runs-on: windows-latest
@@ -21,18 +20,16 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '22'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Build & publish Windows
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: npm run publish:win
 
-  # ── macOS build (runs on macOS runner) ──────────────────────────────────
   build-macos:
     name: Build macOS
     runs-on: macos-latest
@@ -43,15 +40,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: '22'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Build & publish macOS (x64 + arm64)
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          # Code signing disabled — users can still open via right-click → Open
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npm run publish:mac
