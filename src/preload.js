@@ -138,6 +138,7 @@ const api = {
   evolucaoSummary:    (o)  => ipcRenderer.invoke('evolucao:monthly-summary', o),
   evolucaoByCat:      (o)  => ipcRenderer.invoke('evolucao:monthly-by-category', o),
   reportMonthly:  (opts)  => ipcRenderer.invoke('report:monthly', opts),
+  aposYearlyData: ()      => ipcRenderer.invoke('apos:yearly-data'),
   reportMonthlyByCategory: (opts) => ipcRenderer.invoke('report:monthly-by-category', opts),
   reportNetWorth: (opts)  => ipcRenderer.invoke('report:net-worth', opts),
   reportNetWorthHistory: () => ipcRenderer.invoke('report:net-worth-history'),

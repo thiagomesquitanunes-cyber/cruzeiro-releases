@@ -1,6 +1,31 @@
+# Dependencies (generated locally, not needed in repo)
 node_modules/
-.env
-*.db
-*.db-journal
-backups/
+
+# Build output
 dist/
+out/
+
+# User data — never commit these
+*.db
+*_recovery.enc
+*_emergency.db.bak
+backups/
+cruzeiro_data*.json
+_settings.json
+_broker_mappings.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# NOTE: package-lock.json is intentionally NOT ignored
+# It must be committed so GitHub Actions can use npm ci
+
+# Secrets — NEVER commit these
+.env
+.env.*
+*.env
