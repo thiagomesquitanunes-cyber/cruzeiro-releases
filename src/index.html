@@ -1,0 +1,2336 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src https://api.exchangerate-api.com https://open.er-api.com https://olinda.bcb.gov.br https://api.bcb.gov.br https://api.emailjs.com;">
+<title>Cruzeiro</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root {
+  --bg:        #f0f4f8;
+  --bg2:       #ffffff;
+  --bg3:       #f5f7fa;
+  --bg4:       #e8edf3;
+  --border:    #d0d7e2;
+  --border2:   #b8c2d0;
+  --text:      #1a2332;
+  --text2:     #4a5568;
+  --text3:     #8a96a8;
+  --accent:    #2563eb;
+  --accent-bg: #eff6ff;
+  --accent-lt: #dbeafe;
+  --green:     #16a34a;
+  --green-bg:  #f0fdf4;
+  --green-lt:  #dcfce7;
+  --red:       #dc2626;
+  --red-bg:    #fef2f2;
+  --red-lt:    #fee2e2;
+  --warn:      #d97706;
+  --warn-bg:   #fffbeb;
+  --future-bg: #fafbfc;
+  --future-text: #9aa5b4;
+  --sidebar-w: 240px;
+  --topbar-h:  52px;
+  --radius:    6px;
+  --radius-lg: 10px;
+  --font-base: 15px;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Segoe UI',system-ui,sans-serif;font-size:var(--font-base);color:var(--text);background:var(--bg);height:100vh;display:flex;overflow:hidden;}
+
+/* ── SIDEBAR ── */
+.sidebar{width:var(--sidebar-w);height:100vh;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto;position:relative;min-width:160px;max-width:420px;}
+.sidebar-resize{position:absolute;right:-3px;top:0;width:6px;height:100%;cursor:col-resize;z-index:50;background:transparent;}
+.sidebar-resize:hover,.sidebar-resize.dragging{background:var(--accent);opacity:.5;}
+.sidebar-logo{padding:14px 14px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;}
+.logo-mark{width:36px;height:36px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.logo-mark svg{width:15px;height:15px;fill:#fff;}
+.logo-text h1{font-size:15px;font-weight:700;color:var(--text);}
+.logo-text p{font-size:11px;color:var(--text3);}
+
+.nav-section{font-size:10px;font-weight:700;color:var(--text3);letter-spacing:.8px;text-transform:uppercase;padding:12px 14px 4px;}
+.nav-item{display:flex;align-items:center;gap:8px;padding:7px 10px;margin:1px 5px;border-radius:5px;cursor:pointer;font-size:13px;font-weight:400;color:var(--text2);transition:all .1s;}
+.nav-item:hover{background:var(--bg3);color:var(--text);}
+.nav-item.active{background:var(--accent-bg);color:var(--accent);font-weight:600;}
+.nav-item .icon{font-size:14px;width:18px;text-align:center;flex-shrink:0;}
+.nav-bal{margin-left:auto;font-size:11px;font-family:'DM Mono',monospace;font-weight:500;white-space:nowrap;padding-left:4px;}
+.nav-bal.pos{color:var(--green);}
+.nav-bal.neg{color:var(--red);}
+.nav-bal.zero{color:var(--text3);}
+.sidebar-actions{padding:10px 8px;border-top:1px solid var(--border);display:flex;gap:5px;}
+
+/* ── MAIN ── */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);}
+.topbar{height:var(--topbar-h);padding:0 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0;background:var(--bg2);}
+.topbar-title{font-size:17px;font-weight:700;flex:1;color:var(--text);}
+.page{flex:1;overflow-y:auto;padding:20px;display:none;}
+.page.active{display:block;}
+
+/* ── STATS ── */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;}
+.stat-lbl{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;font-weight:600;}
+.stat-val{font-size:19px;font-weight:700;font-family:'DM Mono',monospace;}
+.stat-val.green{color:var(--green);}
+.stat-val.red{color:var(--red);}
+.stat-val.accent{color:var(--accent);}
+.stat-sub{font-size:11px;color:var(--text3);margin-top:3px;}
+
+/* ── TABLE ── */
+.tbl-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;}
+.tbl-header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;background:var(--bg2);}
+.tbl-header h3{font-size:14px;font-weight:600;flex:1;}
+
+/* Resizable/reorderable table */
+.tbl-outer{overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 280px);}
+#ev-table th{background:var(--bg3);padding:8px 12px;text-align:left;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.4px;border-bottom:2px solid var(--border2);position:sticky;top:0;z-index:2;white-space:nowrap;}
+#ev-table td{padding:6px 12px;border-bottom:1px solid var(--border);font-size:12px;}
+#ev-table th.right,#ev-table td.right{text-align:right;}
+#ev-table tr:hover td{background:var(--accent-lt);}
+table.ledger{width:100%;border-collapse:collapse;font-size:14px;table-layout:fixed;}
+table.ledger thead{position:sticky;top:0;z-index:10;}
+table.ledger thead th{
+  background:var(--bg3);padding:8px 10px;
+  font-size:12px;font-weight:700;color:var(--text2);
+  text-align:left;border-bottom:2px solid var(--border2);
+  white-space:nowrap;user-select:none;
+  position:relative;overflow:hidden;
+}
+table.ledger thead th.sortable{cursor:pointer;}
+table.ledger thead th.sortable:hover{background:var(--bg4);}
+table.ledger thead th.sorted{color:var(--accent);}
+table.ledger thead th .sort-arrow{font-size:10px;margin-left:3px;}
+
+/* Column resize handle */
+.col-resize{position:absolute;right:0;top:0;width:5px;height:100%;cursor:col-resize;background:transparent;}
+.col-resize:hover,.col-resize.dragging{background:var(--accent);}
+
+/* Drag-to-reorder */
+table.ledger thead th.drag-over{background:var(--accent-lt);}
+
+table.ledger tbody td{
+  padding:7px 10px;border-bottom:1px solid var(--border);
+  vertical-align:middle;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+table.ledger tbody tr:last-child td{border-bottom:none;}
+table.ledger tbody tr:hover td{background:#f8fafc;}
+table.ledger tbody tr.selected td{background:var(--accent-lt);}
+
+/* Future transactions */
+table.ledger tbody tr.future td{color:var(--future-text);background:var(--future-bg);}
+table.ledger tbody tr.future td .amt-exp{color:#f0a435 !important;}
+table.ledger tbody tr.future td .amt-inc{color:#4ade80 !important;}
+.future-divider td{
+  background:#e8f0fe !important;
+  padding:4px 10px;font-size:11px;font-weight:700;
+  color:var(--accent);text-transform:uppercase;letter-spacing:.5px;
+  border-top:2px solid var(--accent);border-bottom:2px solid var(--accent);
+}
+
+/* Amounts */
+.amt-exp{color:var(--red);font-family:'DM Mono',monospace;font-size:13px;font-weight:500;text-align:right;}
+.amt-inc{color:var(--green);font-family:'DM Mono',monospace;font-size:13px;font-weight:500;text-align:right;}
+.amt-bal{font-family:'DM Mono',monospace;font-size:13px;font-weight:500;text-align:right;}
+.amt-bal.pos{color:var(--text);}
+.amt-bal.neg{color:var(--red);}
+.right{text-align:right;}
+.center{text-align:center;}
+
+/* Cleared checkbox column */
+.cleared-check{width:22px;height:22px;cursor:pointer;accent-color:var(--accent);}
+.multi-select-bar{
+  display:none;padding:8px 14px;background:var(--accent);color:#fff;
+  align-items:center;gap:10px;font-size:13px;font-weight:600;
+  position:sticky;top:0;z-index:50;
+}
+.multi-select-bar.show{display:flex;}
+
+/* ── FORM / MODAL ── */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:200;display:none;align-items:center;justify-content:center;}
+.overlay.open{display:flex;}
+.modal{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-lg);width:500px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.18);}
+.modal-hdr{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;}
+.modal-hdr h3{font-size:15px;font-weight:700;flex:1;}
+.modal-body{padding:18px;}
+.modal-footer{padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end;}
+
+.field{margin-bottom:13px;}
+label.lbl{font-size:12px;font-weight:600;color:var(--text2);display:block;margin-bottom:5px;}
+input.inp,select.inp,textarea.inp{
+  width:100%;padding:8px 11px;background:var(--bg2);
+  border:1px solid var(--border2);border-radius:var(--radius);
+  font-size:14px;font-family:inherit;color:var(--text);
+}
+input.inp:focus,select.inp:focus,textarea.inp:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-lt);}
+input.inp::placeholder{color:var(--text3);}
+select.inp option{background:var(--bg2);}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.field-row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
+
+/* Amount fields */
+.amount-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.amount-field-exp input{border-color:#fca5a5;}
+.amount-field-exp input:focus{border-color:var(--red);box-shadow:0 0 0 2px var(--red-lt);}
+.amount-field-inc input{border-color:#86efac;}
+.amount-field-inc input:focus{border-color:var(--green);box-shadow:0 0 0 2px var(--green-lt);}
+.fx-hint{font-size:11px;color:var(--text3);margin-top:4px;}
+
+/* ── BUTTONS ── */
+.btn{padding:7px 14px;border:1px solid var(--border2);border-radius:var(--radius);cursor:pointer;background:var(--bg3);font-size:14px;font-family:inherit;font-weight:500;color:var(--text);transition:all .1s;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
+.btn:hover{background:var(--bg4);border-color:var(--border2);}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+.btn.primary:hover{background:#1d4ed8;}
+.btn.danger{background:var(--red-bg);color:var(--red);border-color:#fca5a5;}
+.btn.success{background:var(--green-bg);color:var(--green);border-color:#86efac;}
+.btn.sm{padding:5px 10px;font-size:13px;}
+.btn.xs{padding:3px 7px;font-size:12px;}
+.btn:disabled{opacity:.4;cursor:not-allowed;}
+.btn-icon{background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:3px 5px;border-radius:4px;transition:all .1s;}
+.btn-icon:hover{color:var(--text);background:var(--bg3);}
+
+/* ── CATEGORY DROPDOWN ── */
+.cat-wrap{position:relative;}
+.cat-drop{display:none;position:absolute;top:calc(100% + 2px);left:0;background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-lg);z-index:9999;max-height:280px;overflow-y:auto;min-width:320px;box-shadow:0 6px 24px rgba(0,0,0,.12);}
+.cat-section{padding:5px 12px 3px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;border-top:1px solid var(--border);}
+.cat-section:first-child{border-top:none;}
+.cat-opt{padding:6px 16px;font-size:13px;cursor:pointer;color:var(--text);}
+.cat-opt:hover,.cat-opt.kb-active{background:var(--accent-bg);color:var(--accent);}
+
+/* ── SEARCH ── */
+.search-wrap{position:relative;flex:1;max-width:280px;}
+.search-wrap input{width:100%;padding:6px 10px 6px 30px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--bg3);color:var(--text);}
+.search-wrap input:focus{outline:none;border-color:var(--accent);background:var(--bg2);}
+.search-wrap .search-icon{position:absolute;left:9px;top:50%;transform:translateY(-50%);font-size:13px;color:var(--text3);}
+
+/* ── BADGES ── */
+.badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:99px;font-size:11px;font-weight:600;}
+.badge-transfer{background:var(--accent-lt);color:var(--accent);}
+.badge-recurring{background:var(--warn-bg);color:var(--warn);}
+
+/* ── REPORTS ── */
+.report-filters{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;}
+.bar-row{display:flex;align-items:center;gap:8px;margin-bottom:7px;}
+.bar-lbl{font-size:12px;color:var(--text2);width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;flex-shrink:0;}
+.bar-track{flex:1;height:10px;background:var(--bg4);border-radius:5px;overflow:hidden;}
+.bar-fill{height:100%;border-radius:5px;transition:width .4s;}
+.bar-fill.exp{background:var(--red);}
+.bar-fill.inc{background:var(--green);}
+.bar-val{font-size:12px;font-family:'DM Mono',monospace;color:var(--text2);width:110px;text-align:right;flex-shrink:0;}
+
+/* ── BANK GRID ── */
+.bank-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;}
+.bank-btn{padding:10px;border:1px solid var(--border2);border-radius:var(--radius);cursor:pointer;background:var(--bg3);font-size:12px;font-weight:500;transition:all .1s;text-align:center;color:var(--text2);}
+.bank-btn .bn{font-size:13px;font-weight:700;color:var(--text);display:block;margin-top:2px;}
+.bank-btn:hover{background:var(--bg4);}
+.bank-btn.active{background:var(--accent-bg);border-color:var(--accent);color:var(--accent);}
+.import-dd-item{padding:10px 14px;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);transition:background .12s;}
+.import-dd-item:last-child{border-bottom:none;}
+.import-dd-item:hover{background:var(--bg3);}
+.import-dd-other{color:var(--accent);font-weight:500;}
+.import-dd-item.import-dd-deletable{justify-content:space-between;}
+.bank-btn.active .bn{color:var(--accent);}
+
+/* ── IMPORT SECTION ── */
+.import-section{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:18px;margin-bottom:14px;}
+.import-section h3{font-size:14px;font-weight:700;margin-bottom:12px;color:var(--text);}
+
+/* ── TOAST ── */
+.lang-btn{font-size:13px;padding:7px 16px;}
+.lang-btn.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+.goal-color-btn{width:28px;height:28px;border-radius:50%;border:3px solid transparent;cursor:pointer;transition:border-color .1s;}
+.goal-color-btn.active{border-color:var(--text);}
+/* ── Tour ── */
+#tour-overlay{position:fixed;inset:0;z-index:19000;pointer-events:none;}
+#tour-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0);transition:background .4s;z-index:19001;}
+#tour-spotlight{position:fixed;border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.55);transition:all .45s cubic-bezier(.4,0,.2,1);z-index:19002;pointer-events:none;}
+#tour-card{position:fixed;z-index:19003;background:var(--bg2);border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,.28);padding:0;width:360px;max-width:calc(100vw - 32px);pointer-events:all;transition:all .3s;}
+#tour-card .tour-header{background:var(--accent);border-radius:14px 14px 0 0;padding:16px 20px 14px;display:flex;align-items:center;gap:12px;}
+#tour-card .tour-icon{font-size:28px;line-height:1;}
+#tour-card .tour-title{font-size:15px;font-weight:700;color:#fff;}
+#tour-card .tour-subtitle{font-size:11px;color:rgba(255,255,255,.75);margin-top:2px;}
+#tour-card .tour-body{padding:16px 20px;font-size:13px;color:var(--text);line-height:1.6;}
+#tour-card .tour-footer{padding:12px 20px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;}
+#tour-dots{display:flex;gap:5px;}
+.tour-dot{width:7px;height:7px;border-radius:50%;background:var(--border2);transition:background .2s;}
+.tour-dot.active{background:var(--accent);}
+#tour-skip{font-size:12px;color:var(--text3);cursor:pointer;background:none;border:none;padding:4px 8px;}
+#tour-skip:hover{color:var(--text);}
+#tour-next{min-width:90px;}
+.tour-highlight{outline:3px solid var(--accent);outline-offset:3px;border-radius:6px;animation:tour-pulse 1.5s infinite;}
+@keyframes tour-pulse{0%,100%{outline-color:var(--accent)}50%{outline-color:#93c5fd}}
+.ctx-item{padding:8px 16px;cursor:pointer;color:var(--text);transition:background .1s;}
+.ctx-item:hover{background:var(--bg3);}
+.ctx-danger{color:var(--red);}
+.ctx-danger:hover{background:var(--red-bg);}
+.ctx-sep{height:1px;background:var(--border);margin:3px 0;}
+.toast{position:fixed;bottom:18px;right:18px;background:var(--text);color:#fff;padding:9px 16px;border-radius:var(--radius);font-size:13px;font-weight:500;z-index:9999;opacity:0;transform:translateY(5px);transition:all .2s;pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.2);}
+.toast.show{opacity:1;transform:translateY(0);}
+
+/* ── MISC ── */
+.empty{text-align:center;padding:3rem 2rem;color:var(--text3);}
+.empty .ei{font-size:36px;margin-bottom:10px;}
+.empty p{font-size:14px;}
+.info-box{padding:9px 13px;background:var(--accent-bg);border-radius:var(--radius);font-size:13px;color:var(--accent);border:1px solid var(--accent-lt);}
+.warn-box{padding:9px 13px;background:var(--warn-bg);border-radius:var(--radius);font-size:13px;color:var(--warn);border:1px solid #fde68a;line-height:1.6;}
+.sep{height:1px;background:var(--border);margin:14px 0;}
+.cell-editable{cursor:pointer;border-radius:4px;padding:1px 3px;}
+.cell-editable:hover{background:var(--accent-lt);}
+.cell-edit-input{width:100%;border:1.5px solid var(--accent);border-radius:4px;padding:3px 6px;font-size:13px;font-family:inherit;background:var(--bg2);color:var(--text);outline:none;}
+.gsearch-item{padding:10px 16px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;gap:12px;}
+.gsearch-item:hover{background:var(--bg3);}
+.gsearch-item:last-child{border-bottom:none;}
+.gsearch-acc{font-size:11px;color:var(--text3);}
+::-webkit-scrollbar{width:8px;height:14px;}
+::-webkit-scrollbar-track{background:var(--bg3);border-radius:7px;}
+::-webkit-scrollbar-thumb{background:var(--text3);border-radius:7px;border:2px solid var(--bg3);}
+::-webkit-scrollbar-thumb:hover{background:var(--accent);}
+::-webkit-scrollbar-thumb:active{background:var(--accent);}
+#pat-scroll-container::-webkit-scrollbar{height:20px;}
+#pat-scroll-container::-webkit-scrollbar-track{background:var(--bg4);border-radius:10px;margin:2px 4px;}
+#pat-scroll-container::-webkit-scrollbar-thumb{background:var(--text2);border-radius:10px;border:4px solid var(--bg4);min-width:80px;}
+#pat-scroll-container::-webkit-scrollbar-thumb:hover{background:var(--accent);}
+#pat-scroll-container::-webkit-scrollbar-thumb:active{background:var(--accent);}
+</style>
+</head>
+<body tabindex="-1">
+<!-- Update notification bar -->
+<div id="update-bar" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:1000;background:#1d4ed8;color:#fff;padding:10px 20px;align-items:center;gap:12px;font-size:13px;box-shadow:0 -2px 12px rgba(0,0,0,.2)">
+  <span id="update-msg" style="flex:1"></span>
+  <button id="update-install-btn" onclick="installUpdate()" style="display:none;background:#fff;color:#1d4ed8;border:none;border-radius:6px;padding:6px 16px;font-weight:600;cursor:pointer;font-size:13px">↻ Reiniciar e instalar</button>
+  <button onclick="G('update-bar').style.display='none'" style="background:transparent;border:none;color:#93c5fd;cursor:pointer;font-size:18px;line-height:1;padding:0 4px">✕</button>
+</div>
+
+<!-- SIDEBAR -->
+<aside class="sidebar" id="sidebar">
+  <div class="sidebar-resize" id="sidebar-resize"></div>
+    <div class="logo-mark" style="flex-shrink:0">
+      <svg width="36" height="36" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" style="display:block;border-radius:8px">
+        <rect width="512" height="512" rx="96" fill="#004d40"/>
+        <defs>
+          <linearGradient id="ll-gold" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#ffd54f"/>
+            <stop offset="100%" stop-color="#f9a825"/>
+          </linearGradient>
+          <linearGradient id="ll-grn" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#66bb6a"/>
+            <stop offset="100%" stop-color="#a5d6a7"/>
+          </linearGradient>
+        </defs>
+        <circle cx="220" cy="240" r="158" fill="none" stroke="url(#ll-gold)" stroke-width="22"/>
+        <text x="220" y="270" text-anchor="middle" font-family="Georgia,serif" font-size="120" font-weight="700" fill="url(#ll-gold)">C$</text>
+        <rect x="368" y="316" width="28" height="128" rx="7" fill="url(#ll-grn)"/>
+        <rect x="410" y="268" width="28" height="176" rx="7" fill="url(#ll-grn)"/>
+        <rect x="452" y="220" width="28" height="224" rx="7" fill="url(#ll-grn)"/>
+      </svg>
+    </div>
+    <div class="logo-text">
+      <h1>Cruzeiro</h1>
+      <p>Gestão financeira</p>
+      <p id="app-version" style="font-size:10px;color:var(--text3);margin-top:2px"></p>
+    </div>
+  </div>
+  <div id="sidebar-accounts"></div>
+  <div class="sidebar-actions">
+    <button class="btn sm" style="flex:1" onclick="openNewAccount()">+ Conta</button>
+    <button class="btn sm" onclick="openManageAccounts()">⚙</button>
+  </div>
+</aside>
+
+<!-- MAIN -->
+<main class="main">
+  <div class="topbar">
+    <div class="topbar-title" id="page-title">Visão Geral</div>
+    <!-- Global search -->
+    <div class="search-wrap" style="display:flex;max-width:320px">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="global-search-input" placeholder="Busca global…"
+        oninput="onGlobalSearch(this.value)"
+        onkeydown="if(event.key==='Escape'){this.value='';closeGlobalSearch()}">
+    </div>
+    <div class="search-wrap" id="search-wrap" style="display:none">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="search-input" placeholder="Pesquisar nesta conta…" oninput="onSearch(this.value)">
+    </div>
+    <button class="btn sm" id="undo-btn" onclick="doUndo()" title="Desfazer (Ctrl+Z)" style="display:none">↩ Desfazer</button>
+    <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
+    <button class="btn sm" onclick="openTransferModal()">⇄ Transferência</button>
+    <button class="btn sm primary" onclick="goPage('import')">📥 Importar</button>
+  </div>
+
+  <!-- Global search results dropdown -->
+  <div id="global-search-results" style="display:none;position:fixed;top:52px;left:50%;transform:translateX(-50%);width:600px;background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-lg);z-index:300;box-shadow:0 8px 32px rgba(0,0,0,.15);max-height:400px;overflow-y:auto"></div>
+
+  <!-- multi-select bar -->
+  <div class="multi-select-bar" id="multi-bar">
+    <span id="multi-count">0 selecionados</span>
+    <button class="btn sm" style="background:#fff;color:var(--accent)" onclick="clearAllSelected(this,true)">✅ Marcar conferidos</button>
+    <button class="btn sm" style="background:#fff;color:var(--text)" onclick="clearAllSelected(this,false)">☐ Desmarcar</button>
+    <button class="btn sm" style="background:#fff;color:var(--red)" onclick="deleteSelected()">🗑 Excluir</button>
+    <button class="btn sm" style="background:rgba(255,255,255,.2);color:#fff;margin-left:auto" onclick="clearSelection()">✕ Cancelar</button>
+  </div>
+
+  <!-- OVERVIEW -->
+  <div id="page-overview" class="page active">
+    <!-- Month selector + stats -->
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+      <button class="btn sm" onclick="overviewPrevMonth()">‹</button>
+      <span id="overview-month-label" style="font-size:15px;font-weight:600;min-width:140px;text-align:center"></span>
+      <button class="btn sm" onclick="overviewNextMonth()">›</button>
+      <button class="btn sm" onclick="overviewToday()" style="margin-left:4px">Hoje</button>
+    </div>
+
+    <div class="stats-grid" id="overview-stats"></div>
+
+    <!-- Category filter panel -->
+    <div class="tbl-card" style="padding:14px 18px;margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-size:12px;font-weight:600;color:var(--text2)">Excluir categorias dos gráficos:</span>
+        <div id="cat-filter-chips" style="display:flex;flex-wrap:wrap;gap:6px;flex:1"></div>
+        <button class="btn xs" onclick="openCatTypesConfig()" title="Definir se cada categoria é Receita ou Despesa">⚙ Tipos</button>
+        <button class="btn xs" onclick="openCatFilterModal()">⚙ Configurar</button>
+      </div>
+    </div>
+
+    <!-- Pie charts -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+      <div class="tbl-card" style="padding:18px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:14px">Despesas por categoria</div>
+        <div style="display:flex;align-items:center;gap:16px">
+          <canvas id="pie-expenses" width="180" height="180" style="flex-shrink:0"></canvas>
+          <div id="pie-expenses-legend" style="font-size:12px;line-height:2;overflow:hidden;flex:1"></div>
+        </div>
+      </div>
+      <div class="tbl-card" style="padding:18px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:14px">Receitas por categoria</div>
+        <div style="display:flex;align-items:center;gap:16px">
+          <canvas id="pie-income" width="180" height="180" style="flex-shrink:0"></canvas>
+          <div id="pie-income-legend" style="font-size:12px;line-height:2;overflow:hidden;flex:1"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Future pending -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header">
+        <h3>Lançamentos futuros pendentes</h3>
+        <span id="future-pending-count" style="font-size:12px;color:var(--text3);margin-left:8px"></span>
+      </div>
+      <div class="tbl-outer" style="max-height:260px">
+        <table class="ledger">
+          <thead><tr>
+            <th style="width:100px">Data</th>
+            <th style="width:160px">Conta</th>
+            <th>Categoria</th>
+            <th>Memorando</th>
+            <th style="width:110px" class="right">Despesa</th>
+            <th style="width:110px" class="right">Receita</th>
+            <th style="width:50px" class="center">C</th>
+          </tr></thead>
+          <tbody id="overview-future-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Trend charts — one per category -->
+    <div class="tbl-card" style="padding:18px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+        <span style="font-size:13px;font-weight:600">Evolução mensal por categoria</span>
+        <span style="font-size:12px;color:var(--text3)">Um gráfico por categoria</span>
+        <button class="btn sm" onclick="openTrendCatSelector()" style="margin-left:auto">⚙ Selecionar categorias</button>
+      </div>
+      <div id="trend-charts-grid"></div>
+    </div>
+  </div>
+
+  <!-- ACCOUNT -->
+  <div id="page-account" class="page">
+    <div class="stats-grid" id="acct-stats"></div>
+    <div class="tbl-card">
+      <div class="tbl-header" id="acct-tbl-header">
+        <h3 id="acct-name">Conta</h3>
+        <div style="display:flex;gap:6px;margin-left:auto;align-items:center;flex-wrap:wrap">
+          <!-- View toggle -->
+          <div style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+            <button id="acct-view-table" onclick="acctSetView('table')"
+              style="padding:4px 10px;font-size:12px;background:var(--accent);color:#fff;border:none;cursor:pointer" title="Tabela">📋</button>
+            <button id="acct-view-chart" onclick="acctSetView('chart')"
+              style="padding:4px 10px;font-size:12px;background:var(--bg2);color:var(--text2);border:none;cursor:pointer;border-left:1px solid var(--border)" title="Gráfico">📈</button>
+          </div>
+          <select class="inp" style="padding:5px 8px;font-size:12px;width:auto" onchange="setPeriod(this.value)" id="period-select">
+            <option value="30">Últimos 30 dias</option>
+            <option value="60">Últimos 60 dias</option>
+            <option value="90" selected>Últimos 90 dias</option>
+            <option value="120">Últimos 120 dias</option>
+            <option value="180">Últimos 180 dias</option>
+            <option value="365">Último ano</option>
+            <option value="0">Tudo</option>
+          </select>
+          <select class="inp" style="padding:5px 8px;font-size:12px;width:auto" onchange="setSortBy(this.value)" id="sort-select">
+            <option value="date-desc">Data ↓ (recentes primeiro)</option>
+            <option value="date-asc">Data ↑ (antigas primeiro)</option>
+            <option value="date-future">Futuras primeiro</option>
+            <option value="category">Por categoria</option>
+            <option value="amount">Por valor</option>
+          </select>
+          <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
+        </div>
+      </div>
+      <!-- Table view -->
+      <div id="acct-table-view">
+        <div class="tbl-outer" id="acct-tbl-outer">
+          <table class="ledger" id="ledger-table">
+            <colgroup id="ledger-colgroup"></colgroup>
+            <thead><tr id="ledger-head-row"></tr></thead>
+            <tbody id="acct-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- Chart view -->
+      <div id="acct-chart-view" style="display:none;padding:16px">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--text3)">Projeção:</span>
+          <select class="inp" id="acct-proj-months" style="padding:4px 8px;font-size:12px;width:auto" onchange="refreshAccountChart()">
+            <option value="0">Sem projeção</option>
+            <option value="1">+1 mês</option>
+            <option value="3" selected>+3 meses</option>
+            <option value="6">+6 meses</option>
+            <option value="12">+12 meses</option>
+            <option value="24">+24 meses</option>
+          </select>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
+            <input type="checkbox" id="acct-proj-recurring" checked onchange="refreshAccountChart()">
+            Incluir recorrências
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
+            <input type="checkbox" id="acct-proj-future" checked onchange="refreshAccountChart()">
+            Incluir lançamentos futuros
+          </label>
+        </div>
+        <div style="position:relative;height:320px">
+          <canvas id="acct-chart-canvas"></canvas>
+        </div>
+        <div id="acct-chart-legend" style="margin-top:10px;font-size:11px;color:var(--text3);display:flex;gap:16px;flex-wrap:wrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- REPORTS -->
+  <div id="page-reports" class="page">
+    <div class="report-filters" style="flex-wrap:wrap;gap:8px">
+      <div class="field" style="margin:0">
+        <label class="lbl">Relatório</label>
+        <select class="inp" id="report-type" onchange="onReportTypeChange()" style="min-width:240px">
+          <option value="summary">Resumo das receitas e despesas</option>
+          <option value="detail">Detalhe das receitas e despesas</option>
+          <option value="monthly">Comparação mensal</option>
+          <option value="net-worth">Balanço patrimonial</option>
+          <option value="net-worth-history">Evolução patrimonial</option>
+          <option value="expenses-map">Mapa de despesas</option>
+          <option value="budget">Budget — orçado vs realizado</option>
+          <optgroup label="── Relatórios salvos ──" id="saved-reports-group"></optgroup>
+        </select>
+      </div>
+      <div class="field" style="margin:0" id="rep-period-wrap">
+        <label class="lbl">Período</label>
+        <select class="inp" id="rep-period-preset" onchange="applyPeriodPreset(this.value)" style="width:auto;min-width:160px">
+          <option value="this-month">Este mês</option>
+          <option value="last-month">Último mês</option>
+          <option value="this-year">Este ano</option>
+          <option value="last-year">Ano passado</option>
+          <option value="last-3">Últimos 3 meses</option>
+          <option value="last-6">Últimos 6 meses</option>
+          <option value="custom">Datas personalizadas</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0" id="rep-from-wrap">
+        <label class="lbl">De</label>
+        <input type="date" class="inp" id="rep-from" style="width:140px" onchange="onCustomDates()">
+      </div>
+      <div class="field" style="margin:0" id="rep-to-wrap">
+        <label class="lbl">Até</label>
+        <input type="date" class="inp" id="rep-to" style="width:140px" onchange="onCustomDates()">
+      </div>
+      <button class="btn sm primary" onclick="runReport()">Atualizar</button>
+      <button class="btn sm" onclick="exportReportCSV()" title="Exportar CSV (formato Moneyspire)">📋 CSV</button>
+      <button class="btn sm" onclick="exportReportExcel()" title="Exportar Excel">📊 Excel</button>
+      <button class="btn sm" onclick="exportReportPDF()" title="Exportar PDF">📄 PDF</button>
+      <button class="btn sm" onclick="openSaveReportModal()">💾 Salvar</button>
+      <button class="btn sm" id="btn-manage-saved" onclick="openManageSavedReports()" style="display:none">🗂 Salvos</button>
+    </div>
+
+    <!-- Advanced filters (accounts + categories) -->
+    <div id="rep-adv-filters" style="display:none;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 18px;margin-bottom:14px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+            Contas <span style="font-weight:400;color:var(--text3)">(deixe vazio = todas)</span>
+          </div>
+          <div id="rep-account-checks" style="max-height:160px;overflow-y:auto;display:flex;flex-direction:column;gap:3px"></div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+            Categorias <span style="font-weight:400;color:var(--text3)">(deixe vazio = todas)</span>
+          </div>
+          <div style="margin-bottom:6px;display:flex;gap:6px">
+            <input type="text" class="inp" id="rep-cat-search" placeholder="Buscar categoria…"
+              oninput="filterRepCats(this.value)" style="font-size:12px;padding:5px 8px">
+            <button class="btn xs" onclick="repCatNone()">Limpar</button>
+          </div>
+          <div id="rep-cat-checks" style="max-height:130px;overflow-y:auto;display:flex;flex-direction:column;gap:3px"></div>
+        </div>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="rep-exclude-transfers" checked onchange="runReport()">
+          Excluir transferências entre contas
+        </label>
+      </div>
+    </div>
+
+    <div id="report-output"></div>
+  </div>
+
+  <!-- IMPORT -->
+  <div id="page-import" class="page">
+
+    <!-- Universal financial file import -->
+    <div class="import-section">
+      <h3>Importar histórico de outro programa</h3>
+      <div class="info-box" style="margin-bottom:14px;font-size:13px">
+        Importa lançamentos de qualquer programa de finanças pessoais que exporte nos formatos abaixo.
+        Os lançamentos são distribuídos automaticamente pelas contas pelo nome — certifique-se de que os nomes das contas no Cruzeiro são idênticos aos do programa de origem.
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+          <span class="badge" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">QIF</span>
+          <span class="badge" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">QFX</span>
+          <span class="badge" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">OFX</span>
+          <span class="badge" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">QBO</span>
+          <span class="badge" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600">CSV</span>
+          <span style="font-size:11px;color:var(--text3);align-self:center">Compatível com: Quicken, Moneyspire, Microsoft Money, Moneydance, YNAB e outros</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn primary" onclick="importFinancialFile()">📂 Selecionar arquivo</button>
+        <span id="qif-file-name" style="font-size:12px;color:var(--text3)"></span>
+      </div>
+      <div id="qif-result" style="margin-top:10px"></div>
+    </div>
+
+    <!-- Bank / Card import — new dropdown UI -->
+    <div class="import-section">
+      <h3>Importar extrato / fatura</h3>
+
+      <!-- Two dropdown buttons -->
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px;position:relative">
+
+        <!-- Extrato bancário -->
+        <div id="import-dd-bank-wrap">
+          <button class="btn primary" onclick="toggleImportDropdown('bank')" style="min-width:200px;display:flex;align-items:center;justify-content:space-between;gap:8px">
+            🏦 Extrato bancário <span id="import-dd-bank-arrow">▾</span>
+          </button>
+          <div id="import-dd-bank" style="display:none;position:fixed;min-width:220px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000;overflow:hidden">
+            <div id="import-dd-bank-builtin"></div>
+            <div id="import-dd-bank-custom"></div>
+            <div class="import-dd-item import-dd-other" onclick="pickImport('outro_banco','bank')">➕ Outro banco…</div>
+          </div>
+        </div>
+
+        <!-- Extrato de corretora -->
+        <div id="import-dd-broker-wrap">
+          <button class="btn primary" onclick="toggleBrokerDropdown()" style="min-width:200px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:#16a34a;border-color:#16a34a">
+            📊 Extrato de corretora <span id="import-dd-broker-arrow">▾</span>
+          </button>
+          <div id="import-dd-broker" style="display:none;position:fixed;min-width:220px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000;overflow:hidden">
+            <div id="import-dd-broker-builtin"></div>
+            <div id="import-dd-broker-custom"></div>
+            <div class="import-dd-item import-dd-other" onclick="pickBroker('outra_corretora')">➕ Outra corretora…</div>
+          </div>
+        </div>
+
+        <!-- Fatura de cartão -->
+        <div id="import-dd-card-wrap">
+          <button class="btn primary" onclick="toggleImportDropdown('card')" style="min-width:200px;display:flex;align-items:center;justify-content:space-between;gap:8px">
+            💳 Fatura de cartão <span id="import-dd-card-arrow">▾</span>
+          </button>
+          <div id="import-dd-card" style="display:none;position:fixed;min-width:220px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000;overflow:hidden">
+            <div id="import-dd-card-builtin"></div>
+            <div id="import-dd-card-custom"></div>
+            <div class="import-dd-item import-dd-other" onclick="pickImport('outro_cartao','card')">➕ Outro cartão…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Common fields: account + date filter -->
+      <div class="field-row" style="max-width:560px;margin-bottom:12px">
+        <div class="field" style="margin:0">
+          <label class="lbl">Conta de destino</label>
+          <select class="inp" id="bank-account"></select>
+        </div>
+        <div class="field" style="margin:0">
+          <label class="lbl">A partir de (opcional)</label>
+          <input type="date" class="inp" id="bank-date-from">
+        </div>
+      </div>
+
+      <!-- BTG warning -->
+      <div id="btg-warn" style="display:none;margin-bottom:12px">
+        <div class="warn-box">⚠️ Arquivo BTG precisa ser descriptografado antes. Rode <code>descriptografar_btg.py</code> primeiro.</div>
+      </div>
+
+      <!-- Status line -->
+      <div id="bank-selected-label" style="font-size:13px;color:var(--text2);margin-bottom:10px;min-height:20px"></div>
+
+      <!-- File trigger (shown after picking a bank) -->
+      <div id="bank-file-trigger" style="display:none;gap:8px;align-items:center">
+        <button class="btn primary" onclick="triggerBankFile()">📂 Selecionar arquivo</button>
+        <span id="bank-file-name" style="font-size:12px;color:var(--text3)"></span>
+      </div>
+      <input type="file" id="bank-file-input" style="display:none" onchange="onBankFileSelected(event)">
+
+      <!-- Preview table -->
+      <div id="bank-preview" style="display:none;margin-top:14px">
+        <div class="tbl-card">
+          <div class="tbl-header"><h3 id="bank-preview-title">Prévia</h3></div>
+          <div class="tbl-outer" style="max-height:200px">
+            <table class="ledger">
+              <thead><tr><th>Data</th><th>Descrição</th><th class="right">Valor</th></tr></thead>
+              <tbody id="bank-preview-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="import-footer" style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn primary" onclick="confirmBankImport()">✓ Confirmar importação</button>
+          <button class="btn" onclick="cancelBankImport()">Cancelar</button>
+          <span id="bank-preview-count" style="font-size:12px;color:var(--text3)"></span>
+        </div>
+      </div>
+      <div id="bank-result" style="margin-top:10px"></div>
+    </div>
+
+    <!-- Extrato de corretora section -->
+    <div class="import-section" id="broker-section" style="display:none">
+      <h3>Importar extrato de corretora</h3>
+      <div id="broker-selected-label" style="font-size:13px;color:var(--text2);margin-bottom:10px;min-height:20px"></div>
+      <div class="field-row" style="max-width:480px;margin-bottom:12px">
+        <div class="field" style="margin:0">
+          <label class="lbl">Conta de investimentos (ajuste de saldo)</label>
+          <select class="inp" id="broker-account">
+            <option value="">— Não criar ajuste —</option>
+          </select>
+        </div>
+      </div>
+      <div id="broker-file-trigger" style="display:none;gap:8px;align-items:center">
+        <button class="btn primary" onclick="triggerBrokerFile()">📂 Selecionar arquivo</button>
+        <span id="broker-file-name" style="font-size:12px;color:var(--text3)"></span>
+      </div>
+      <input type="file" id="broker-file-input" style="display:none" accept=".xlsx,.xls,.XLS,.XLSX,.csv,.CSV,.pdf,.PDF" onchange="onBrokerFileSelected(event)">
+      <div id="broker-preview" style="display:none;margin-top:14px"></div>
+      <div id="broker-result" style="margin-top:10px"></div>
+    </div>
+
+>
+
+  </div>
+
+  <!-- CATEGORIAS -->
+  <div id="page-categories" class="page">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">
+      <h2 style="margin:0;font-size:18px">Categorias</h2>
+      <div style="display:flex;gap:8px">
+        <button class="btn primary" onclick="openAddCategory()">+ Nova categoria</button>
+        <button class="btn" onclick="openAddCategory(true)">+ Nova subcategoria</button>
+      </div>
+    </div>
+    <div class="info-box" style="margin-bottom:14px;font-size:12px">
+      As categorias são usadas em lançamentos, importações e relatórios. Subcategorias usam o formato <strong>Categoria:Subcategoria</strong>.
+    </div>
+    <div id="cat-manage-list"></div>
+  </div>
+
+  <!-- BUSCA AVANÇADA -->
+  <div id="page-search" class="page">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">
+      <h2 style="margin:0;font-size:18px">🔍 Busca avançada</h2>
+      <span id="search-results-count" style="font-size:12px;color:var(--text3)"></span>
+    </div>
+
+    <!-- Filter bar -->
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;margin-bottom:16px">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <!-- Text query -->
+        <div class="field" style="flex:2;min-width:180px;margin:0">
+          <label class="lbl">Texto</label>
+          <div class="search-wrap" style="max-width:none">
+            <span class="search-icon">🔍</span>
+            <input type="text" class="inp" id="adv-query" data-i18n="search_placeholder" data-i18n-attr="placeholder" placeholder="Buscar em memo, categoria, valor…"
+              oninput="scheduleAdvSearch()" style="padding-left:30px">
+          </div>
+        </div>
+        <!-- Account -->
+        <div class="field" style="min-width:140px;margin:0">
+          <label class="lbl">Conta</label>
+          <select class="inp" id="adv-account" onchange="runAdvSearch()">
+            <option value="">Todas as contas</option>
+          </select>
+        </div>
+        <!-- Type -->
+        <div class="field" style="min-width:130px;margin:0">
+          <label class="lbl">Tipo</label>
+          <select class="inp" id="adv-type" onchange="runAdvSearch()">
+            <option value="">Todos</option>
+            <option value="income">Receitas</option>
+            <option value="expense">Despesas</option>
+            <option value="transfer">Transferências</option>
+          </select>
+        </div>
+        <!-- Cleared -->
+        <div class="field" style="min-width:120px;margin:0">
+          <label class="lbl">Status</label>
+          <select class="inp" id="adv-cleared" onchange="runAdvSearch()">
+            <option value="">Todos</option>
+            <option value="1">✅ Conferidos</option>
+            <option value="0">○ Não conferidos</option>
+          </select>
+        </div>
+        <!-- Date from -->
+        <div class="field" style="min-width:130px;margin:0">
+          <label class="lbl">De</label>
+          <input type="date" class="inp" id="adv-from" onchange="runAdvSearch()">
+        </div>
+        <!-- Date to -->
+        <div class="field" style="min-width:130px;margin:0">
+          <label class="lbl">Até</label>
+          <input type="date" class="inp" id="adv-to" onchange="runAdvSearch()">
+        </div>
+        <!-- Category -->
+        <div class="field" style="min-width:150px;margin:0">
+          <label class="lbl">Categoria</label>
+          <input type="text" class="inp" id="adv-category" placeholder="Filtrar categoria…"
+            oninput="scheduleAdvSearch()" autocomplete="off">
+        </div>
+        <button class="btn" onclick="clearAdvSearch()" style="margin-bottom:1px" title="Limpar filtros">✕ Limpar</button>
+      </div>
+    </div>
+
+    <!-- Results table -->
+    <div class="tbl-card">
+      <div class="tbl-outer" style="max-height:calc(100vh - 340px)">
+        <table class="ledger" id="adv-results-table">
+          <thead>
+            <tr>
+              <th onclick="advSort('date')" style="cursor:pointer;user-select:none">Data <span id="adv-sort-date"></span></th>
+              <th onclick="advSort('account_name')" style="cursor:pointer;user-select:none">Conta <span id="adv-sort-account_name"></span></th>
+              <th onclick="advSort('memo')" style="cursor:pointer;user-select:none">Memorando <span id="adv-sort-memo"></span></th>
+              <th onclick="advSort('category')" style="cursor:pointer;user-select:none">Categoria <span id="adv-sort-category"></span></th>
+              <th class="right" onclick="advSort('amount')" style="cursor:pointer;user-select:none">Valor <span id="adv-sort-amount"></span></th>
+              <th class="center">✓</th>
+            </tr>
+          </thead>
+          <tbody id="adv-results-body">
+            <tr><td colspan="6" style="text-align:center;color:var(--text3);padding:32px">Use os filtros acima para buscar transações</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <!-- Pagination -->
+      <div id="adv-pagination" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-top:1px solid var(--border);font-size:12px;color:var(--text3)">
+        <span id="adv-page-info"></span>
+        <div style="display:flex;gap:6px">
+          <button class="btn xs" id="adv-prev" onclick="advPage(-1)" disabled>‹ Anterior</button>
+          <button class="btn xs" id="adv-next" onclick="advPage(1)">Próxima ›</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ORÇAMENTO -->
+  <!-- METAS FINANCEIRAS -->
+  <div id="page-goals" class="page">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:10px">
+      <h2 style="margin:0;font-size:18px">🎯 Metas financeiras</h2>
+      <button class="btn primary" onclick="openGoalModal()">+ Nova meta</button>
+    </div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:20px">Defina objetivos e acompanhe seu progresso.</p>
+    <div id="goals-list"></div>
+  </div>
+
+  <!-- Modal: nova meta -->
+  <div class="overlay" id="modal-goal" style="z-index:8000">
+    <div class="modal" style="max-width:480px;width:96%">
+      <div class="modal-hdr">
+        <h3 id="goal-modal-title">Nova meta financeira</h3>
+        <button class="btn-icon" onclick="closeModal('modal-goal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="goal-edit-id">
+        <div class="field-row">
+          <div class="field" style="flex:0 0 auto;margin:0">
+            <label class="lbl">Ícone</label>
+            <input class="inp" id="goal-icon" type="text" value="🎯" style="width:60px;text-align:center;font-size:20px">
+          </div>
+          <div class="field" style="flex:1;margin:0">
+            <label class="lbl">Nome da meta</label>
+            <input class="inp" id="goal-name" type="text" placeholder="Ex: Reserva de emergência, Viagem…">
+          </div>
+        </div>
+        <div class="field">
+          <label class="lbl">Tipo</label>
+          <select class="inp" id="goal-type" onchange="onGoalTypeChange()">
+            <option value="target">💰 Valor-alvo (economizar X reais)</option>
+            <option value="monthly">📅 Economia mensal (poupar X por mês)</option>
+            <option value="emergency">🛡️ Reserva de emergência (N meses de gastos)</option>
+          </select>
+        </div>
+        <div id="goal-fields-target">
+          <div class="field"><label class="lbl">Valor-alvo (R$)</label><input class="inp" id="goal-target" type="text" placeholder="0,00"></div>
+          <div class="field"><label class="lbl">Prazo (opcional)</label><input class="inp" id="goal-deadline" type="date"></div>
+        </div>
+        <div id="goal-fields-monthly" style="display:none">
+          <div class="field"><label class="lbl">Economia mensal desejada (R$)</label><input class="inp" id="goal-monthly" type="text" placeholder="0,00"></div>
+        </div>
+        <div id="goal-fields-emergency" style="display:none">
+          <div class="field"><label class="lbl">Meses de gastos a reservar</label><input class="inp" id="goal-emergency-months" type="number" value="6" min="1" max="24"></div>
+          <div id="goal-emergency-ref" style="font-size:12px;color:var(--text3);margin-top:4px"></div>
+        </div>
+        <div class="field">
+          <label class="lbl">Conta vinculada (rastrear saldo)</label>
+          <select class="inp" id="goal-account"><option value="">Nenhuma</option></select>
+        </div>
+        <div class="field">
+          <label class="lbl">Cor</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap" id="goal-color-picker">
+            <button class="goal-color-btn active" data-color="#2563eb" style="background:#2563eb" onclick="pickGoalColor(this)"></button>
+            <button class="goal-color-btn" data-color="#16a34a" style="background:#16a34a" onclick="pickGoalColor(this)"></button>
+            <button class="goal-color-btn" data-color="#dc2626" style="background:#dc2626" onclick="pickGoalColor(this)"></button>
+            <button class="goal-color-btn" data-color="#d97706" style="background:#d97706" onclick="pickGoalColor(this)"></button>
+            <button class="goal-color-btn" data-color="#7c3aed" style="background:#7c3aed" onclick="pickGoalColor(this)"></button>
+            <button class="goal-color-btn" data-color="#0891b2" style="background:#0891b2" onclick="pickGoalColor(this)"></button>
+            <button class="goal-color-btn" data-color="#be185d" style="background:#be185d" onclick="pickGoalColor(this)"></button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-goal')">Cancelar</button>
+        <button class="btn primary" onclick="saveGoal()">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ APOSENTADORIA ══ -->
+  <div id="page-aposentadoria" class="page">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">
+      <div>
+        <h2 style="margin:0;font-size:18px">🏖️ Planejamento de Aposentadoria</h2>
+        <div style="font-size:12px;color:var(--text3);margin-top:2px">Projete quanto precisa poupar para alcançar sua independência financeira</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn xs" id="apos-view-table" onclick="aposTglView('table')" style="border-color:var(--accent);color:var(--accent)">📋 Tabela</button>
+        <button class="btn xs" id="apos-view-chart" onclick="aposTglView('chart')">📈 Gráfico</button>
+        <button class="btn xs" onclick="aposUpdateFocus()">📡 Atualizar Focus</button>
+      </div>
+    </div>
+
+    <!-- Configuration card -->
+    <div class="tbl-card" style="margin-bottom:16px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;padding:16px">
+
+        <!-- Goal type -->
+        <div>
+          <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🎯 Tipo de meta</div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px">
+            <input type="radio" name="apos-goal-type" value="patrimonio" id="apos-type-pat" onchange="aposCalc()" checked>
+            Patrimônio-alvo (R$)
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+            <input type="radio" name="apos-goal-type" value="renda" id="apos-type-renda" onchange="aposCalc()">
+            Renda mensal desejada (R$)
+          </label>
+        </div>
+
+        <!-- Goal value -->
+        <div>
+          <div id="apos-goal-label" style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">💰 Patrimônio desejado (R$)</div>
+          <input class="inp" id="apos-goal-value" type="text" placeholder="Ex: 5.000.000"
+            style="width:100%;font-size:15px;font-weight:600"
+            oninput="setupCurrencyInput(this);aposCalc()">
+          <div id="apos-goal-hint" style="font-size:11px;color:var(--text3);margin-top:4px">
+            Patrimônio líquido total que deseja acumular
+          </div>
+        </div>
+
+        <!-- Retirement age / years -->
+        <div>
+          <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📅 Horizonte</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <div style="flex:1">
+              <div style="font-size:11px;color:var(--text3);margin-bottom:3px">Idade atual</div>
+              <input class="inp" id="apos-age-now" type="number" min="18" max="80" placeholder="35"
+                style="width:100%;font-size:14px" oninput="aposCalc()">
+            </div>
+            <div style="flex:1">
+              <div style="font-size:11px;color:var(--text3);margin-bottom:3px">Idade na aposentadoria</div>
+              <input class="inp" id="apos-age-ret" type="number" min="40" max="99" placeholder="65"
+                style="width:100%;font-size:14px" oninput="aposCalc()">
+            </div>
+          </div>
+        </div>
+
+        <!-- Current wealth -->
+        <div>
+          <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🏛️ Patrimônio atual (R$)</div>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input class="inp" id="apos-patrimonio-atual" type="text" placeholder="0"
+              style="flex:1;font-size:14px"
+              oninput="setupCurrencyInput(this);aposCalc()">
+            <button class="btn xs" onclick="aposPullPatrimonio()" title="Usar valor atual do Patrimônio">⬇ Usar atual</button>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">Patrimônio líquido hoje</div>
+        </div>
+
+        <!-- Rate assumptions -->
+        <div>
+          <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📊 Taxas anuais</div>
+          <div style="display:flex;gap:8px">
+            <div style="flex:1">
+              <div style="font-size:11px;color:var(--text3);margin-bottom:3px">Retorno real esperado (% a.a.)</div>
+              <input class="inp" id="apos-rate-real" type="number" step="0.1" min="0" max="30" placeholder="6.0"
+                style="width:100%;font-size:14px" oninput="aposCalc()">
+            </div>
+            <div style="flex:1">
+              <div style="font-size:11px;color:var(--text3);margin-bottom:3px">Inflação esperada (% a.a.)</div>
+              <input class="inp" id="apos-rate-infl" type="number" step="0.1" min="0" max="30" placeholder="4.5"
+                style="width:100%;font-size:14px" oninput="aposCalc()">
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px" id="apos-focus-hint">Sugestão Focus BCB: carregando…</div>
+        </div>
+
+        <!-- Savings source -->
+        <div>
+          <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📥 Poupança realizada via</div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:6px">
+            <input type="radio" name="apos-savings-src" value="evolucao" onchange="aposCalc()" checked>
+            Lucro mensal (aba Evolução)
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+            <input type="radio" name="apos-savings-src" value="patrimonio" onchange="aposCalc()">
+            Crescimento patrimonial (aba Patrimônio)
+          </label>
+        </div>
+
+      </div><!-- /grid -->
+    </div><!-- /config card -->
+
+    <!-- Summary KPIs -->
+    <div id="apos-kpis" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px"></div>
+
+    <!-- Chart / Table toggle -->
+    <div id="apos-table-view">
+      <div class="tbl-card">
+        <div class="tbl-header">
+          <h3>Projeção anual</h3>
+          <span style="font-size:12px;color:var(--text3)" id="apos-table-subtitle"></span>
+        </div>
+        <div class="tbl-outer" style="max-height:420px;overflow-x:auto">
+          <table class="ledger" id="apos-table">
+            <thead><tr>
+              <th>Ano</th><th>Idade</th>
+              <th class="right">Poupança necessária/mês</th>
+              <th class="right">Poupança realizada/mês</th>
+              <th class="right">Déficit / Superávit</th>
+              <th class="right">Patrimônio projetado</th>
+              <th class="right">Patrimônio real</th>
+              <th class="right">% da meta</th>
+            </tr></thead>
+            <tbody id="apos-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div id="apos-chart-view" style="display:none">
+      <div class="tbl-card" style="padding:16px">
+        <canvas id="apos-chart" style="max-height:380px"></canvas>
+      </div>
+      <div class="tbl-card" style="padding:16px;margin-top:12px">
+        <canvas id="apos-chart2" style="max-height:260px"></canvas>
+      </div>
+    </div>
+
+  </div><!-- /page-aposentadoria -->
+
+  <div id="page-budget" class="page">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;flex-wrap:wrap;gap:10px">
+      <h2 style="margin:0;font-size:18px">💰 Orçamento</h2>
+      <div style="display:flex;align-items:center;gap:10px">
+        <label class="lbl" style="margin:0">Mês:</label>
+        <input type="month" class="inp" id="budget-month" style="width:140px" onchange="refreshBudget()">
+        <button class="btn primary" onclick="openBudgetModal()">+ Nova meta</button>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:16px">Defina limites mensais por categoria e acompanhe seu progresso.</p>
+
+    <!-- Summary cards -->
+    <div id="budget-summary-cards" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px"></div>
+
+    <!-- Budget list -->
+    <div id="budget-list"></div>
+
+    <!-- Uncategorized spending (categories with spending but no budget) -->
+    <div id="budget-uncategorized" style="margin-top:20px"></div>
+  </div>
+
+  <!-- Modal: novo orçamento -->
+  <div class="overlay" id="modal-budget" style="z-index:8000">
+    <div class="modal" style="max-width:420px;width:96%">
+      <div class="modal-hdr">
+        <h3 id="budget-modal-title">Nova meta de orçamento</h3>
+        <button class="btn-icon" onclick="closeModal('modal-budget')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="budget-edit-id">
+        <div class="field">
+          <label class="lbl">Categoria</label>
+          <div style="display:flex;gap:4px">
+            <input class="inp" id="budget-cat" type="text" placeholder="Ex: Alimentação" autocomplete="off"
+              oninput="openGlobalCatDrop(this)" onfocus="openGlobalCatDrop(this)" style="flex:1">
+            <button type="button" class="btn" tabindex="-1"
+              onmousedown="event.preventDefault();openGlobalCatDrop(G('budget-cat'))">▾</button>
+          </div>
+        </div>
+        <div class="field">
+          <label class="lbl">Limite mensal (R$)</label>
+          <input class="inp" id="budget-limit" type="text" placeholder="0,00">
+        </div>
+        <div class="field">
+          <label class="lbl">Alerta ao atingir (%)</label>
+          <input class="inp" id="budget-alert" type="number" value="80" min="1" max="100">
+          <div style="font-size:11px;color:var(--text3);margin-top:3px">Você será notificado por cor quando atingir este % do limite</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-budget')">Cancelar</button>
+        <button class="btn primary" onclick="saveBudget()">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ML -->
+  <div id="page-ml" class="page">
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px" id="ml-stats"></div>
+    <div id="ml-groups"></div>
+    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+      <button class="btn primary" onclick="trainMLHistory()" id="btn-train-ml">🧠 Treinar com histórico</button>
+      <button class="btn danger" onclick="clearML()">🗑 Apagar aprendizado</button>
+      <button class="btn" onclick="exportML()">⬇ Exportar</button>
+      <button class="btn" onclick="document.getElementById('ml-file').click()">⬆ Importar</button>
+      <input type="file" id="ml-file" accept=".json" style="display:none" onchange="importML(event)">
+    </div>
+    <div id="ml-train-result" style="margin-top:10px"></div>
+  </div>
+
+  <!-- PATRIMÔNIO -->
+  <div id="page-patrimonio" class="page">
+    <!-- Toolbar -->
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <span id="pat-ipca-status" style="font-size:12px;color:var(--text3);flex:1">IPCA mensal não carregado</span>
+      <button class="btn sm" onclick="patFetchIPCA()">📡 Atualizar IPCA mensal</button>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
+        <input type="checkbox" id="pat-show-hidden" onchange="refreshPatrimonioTable()"> Mostrar ocultos
+      </label>
+      <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <button id="pat-view-table" class="btn sm" onclick="patSetView('table')" style="border-radius:0;border:none;padding:5px 14px">📋 Tabela</button>
+        <button id="pat-view-chart" class="btn sm" onclick="patSetView('chart')" style="border-radius:0;border:none;padding:5px 14px;border-left:1px solid var(--border)">📈 Gráficos</button>
+      </div>
+    </div>
+
+    <!-- Summary cards -->
+    <div class="stats-grid" id="pat-cards" style="margin-bottom:16px"></div>
+
+    <!-- TABLE VIEW -->
+    <div id="pat-view-table-wrap" class="tbl-card">
+      <div style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 240px)" id="pat-scroll-container">
+        <div id="pat-all-tables" style="width:max-content;min-width:100%">
+          <!-- All section tables rendered here by JS, share same column widths -->
+        </div>
+      </div>
+    </div>
+
+    <!-- CHART VIEW -->
+    <div id="pat-view-chart-wrap" style="display:none">
+      <!-- 1. Total patrimônio -->
+      <div class="tbl-card" style="padding:18px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <span style="font-weight:600;font-size:13px">📊 Total Patrimônio</span>
+        </div>
+        <div style="position:relative;height:220px"><canvas id="pat-chart-total"></canvas></div>
+      </div>
+      <!-- 2. Patrimônio imobilizado -->
+      <div class="tbl-card" style="padding:18px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <span style="font-weight:600;font-size:13px">🏠 Patrimônio Imobilizado</span>
+        </div>
+        <div style="position:relative;height:220px"><canvas id="pat-chart-imob"></canvas></div>
+      </div>
+      <!-- 3. Investimentos financeiros -->
+      <div class="tbl-card" style="padding:18px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+          <span style="font-weight:600;font-size:13px">📈 Investimentos Financeiros</span>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="pat-chart-inv-period" class="inp" style="font-size:11px;padding:3px 7px;width:auto"
+              onchange="patRenderInvChart()">
+              <option value="0">Todo o período</option>
+              <option value="thisyear">Este ano</option>
+              <option value="12" selected>Últimos 12 meses</option>
+              <option value="24">Últimos 2 anos</option>
+              <option value="36">Últimos 3 anos</option>
+              <option value="custom">Personalizado…</option>
+            </select>
+            <div id="pat-chart-inv-custom" style="display:none;gap:4px;align-items:center">
+              <input type="month" id="pat-chart-inv-from" class="inp" style="font-size:11px;padding:3px;width:130px" onchange="patRenderInvChart()">
+              <span style="font-size:11px;color:var(--text3)">até</span>
+              <input type="month" id="pat-chart-inv-to" class="inp" style="font-size:11px;padding:3px;width:130px" onchange="patRenderInvChart()">
+            </div>
+          </div>
+        </div>
+        <div style="position:relative;height:240px"><canvas id="pat-chart-inv"></canvas></div>
+        <div id="pat-chart-inv-legend" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px"></div>
+      </div>
+      <!-- 4. Ativos individuais -->
+      <div class="tbl-card" style="padding:18px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+          <span style="font-weight:600;font-size:13px">🔍 Ativo individual</span>
+          <select id="pat-chart-asset-sel" class="inp" style="max-width:260px;font-size:12px" onchange="patRenderAssetChart()">
+            <option value="">— Selecione um ativo —</option>
+          </select>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text3);cursor:pointer">
+            <input type="checkbox" id="pat-chart-show-hidden" onchange="patPopulateAssetSel()">
+            Incluir ocultos
+          </label>
+        </div>
+        <div style="position:relative;height:220px"><canvas id="pat-chart-asset"></canvas></div>
+        <div id="pat-chart-asset-legend" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Modal: Investimento — Novo/Editar -->
+  <div class="overlay" id="modal-inv-asset" style="z-index:400">
+    <div class="modal" style="width:820px;max-height:92vh;display:flex;flex-direction:column">
+      <div class="modal-hdr">
+        <h3 id="inv-asset-modal-title">Novo investimento</h3>
+        <button class="btn-icon" onclick="closeModal('modal-inv-asset')">✕</button>
+      </div>
+      <div class="modal-body" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:0">
+        <input type="hidden" id="inv-asset-id">
+
+        <!-- Identity fields -->
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:10px;margin-bottom:12px">
+          <div class="field" style="margin:0">
+            <label class="lbl">Nome do ativo</label>
+            <input class="inp" id="inv-name" placeholder="Ex: CDB Banco XP, PETR4...">
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Código</label>
+            <input class="inp" id="inv-code" placeholder="PETR4...">
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Categoria</label>
+            <select class="inp" id="inv-category" onchange="invUpdateTypes()">
+              <option value="renda_fixa">Renda Fixa</option>
+              <option value="fundos">Fundos</option>
+              <option value="tesouro">Tesouro Direto</option>
+              <option value="previdencia">Previdência</option>
+              <option value="renda_variavel">Renda Variável</option>
+              <option value="private_equity">Private Equity</option>
+              <option value="valor_em_caixa">Valor em Caixa</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Tipo</label>
+            <select class="inp" id="inv-type"></select>
+          </div>
+          <div class="field" style="margin:0;grid-column:1/-1">
+            <label class="lbl">Notas</label>
+            <input class="inp" id="inv-notes" placeholder="Observações opcionais">
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Corretora</label>
+            <input class="inp" id="inv-broker" list="inv-broker-list" placeholder="Ex: XP, BTG, Nubank…" autocomplete="off">
+            <datalist id="inv-broker-list"></datalist>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Vencimento (mês/ano)</label>
+            <div style="display:flex;gap:6px">
+              <input class="inp" id="inv-mat-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px">
+              <input class="inp" id="inv-mat-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:90px">
+            </div>
+          </div>
+          <div class="field" style="margin:0;grid-column:1/-1">
+            <label class="lbl">Liquidez</label>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+                <input type="radio" name="inv-liq" value="vencimento" id="inv-liq-venc" checked onchange="invToggleLiqDays()">
+                No vencimento
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+                <input type="radio" name="inv-liq" value="dias" id="inv-liq-dias" onchange="invToggleLiqDays()">
+                D+<input class="inp" id="inv-liq-days" type="number" min="0" max="3650" placeholder="0"
+                  style="width:60px;display:inline-block;margin:0 4px;padding:3px 6px;font-size:12px" disabled>
+                dias
+              </label>
+              <span id="inv-liq-label" style="font-size:11px;color:var(--accent)"></span>
+            </div>
+          </div>
+        </div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:4px 0 12px">
+
+        <!-- Monthly history table -->
+        <div style="font-size:12px;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:10px">
+          Histórico mensal
+          <span style="font-size:11px;font-weight:400;color:var(--text3)">— Coluna de movimentação aceita fórmulas (ex: +500-30)</span>
+        </div>
+        <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border)">
+          <div id="inv-history-table" style="max-height:380px;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable">
+            <div style="display:grid;grid-template-columns:100px 1fr 1fr 1fr 32px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:6px 8px;border-bottom:1px solid var(--border);background:var(--bg4);gap:2px;position:sticky;top:0;z-index:1">
+              <span>Mês</span>
+              <span style="text-align:right">Valor do ativo (R$)</span>
+              <span style="text-align:right;color:var(--accent)">Aporte/Resgate</span>
+              <span style="text-align:right;color:var(--green)">Rendimento/Custo</span>
+              <span></span>
+            </div>
+          </div>
+          <div style="padding:8px 10px;border-top:1px solid var(--border);background:var(--bg4);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn xs" onclick="invAddHistoryRow()">+ Adicionar mês</button>
+            <span style="font-size:11px;color:var(--accent)">📥 Aporte/Resgate</span>
+            <span style="font-size:11px;color:var(--text3)">= compra, aporte, venda, amortização — <b>negativo</b> = dinheiro saindo do bolso (compra/aporte); <b>positivo</b> = dinheiro voltando (venda/resgate)</span>
+            <span style="font-size:11px;color:var(--green);margin-left:8px">💰 Rendimento/Custo</span>
+            <span style="font-size:11px;color:var(--text3)">= dividendo, juros, JCP, cupom, taxa — <b>positivo</b> = rendimento recebido; <b>negativo</b> = custo/taxa paga</span>
+          </div>
+        </div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:12px 0">
+
+        <!-- Venda / Saída -->
+        <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;margin-bottom:10px">Venda / Saída (opcional)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+          <div class="field" style="margin:0">
+            <label class="lbl">Mês de venda</label>
+            <div style="display:flex;gap:6px">
+              <input class="inp" id="inv-sold-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px">
+              <input class="inp" id="inv-sold-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:90px">
+            </div>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Valor de venda</label>
+            <input class="inp" id="inv-sold-value" type="number" min="0" step="0.01" placeholder="0,00">
+          </div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:4px">
+          <input type="checkbox" id="inv-hidden">
+          Ocultar ativo (ex: já vendido ou não mais relevante)
+        </label>
+        <div class="field" style="margin-bottom:4px">
+          <label class="lbl">Benchmark para comparação</label>
+          <select class="inp" id="inv-benchmark" style="max-width:220px">
+            <option value="cdi">CDI</option>
+            <option value="ibov">IBOVESPA</option>
+            <option value="nenhum">Nenhum</option>
+          </select>
+        </div>
+      </div>
+      <!-- Reclassify existing transactions panel -->
+      <div id="inv-reclassify-panel" style="display:none;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:12px;font-weight:600;color:var(--text2)">🔀 Reclassificar movimentações individuais</span>
+          <button class="btn xs" onclick="G('inv-reclassify-panel').style.display='none'">✕ Fechar</button>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">
+          Movimentações já salvas no banco. Clique em 📥 ou 💰 para reclassificar individualmente. A mudança é salva imediatamente.
+        </div>
+        <div id="inv-reclassify-list" style="max-height:280px;overflow-y:auto;font-size:11px"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-inv-asset')">Cancelar</button>
+        <button class="btn" onclick="openInvReclassifyPanel()" title="Ver e reclassificar transações individuais já salvas">🔀 Reclassificar</button>
+        <button class="btn primary" onclick="saveInvAsset()">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Detalhe de investimento -->
+  <div class="overlay" id="modal-inv-detail" style="z-index:400">
+    <div class="modal" style="width:680px;max-height:90vh;overflow-y:auto">
+      <div class="modal-hdr">
+        <h3 id="inv-detail-title">Detalhe</h3>
+        <button class="btn-icon" onclick="closeModal('modal-inv-detail')">✕</button>
+      </div>
+      <div class="modal-body" id="inv-detail-body"></div>
+    </div>
+  </div>
+
+  <!-- Modal: Importar histórico Excel -->
+  <div class="overlay" id="modal-pat-import" style="z-index:400">
+    <div class="modal" style="width:560px">
+      <div class="modal-hdr">
+        <h3>Importar histórico — Planilha Excel</h3>
+        <button class="btn-icon" onclick="closeModal('modal-pat-import')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="info-box" style="margin-bottom:14px;font-size:13px">
+          Selecione o arquivo <strong>Finanças.xlsx</strong>. O Cruzeiro vai ler a aba "Patrimônio" e importar os valores históricos dos ativos imobilizados cadastrados.
+        </div>
+        <button class="btn primary" onclick="triggerPatImportFile()">📂 Selecionar arquivo Excel</button>
+        <input type="file" id="pat-import-file" accept=".xlsx,.xls" style="display:none" onchange="onPatImportFile(event)">
+        <div id="pat-import-preview" style="margin-top:14px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-pat-import')">Fechar</button>
+        <button class="btn primary" id="pat-import-confirm-btn" style="display:none" onclick="confirmPatImport()">Importar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Novo/Editar Ativo -->
+  <div class="overlay" id="modal-pat-asset" style="z-index:400">
+    <div class="modal" style="width:680px;max-width:98vw">
+      <div class="modal-hdr">
+        <h3 id="pat-asset-modal-title">Novo ativo imobilizado</h3>
+        <button class="btn-icon" onclick="closeModal('modal-pat-asset')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="pat-asset-id">
+        <div class="field">
+          <label class="lbl">Nome do ativo</label>
+          <input class="inp" id="pat-asset-name" placeholder="Ex: Apartamento Santos, Jeep Compass...">
+        </div>
+        <div class="field">
+          <label class="lbl">Tipo</label>
+          <select class="inp" id="pat-asset-type">
+            <option value="imovel">🏠 Imóvel</option>
+            <option value="veiculo">🚗 Veículo</option>
+            <option value="barco">⛵ Barco</option>
+            <option value="clube">🏌️ Título em clube</option>
+            <option value="societario">🏢 Participação societária</option>
+            <option value="outro">📦 Outro</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="lbl">Tendência de preço</label>
+          <select class="inp" id="pat-asset-trend">
+            <option value="minus2x">📉📉 Redução em 2× o IPCA</option>
+            <option value="minus1x">📉 Redução conforme IPCA</option>
+            <option value="stable">➡️ Estável (sem correção)</option>
+            <option value="plus1x" selected>📈 Elevação conforme IPCA</option>
+            <option value="plus2x">📈📈 Elevação em 2× o IPCA</option>
+          </select>
+        </div>
+        <div id="pat-initial-value-section">
+          <div class="field">
+            <label class="lbl">Mês de entrada</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input class="inp" id="pat-asset-month-m" type="number" min="1" max="12" placeholder="Mês (1-12)" style="width:110px">
+              <span style="color:var(--text3)">/</span>
+              <input class="inp" id="pat-asset-month-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:110px">
+            </div>
+          </div>
+          <div class="field">
+            <label class="lbl">Valor inicial</label>
+            <input class="inp" id="pat-asset-value" type="number" step="0.01" placeholder="0,00">
+          </div>
+          <div class="info-box" style="font-size:12px;margin-top:4px">
+            O valor será atualizado automaticamente todo mês usando o IPCA mensal conforme a tendência escolhida. Você pode editar qualquer mês diretamente na tabela a qualquer momento.
+          </div>
+        </div>
+        <!-- Financing section — toggled by checkbox -->
+        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="pat-financed-check" onchange="patToggleFinancingSection()">
+          Este ativo é financiado (parcelas a pagar)
+        </label>
+        <div id="pat-financing-section" style="display:none">
+          <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+          <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Contrato de Financiamento</div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+            <div class="field" style="margin:0">
+              <label class="lbl">Sistema de amortização</label>
+              <select class="inp" id="fin-system" onchange="onFinSystemChange()">
+                <option value="SAC">SAC (parcela decrescente)</option>
+                <option value="PRICE">PRICE (parcela fixa)</option>
+                <option value="SAM">SAM (misto)</option>
+                <option value="PLANTA">Planta (sem juros, só correção)</option>
+              </select>
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Índice de correção</label>
+              <select class="inp" id="fin-index">
+                <option value="none">Sem correção (taxa nominal)</option>
+                <option value="TR">TR (Taxa Referencial)</option>
+                <option value="IPCA">IPCA</option>
+                <option value="IGP-M">IGP-M</option>
+                <option value="INCC">INCC</option>
+              </select>
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Taxa de juros nominal (% a.a.)</label>
+              <input class="inp fin-percent" id="fin-rate" type="text" placeholder="Ex: 10,50%">
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Valor financiado (R$)</label>
+              <input class="inp fin-currency" id="fin-principal" type="text" placeholder="R$ 0,00">
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Nº de parcelas mensais</label>
+              <input class="inp" id="fin-installments" type="number" min="1" placeholder="Ex: 360">
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Primeira parcela</label>
+              <div style="display:flex;gap:4px">
+                <input class="inp" id="fin-first-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+                <input class="inp" id="fin-first-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+              </div>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+            <div class="field" style="margin:0">
+              <label class="lbl">Entrada / chaves (R$) <span style="font-weight:400;color:var(--text3)">opcional</span></label>
+              <input class="inp fin-currency" id="fin-balloon" type="text" placeholder="R$ 0,00">
+            </div>
+            <div class="field" style="margin:0" id="fin-rate-field">
+              <label class="lbl">Saldo nas chaves (R$) <span style="font-weight:400;color:var(--text3)">planta</span></label>
+              <input class="inp fin-currency" id="fin-keys-balance" type="text" placeholder="R$ 0,00">
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Parcela anual extra — mês</label>
+              <input class="inp" id="fin-extra-month" type="number" min="1" max="12" placeholder="Ex: 12">
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Parcela anual extra — valor (R$)</label>
+              <input class="inp fin-currency" id="fin-extra-value" type="text" placeholder="R$ 0,00">
+            </div>
+          </div>
+
+          <div class="field" style="margin-bottom:8px;max-width:260px">
+            <label class="lbl">Valor total do imóvel/ativo (R$)</label>
+            <input class="inp fin-currency" id="fin-asset-value" type="text" placeholder="R$ 0,00"
+              title="Valor de mercado do bem. Registra o ativo com este valor e uma movimentação de compra no mês inicial.">
+          </div>
+
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn sm" onclick="patGenerateSchedule()">⚙️ Gerar cronograma</button>
+            <button class="btn sm" onclick="ff.financingFetchIndexes().then(r => { const ok=r.updated.join(', ')||'nenhum'; const err=r.errors.length?` | Erros: ${r.errors.join(', ')}`:'';
+toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message))">📡 Atualizar índices (TR/IGP-M/INCC)</button>
+            <span id="fin-schedule-summary" style="font-size:11px;color:var(--text3)"></span>
+          </div>
+
+          <!-- Schedule preview (first 6 + projection warning) -->
+          <div id="fin-schedule-preview" style="margin-top:10px;display:none">
+            <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden">
+              <div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
+                <span>Mês</span><span class="right">Parcela</span><span class="right">Principal</span><span class="right">Juros</span><span class="right">Saldo</span><span class="right">Tipo</span>
+              </div>
+              <div id="fin-schedule-body" style="max-height:200px;overflow-y:auto;font-size:11px"></div>
+            </div>
+            <div style="margin-top:6px;font-size:11px;color:#f59e0b;background:#fef3c7;padding:6px 10px;border-radius:6px;border:1px solid #fde68a">
+              ⚠️ As parcelas futuras são uma projeção em valores constantes (sem correção monetária futura), calculada para referência. O saldo devedor só será reduzido conforme o registro de parcelas pagas nas contas bancárias.
+            </div>
+          </div>
+        </div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+        <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Histórico mensal — Movimentações</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Coluna de movimentação aceita valores negativos (saída de caixa) e positivos (entrada). Tipos que afetam o valor do ativo atualizam automaticamente a posição.</div>
+        <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden;margin-bottom:8px">
+          <div style="display:grid;grid-template-columns:110px 1fr 140px 140px 36px;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
+            <span>Mês</span>
+            <span>Tipo</span>
+            <span style="text-align:right;padding-right:4px">Valor ativo (R$)</span>
+            <span style="text-align:right;padding-right:4px">Movimentação</span>
+            <span></span>
+          </div>
+          <div id="pat-tx-table" style="max-height:320px;overflow-y:auto"></div>
+          <div style="padding:8px 10px;border-top:1px solid var(--border);background:var(--bg4);display:flex;gap:8px;align-items:center">
+            <button class="btn xs" onclick="patTxAddRow()">+ Adicionar linha</button>
+            <button class="btn xs" onclick="patTxRepeatLast()" title="Repetir último lançamento no mês seguinte">↻ Repetir anterior</button>
+            <span style="font-size:11px;color:var(--text3)">Deixe "Valor ativo" em branco para usar o cálculo automático por IPCA</span>
+          </div>
+        </div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+        <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px">Venda / Saída (opcional)</div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <div class="field" style="margin:0;flex:1;min-width:120px">
+            <label class="lbl">Mês de venda</label>
+            <div style="display:flex;gap:6px">
+              <input class="inp" id="pat-asset-sold-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px">
+              <input class="inp" id="pat-asset-sold-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:90px">
+            </div>
+          </div>
+          <div class="field" style="margin:0;flex:1;min-width:120px">
+            <label class="lbl">Valor de venda</label>
+            <input class="inp" id="pat-asset-sold-value" type="number" step="0.01" placeholder="0,00">
+          </div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="pat-asset-hidden">
+          Ocultar ativo (ex: já vendido ou não mais relevante)
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-pat-asset')">Cancelar</button>
+        <button class="btn primary" onclick="savePatAsset()">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Selecionar contas para patrimônio -->
+  <div class="overlay" id="modal-pat-accounts" style="z-index:400">
+    <div class="modal" style="width:460px">
+      <div class="modal-hdr">
+        <h3>Contas no Patrimônio</h3>
+        <button class="btn-icon" onclick="closeModal('modal-pat-accounts')">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:13px;color:var(--text2);margin-bottom:12px">
+          Selecione e ordene as contas. Use ▲▼ para reordenar.
+        </p>
+        <div id="pat-accounts-selector"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-pat-accounts')">Cancelar</button>
+        <button class="btn primary" onclick="savePatAccounts()">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- BACKUP -->
+  <div id="page-backup" class="page">
+
+    <!-- Language selector -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header"><h3>🌐 Idioma / Language / Idioma</h3></div>
+      <div style="padding:16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="btn lang-btn" data-lang="pt" onclick="changeLanguage('pt')">🇧🇷 Português</button>
+          <button class="btn lang-btn" data-lang="en" onclick="changeLanguage('en')">🇺🇸 English</button>
+          <button class="btn lang-btn" data-lang="es" onclick="changeLanguage('es')">🇪🇸 Español</button>
+        </div>
+        <span id="lang-current" style="font-size:12px;color:var(--text3)"></span>
+      </div>
+    </div>
+
+    <!-- Tour restart + manual -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header"><h3>🎓 Tour e Manual</h3></div>
+      <div style="padding:16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+        <div style="font-size:13px;color:var(--text2)">Reveja o tour guiado ou abra o manual completo no idioma selecionado.</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" onclick="openManual()">📖 Abrir manual</button>
+          <button class="btn primary" onclick="startTour()">▶ Reiniciar tour</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Data directory -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header"><h3>📁 Pasta de dados</h3></div>
+      <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:13px;color:var(--text2)">
+          Escolha onde o Cruzeiro guarda os dados. Use uma pasta do Dropbox ou OneDrive para sincronizar entre computadores.
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--text3)">Pasta atual:</span>
+          <code id="settings-data-dir" style="font-size:12px;background:var(--bg3);padding:4px 10px;border-radius:5px;flex:1">Pasta padrão do sistema</code>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn primary" onclick="pickDataDir()">📂 Escolher pasta…</button>
+          <button class="btn" id="settings-clear-dir-btn" onclick="clearDataDir()" style="display:none">✕ Usar pasta padrão</button>
+        </div>
+        <div class="info-box" style="font-size:12px">
+          💡 Após mudar a pasta, o arquivo de dados atual é copiado automaticamente para o novo local. Reinicie o app para garantir que tudo está sincronizado.
+        </div>
+      </div>
+    </div>
+
+    <!-- Password -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header"><h3>🔐 Senha de acesso</h3></div>
+      <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:13px;color:var(--text2)">
+          Defina uma senha para proteger o Cruzeiro. Ela será solicitada toda vez que o app for aberto.
+        </div>
+        <div id="settings-pw-current-row" style="display:none" class="field">
+          <label class="lbl">Senha atual</label>
+          <input class="inp" type="password" id="settings-pw-current" placeholder="Senha atual" style="max-width:300px">
+        </div>
+        <div class="field">
+          <label class="lbl" id="settings-pw-new-label">Nova senha</label>
+          <input class="inp" type="password" id="settings-pw-new" placeholder="Nova senha (deixe vazio para remover)" style="max-width:300px">
+        </div>
+        <div class="field">
+          <label class="lbl">Confirmar senha</label>
+          <input class="inp" type="password" id="settings-pw-confirm" placeholder="Confirmar nova senha" style="max-width:300px">
+        </div>
+        <div class="field">
+          <label class="lbl">Email de recuperação <span style="font-size:11px;color:var(--red)">*obrigatório</span></label>
+          <input class="inp" type="email" id="settings-pw-email" placeholder="seu@email.com" style="max-width:300px">
+          <div id="settings-pw-email-current" style="display:none"></div>
+        </div>
+        <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--text2);margin-bottom:8px">
+          🔐 <strong>Como funciona a segurança:</strong><br>
+          Ao definir uma senha, o banco de dados é criptografado com <strong>AES-256-GCM</strong>.
+          Um código de recuperação é enviado ao seu email — sem ele, não é possível redefinir a senha.
+          Um backup local de emergência também é salvo automaticamente.
+        </div>
+        <div id="settings-pw-status" style="font-size:12px;min-height:16px"></div>
+        <div>
+          <button class="btn primary" onclick="savePassword()">Salvar senha</button>
+          <button class="btn" id="settings-remove-pw-btn" onclick="removePassword()" style="display:none;margin-left:8px;color:var(--red)">Remover senha</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- License -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header">
+        <h3>🔑 Licença</h3>
+        <div style="display:flex;gap:8px;margin-left:auto">
+          <span id="settings-lic-status" style="font-size:12px;color:var(--text3);align-self:center"></span>
+          <button class="btn sm" onclick="openLicenseModal()">Ver detalhes</button>
+        </div>
+      </div>
+      <div style="padding:12px 16px;font-size:13px;color:var(--text2)">
+        6 meses gratuitos · R$79/ano após o período · Gratuito para renda &lt; R$3.000/mês, despesa &lt; R$5.000/mês e patrimônio &lt; R$100.000
+      </div>
+    </div>
+
+    <!-- Export -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header">
+        <h3>📤 Exportar dados</h3>
+        <div style="display:flex;gap:8px;margin-left:auto">
+          <button class="btn sm" onclick="exportCSV()">📊 CSV</button>
+          <button class="btn sm" onclick="exportQIF()">🔄 QIF</button>
+          <button class="btn sm primary" onclick="exportData()">📦 JSON completo</button>
+        </div>
+      </div>
+      <div style="padding:12px 16px;font-size:13px;color:var(--text2)">
+        <strong>JSON completo</strong> — exporta todos os dados (contas, lançamentos, patrimônio, investimentos, metas, orçamentos) em formato estruturado. Ideal para backup.<br>
+        <strong>CSV</strong> — lançamentos em formato tabular, compatível com Excel e Google Sheets.<br>
+        <strong>QIF</strong> — formato padrão da indústria (Quicken Interchange Format), compatível com Quicken, Microsoft Money, GnuCash e a maioria dos apps de finanças pessoais.
+      </div>
+    </div>
+
+    <!-- Backups -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header">
+        <h3>Backups automáticos</h3>
+        <div style="display:flex;gap:8px;margin-left:auto">
+          <button class="btn sm" onclick="openBackupFolder()">📁 Abrir pasta</button>
+          <button class="btn sm primary" onclick="doManualBackup()">💾 Fazer backup agora</button>
+        </div>
+      </div>
+      <div class="info-box" style="margin:14px;font-size:13px">
+        Um backup é criado automaticamente <strong>toda vez que o app é aberto</strong>. Os últimos 30 backups são mantidos.
+        Para restaurar, clique em "Restaurar" ao lado do backup desejado.
+      </div>
+      <div class="tbl-outer">
+        <table class="ledger">
+          <thead><tr><th>Arquivo</th><th class="right">Tamanho</th><th class="center">Ações</th></tr></thead>
+          <tbody id="backup-list"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- EVOLUÇÃO -->
+  <div id="page-evolucao" class="page">
+    <!-- Toolbar -->
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <div class="field" style="margin:0">
+        <label class="lbl">Visualização</label>
+        <div style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+          <button id="ev-view-summary" class="btn sm primary" onclick="evSetView('summary')" style="border-radius:0;border:none;padding:5px 12px;font-size:12px">Resumo</button>
+          <button id="ev-view-categories" class="btn sm" onclick="evSetView('categories')" style="border-radius:0;border:none;border-left:1px solid var(--border);padding:5px 12px;font-size:12px">Por categoria</button>
+        </div>
+      </div>
+      <div class="field" style="margin:0">
+        <label class="lbl">Mostrar</label>
+        <div style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+          <button id="ev-display-table" class="btn sm primary" onclick="evSetDisplay('table')" style="border-radius:0;border:none;padding:5px 12px;font-size:12px">📋 Tabela</button>
+          <button id="ev-display-charts" class="btn sm" onclick="evSetDisplay('charts')" style="border-radius:0;border:none;border-left:1px solid var(--border);padding:5px 12px;font-size:12px">📈 Gráficos</button>
+        </div>
+      </div>
+      <div class="field" style="margin:0">
+        <label class="lbl">Ano</label>
+        <select class="inp" id="ev-year" onchange="refreshEvolucao()" style="width:auto">
+          <option value="all">Todos os anos</option>
+        </select>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="ev-ipca" onchange="refreshEvolucao()" checked>
+        Corrigir pelo IPCA
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="ev-ma" onchange="refreshEvolucao()" checked>
+        Média móvel 12m
+      </label>
+      <button class="btn sm" onclick="openEvCatSelector('summary')">🏷 Cat. Resumo</button>
+      <button class="btn sm" onclick="openEvCatSelector('categories')">🏷 Cat. Categorias</button>
+      <button class="btn sm" onclick="fetchIPCA()" title="Buscar IPCA mensal do Banco Central">📡 Atualizar IPCA</button>
+    </div>
+    <div id="ev-ipca-status" style="display:none;font-size:12px;color:var(--text3);margin-bottom:8px;padding:6px 12px;background:var(--bg3);border-radius:6px"></div>
+
+    <!-- TABLE VIEW -->
+    <div id="ev-table-view">
+      <div class="tbl-card">
+        <div class="tbl-header">
+          <h3 id="ev-table-title">Dados mensais</h3>
+          <span id="ev-ipca-note" style="font-size:11px;color:var(--text3)"></span>
+        </div>
+        <div style="overflow-x:auto;overflow-y:auto;max-height:600px">
+          <table id="ev-table" style="border-collapse:collapse;font-size:13px;table-layout:auto;white-space:nowrap">
+            <thead id="ev-thead"></thead>
+            <tbody id="ev-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- CHART VIEW -->
+    <div id="ev-chart-view" style="display:none">
+      <div id="ev-charts-container"></div>
+    </div>
+  </div>
+
+  <!-- RECURRING -->
+  <div id="page-recurring" class="page">
+    <div style="margin-bottom:14px">
+      <button class="btn primary" onclick="openRecurringModal()">+ Nova recorrência</button>
+    </div>
+    <div id="recurring-list"></div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+>
+
+<!-- Row context menu -->
+<div id="row-ctx-menu" style="display:none;position:fixed;z-index:8000;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.15);padding:4px 0;min-width:220px;font-size:13px">
+  <div class="ctx-item" onclick="ctxDuplicate()">📋 Duplicar transação</div>
+  <div class="ctx-item" onclick="ctxDuplicateToday()">📋 Duplicar com data de hoje</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="ctxToggleCleared(true)">✅ Marcar como conferida</div>
+  <div class="ctx-item" onclick="ctxToggleCleared(false)">○ Marcar como não conferida</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="ctxCreateRecurring()">🔄 Criar recorrência</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item ctx-danger" onclick="ctxDelete()">🗑 Excluir</div>
+</div>
+<div id="global-cat-drop" style="display:none;position:fixed;background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-lg);z-index:9999;max-height:280px;overflow-y:auto;min-width:280px;box-shadow:0 6px 24px rgba(0,0,0,.12)"></div>
+
+<!-- ══ MODALS ══ -->
+
+<!-- Transaction -->
+<div class="overlay" id="modal-tx">
+  <div class="modal">
+    <div class="modal-hdr">
+      <h3 id="modal-tx-title">Novo lançamento</h3>
+      <button class="btn-icon" onclick="closeModal('modal-tx')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-row">
+        <div class="field">
+          <label class="lbl">Conta</label>
+          <select class="inp" id="tx-account"></select>
+        </div>
+        <div class="field">
+          <label class="lbl">Data</label>
+          <input type="date" class="inp" id="tx-date">
+        </div>
+      </div>
+      <div class="field">
+        <label class="lbl" data-i18n="tx_memo">Memorando</label>
+        <input type="text" class="inp" id="tx-memo" placeholder="Descrição do lançamento" oninput="mlSuggest()">
+      </div>
+      <div class="field">
+        <label class="lbl">Categoria</label>
+        <div style="display:flex;gap:4px">
+          <input type="text" class="inp" id="tx-category" placeholder="Ex: Alimentação:Restaurante" autocomplete="off"
+            oninput="openGlobalCatDrop(this)"
+            onfocus="openGlobalCatDrop(this)"
+            style="flex:1">
+          <button type="button" class="btn" tabindex="-1"
+            onmousedown="event.preventDefault();openGlobalCatDrop(G('tx-category'))">▾</button>
+        </div>
+        <div id="ml-suggestion" style="margin-top:5px;font-size:12px;color:var(--text3);min-height:16px"></div>
+      </div>
+      <div class="amount-fields">
+        <div class="field amount-field-exp" style="margin:0">
+          <label class="lbl" style="color:var(--red)">💸 Despesa</label>
+          <input type="number" class="inp" id="tx-expense" placeholder="0,00" step="0.01" min="0" oninput="onAmtInput('expense')">
+          <div class="fx-hint" id="tx-expense-fx"></div>
+        </div>
+        <div class="field amount-field-inc" style="margin:0">
+          <label class="lbl" style="color:var(--green)">💰 Receita</label>
+          <input type="number" class="inp" id="tx-income" placeholder="0,00" step="0.01" min="0" oninput="onAmtInput('income')">
+          <div class="fx-hint" id="tx-income-fx"></div>
+        </div>
+      </div>
+    </div>
+      <div style="border-top:1px solid var(--border);margin:0 16px 4px;padding-top:8px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text3)">
+          <input type="checkbox" id="tx-pat-toggle" onchange="G('tx-pat-section').style.display=this.checked?'':'none'">
+          Vincular a ativo imobilizado
+        </label>
+      </div>
+      <div id="tx-pat-section" style="margin:0 16px 10px;padding-top:6px;display:none">
+        <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">🏠 Vincular a ativo imobilizado (opcional)</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <div class="field" style="flex:2;margin:0">
+            <label class="lbl">Ativo</label>
+            <select class="inp" id="tx-pat-asset" onchange="onTxPatAssetChange()">
+              <option value="">— Nenhum —</option>
+            </select>
+          </div>
+          <div class="field" style="flex:2;margin:0">
+            <label class="lbl">Tipo de movimentação</label>
+            <select class="inp" id="tx-pat-type">
+              <option value="aluguel">🏠 Aluguel recebido</option>
+              <option value="dividendo">💰 Dividendo</option>
+              <option value="jcp">💵 JCP</option>
+              <option value="aporte">➕ Aporte de capital</option>
+              <option value="reducao">📉 Redução de capital</option>
+              <option value="compra">🟢 Compra / Entrada</option>
+              <option value="despesa">📋 Despesa do ativo</option>
+              <option value="parcela_financiamento">🏦 Parcela de financiamento</option>
+              <option value="venda">🔴 Venda</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-tx')" data-i18n="btn_cancel">Cancelar</button>
+      <button class="btn primary" onclick="saveTx()" data-i18n="btn_save">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Transfer -->
+<div class="overlay" id="modal-transfer">
+  <div class="modal">
+    <div class="modal-hdr">
+      <h3 data-i18n="transfer_title">Transferência entre contas</h3>
+      <button class="btn-icon" onclick="closeModal('modal-transfer')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-row" style="align-items:flex-end">
+        <div class="field">
+          <label class="lbl" data-i18n="transfer_from">De (origem)</label>
+          <select class="inp" id="tr-from"></select>
+        </div>
+        <button class="btn-icon" title="Inverter contas" style="margin-bottom:4px;font-size:18px;padding:4px 8px" onclick="swapTransferAccounts()">⇄</button>
+        <div class="field">
+          <label class="lbl" data-i18n="transfer_to">Para (destino)</label>
+          <select class="inp" id="tr-to"></select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="lbl">Data</label>
+          <input type="date" class="inp" id="tr-date">
+        </div>
+        <div class="field">
+          <label class="lbl">Valor</label>
+          <input type="number" class="inp" id="tr-amount" placeholder="0,00" step="0.01" min="0">
+        </div>
+      </div>
+      <div class="field">
+        <label class="lbl">Memorando (opcional)</label>
+        <input type="text" class="inp" id="tr-memo" placeholder="Ex: Pagamento Cartão BTG">
+      </div>
+      <div class="info-box" style="font-size:12px;margin-top:4px">Cria saída na origem e entrada no destino, vinculadas automaticamente.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-transfer')">Cancelar</button>
+      <button class="btn primary" onclick="saveTransfer()">Registrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Account -->
+<div class="overlay" id="modal-account">
+  <div class="modal">
+    <div class="modal-hdr">
+      <h3 id="modal-account-title">Nova conta</h3>
+      <button class="btn-icon" onclick="closeModal('modal-account')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label class="lbl">Nome</label>
+        <input type="text" class="inp" id="acc-name" placeholder="Ex: Itaú">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="lbl">Tipo</label>
+          <select class="inp" id="acc-type">
+            <option value="bank">Conta bancária</option>
+            <option value="credit">Cartão de crédito</option>
+            <option value="cash">Caixa / dinheiro</option>
+            <option value="investment">Investimento</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="lbl">Moeda</label>
+          <select class="inp" id="acc-currency">
+            <option value="BRL">BRL — Real</option>
+            <option value="USD">USD — Dólar</option>
+            <option value="EUR">EUR — Euro</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-account')">Cancelar</button>
+      <button class="btn primary" onclick="saveAccount()">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Manage Accounts -->
+<div class="overlay" id="modal-manage-accounts">
+  <div class="modal" style="width:580px">
+    <div class="modal-hdr">
+      <h3>Gerenciar contas</h3>
+      <button class="btn-icon" onclick="closeModal('modal-manage-accounts')">✕</button>
+    </div>
+    <div class="modal-body" id="manage-accounts-list"></div>
+    <div class="modal-footer">
+      <button class="btn primary" onclick="closeModal('modal-manage-accounts');openNewAccount()">+ Nova conta</button>
+      <button class="btn" onclick="closeModal('modal-manage-accounts');openOpeningBalances()">⚖ Saldos iniciais</button>
+      <button class="btn" onclick="closeModal('modal-manage-accounts')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Recurring -->
+<div class="overlay" id="modal-recurring" style="z-index:300">
+  <div class="modal">
+    <div class="modal-hdr">
+      <h3 id="rec-modal-title">Nova recorrência</h3>
+      <button class="btn-icon" onclick="closeModal('modal-recurring')">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="rec-editing-id">
+      <div class="field">
+        <label class="lbl">Conta</label>
+        <select class="inp" id="rec-account"></select>
+      </div>
+      <div class="field">
+        <label class="lbl">Memorando</label>
+        <input type="text" class="inp" id="rec-memo" placeholder="Ex: Netflix">
+      </div>
+      <div class="field">
+        <label class="lbl">Categoria</label>
+        <div class="cat-wrap">
+          <input type="text" class="inp" id="rec-category" placeholder="Categoria" autocomplete="off"
+            oninput="openCatDrop('rec-category','rec-cat-drop')"
+            onfocus="openCatDrop('rec-category','rec-cat-drop')"
+            onblur="closeCatDrop('rec-cat-drop')"
+            onkeydown="catKey(event,'rec-cat-drop','rec-category')">
+          <div class="cat-drop" id="rec-cat-drop"></div>
+        </div>
+      </div>
+      <!-- Transfer destination (shown only when category = Transferência) -->
+      <div class="field" id="rec-transfer-row" style="display:none">
+        <label class="lbl">Conta destino (transferência)</label>
+        <select class="inp" id="rec-transfer-to"></select>
+      </div>
+      <div class="amount-fields">
+        <div class="field amount-field-exp" style="margin:0">
+          <label class="lbl" style="color:var(--red)">💸 Despesa</label>
+          <input type="number" class="inp" id="rec-expense" step="0.01" min="0" placeholder="0,00">
+        </div>
+        <div class="field amount-field-inc" style="margin:0">
+          <label class="lbl" style="color:var(--green)">💰 Receita</label>
+          <input type="number" class="inp" id="rec-income" step="0.01" min="0" placeholder="0,00">
+        </div>
+      </div>
+      <div class="field-row" style="margin-top:12px">
+        <div class="field" style="margin:0">
+          <label class="lbl">Frequência</label>
+          <select class="inp" id="rec-freq">
+            <option value="weekly">Semanal</option>
+            <option value="biweekly">Quinzenal</option>
+            <option value="monthly" selected>Mensal</option>
+            <option value="bimonthly">Bimestral</option>
+            <option value="quarterly">Trimestral</option>
+            <option value="yearly">Anual</option>
+          </select>
+        </div>
+        <div class="field" style="margin:0">
+          <label class="lbl">Primeira data</label>
+          <input type="date" class="inp" id="rec-next">
+        </div>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label class="lbl">Data final <span style="font-weight:400;color:var(--text3)">(opcional — sem data = indefinida até 5 anos à frente)</span></label>
+        <input type="date" class="inp" id="rec-end" style="max-width:200px">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-recurring')">Cancelar</button>
+      <button class="btn primary" onclick="saveRecurring()">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Category Filter Modal -->
+<!-- Category Types Config Modal -->
+<div class="overlay" id="modal-cat-types" style="z-index:400">
+  <div class="modal" style="width:580px;max-height:80vh;display:flex;flex-direction:column">
+    <div class="modal-hdr">
+      <div>
+        <h3>Tipo de cada categoria</h3>
+        <div style="font-size:12px;color:var(--text3);margin-top:2px">Define se a categoria é Receita ou Despesa — usado nos cards e relatórios</div>
+      </div>
+      <button class="btn-icon" onclick="closeModal('modal-cat-types')">✕</button>
+    </div>
+    <div id="cat-types-body" style="overflow-y:auto;flex:1;padding:12px 18px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-cat-types')">Cancelar</button>
+      <button class="btn primary" onclick="saveCatTypes()">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="modal-cat-filter">
+  <div class="modal" style="width:580px">
+    <div class="modal-hdr">
+      <h3>Configurar categorias excluídas dos gráficos</h3>
+      <button class="btn-icon" onclick="closeModal('modal-cat-filter')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="info-box" style="margin-bottom:14px;font-size:13px">
+        Marque as categorias que devem ser <strong>excluídas</strong> dos gráficos de pizza e de tendência (ex: categorias que representam contas ou transferências).
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="btn xs" onclick="catFilterSelectAll(true)">Marcar todas</button>
+        <button class="btn xs" onclick="catFilterSelectAll(false)">Desmarcar todas</button>
+        <button class="btn xs" onclick="catFilterSelectSuggested()">Sugeridas ⚡</button>
+      </div>
+      <div id="cat-filter-list" style="max-height:360px;overflow-y:auto;display:grid;grid-template-columns:1fr 1fr;gap:4px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-cat-filter')">Cancelar</button>
+      <button class="btn primary" onclick="saveCatFilter()">Aplicar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Category Detail Modal -->
+<div class="overlay" id="modal-cat-detail" style="z-index:400">
+  <div class="modal" style="width:760px;max-height:85vh;display:flex;flex-direction:column">
+    <div class="modal-hdr">
+      <div>
+        <h3 id="cat-detail-title">Detalhe da categoria</h3>
+        <div id="cat-detail-period" style="font-size:12px;color:var(--text3);margin-top:2px"></div>
+      </div>
+      <button class="btn-icon" onclick="closeModal('modal-cat-detail')">✕</button>
+    </div>
+    <div style="overflow-y:auto;flex:1">
+      <div id="cat-detail-body" style="padding:0"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Manage Saved Reports Modal -->
+<div class="overlay" id="modal-manage-saved" style="z-index:600">
+  <div class="modal" style="width:520px;max-height:70vh;display:flex;flex-direction:column">
+    <div class="modal-hdr">
+      <h3>Relatórios salvos</h3>
+      <button class="btn-icon" onclick="closeModal('modal-manage-saved')">✕</button>
+    </div>
+    <div id="manage-saved-body" style="overflow-y:auto;flex:1;padding:14px 18px"></div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-manage-saved')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Save Report Modal -->
+<div class="overlay" id="modal-save-report" style="z-index:600">
+  <div class="modal" style="width:400px">
+    <div class="modal-hdr">
+      <h3>Salvar relatório</h3>
+      <button class="btn-icon" onclick="closeModal('modal-save-report')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label class="lbl">Nome do relatório</label>
+        <input type="text" class="inp" id="save-report-name" placeholder="Ex: Despesas mensais — família"
+          onkeydown="if(event.key==='Enter') confirmSaveReport()">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-save-report')">Cancelar</button>
+      <button class="btn primary" onclick="confirmSaveReport()">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Opening Balance -->
+<div class="overlay" id="modal-opening-balance">
+  <div class="modal" style="width:560px">
+    <div class="modal-hdr">
+      <h3>Ajuste de saldo inicial</h3>
+      <button class="btn-icon" onclick="closeModal('modal-opening-balance')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="info-box" style="margin-bottom:14px;font-size:13px;line-height:1.7">
+        Insira o saldo correto para cada conta. Será criado um lançamento de ajuste com a diferença em relação ao saldo atual importado. Deixe em branco as contas que já estão corretas.
+      </div>
+      <div id="opening-balance-fields"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal('modal-opening-balance')">Cancelar</button>
+      <button class="btn primary" onclick="saveOpeningBalances()">Aplicar ajustes</button>
+    </div>
+  </div>
+</div>
+
+<script src="i18n.js"></script>
+<script src="renderer.js"></script>
+
+<!-- custom-parser modal (global, not inside .page) -->
+<div class="overlay" id="modal-custom-parser" style="z-index:8000">
+      <div class="modal" style="max-width:640px;width:96%">
+        <div class="modal-header">
+          <h3 id="custom-parser-title" style="margin:0;font-size:15px">Configurar novo banco</h3>
+          <button class="btn-icon" onclick="closeModal('modal-custom-parser')">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px" id="custom-parser-body">
+        </div>
+        <div class="modal-footer" style="padding:12px 16px;display:flex;gap:8px;justify-content:flex-end" id="custom-parser-footer">
+        </div>
+      </div>
+    </div
+
+
+<!-- ═══ TOUR DE BOAS-VINDAS ═══ -->
+<div id="tour-overlay" style="display:none">
+  <div id="tour-backdrop"></div>
+  <div id="tour-spotlight" style="display:none"></div>
+  <div id="tour-card">
+    <div class="tour-header">
+      <div class="tour-icon" id="tour-step-icon">👋</div>
+      <div>
+        <div class="tour-title" id="tour-step-title">Bem-vindo ao Cruzeiro!</div>
+        <div class="tour-subtitle" id="tour-step-subtitle">Passo 1 de 12</div>
+      </div>
+    </div>
+    <div class="tour-body" id="tour-step-body"></div>
+    <div class="tour-footer">
+      <div id="tour-dots"></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="tour-skip" onclick="tourSkip()">Pular tour</button>
+        <button id="tour-back" class="btn" onclick="tourBack()" style="display:none">‹ Voltar</button>
+        <button id="tour-next" class="btn primary" onclick="tourNext()">Próximo →</button>
+      </div>
+    </div>
+  </div>
+</div>
+  <!-- ═══ CONFIRM DIALOG ═══ -->
+  <div class="overlay" id="modal-confirm" style="z-index:9999">
+    <div class="modal" style="width:360px;padding:0;overflow:hidden">
+      <div style="padding:20px 20px 12px">
+        <div style="font-size:15px;font-weight:600;margin-bottom:8px" id="modal-confirm-title">Confirmar</div>
+        <div style="font-size:13px;color:var(--text2)" id="modal-confirm-detail"></div>
+      </div>
+      <div class="modal-footer" style="gap:8px">
+        <button class="btn" id="modal-confirm-cancel" onclick="confirmDialogResolve(false)">Cancelar</button>
+        <button class="btn primary" id="modal-confirm-ok" onclick="confirmDialogResolve(true)">Confirmar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ LICENSE GATE MODAL ══ -->
+  <div class="overlay" id="modal-license" style="z-index:3000;display:none">
+    <div class="modal" style="max-width:480px">
+      <div class="modal-header">
+        <h3>🔑 Licença do Cruzeiro</h3>
+      </div>
+      <div class="modal-body" style="padding:20px">
+        <div id="lic-message" style="margin-bottom:16px;font-size:14px;line-height:1.6"></div>
+
+        <!-- Trial banner -->
+        <div id="lic-trial-banner" style="display:none;background:var(--accent-lt);border:1px solid var(--accent);border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px">
+          <strong>🎉 Período gratuito ativo!</strong><br>
+          <span id="lic-trial-days"></span>
+        </div>
+
+        <!-- Social free banner -->
+        <div id="lic-social-banner" style="display:none;background:#dcfce7;border:1px solid #16a34a;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;color:#14532d">
+          <strong>✅ Uso gratuito ativo</strong><br>
+          Seu perfil de renda e patrimônio está dentro dos limites de uso gratuito. Continue usando sem custo.
+        </div>
+
+        <!-- Payment required -->
+        <div id="lic-payment-section" style="display:none">
+          <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;color:#92400e">
+            <strong>⚠️ Período gratuito encerrado</strong><br>
+            <span id="lic-payment-reason"></span>
+          </div>
+
+          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+            <div style="font-size:16px;font-weight:700;margin-bottom:4px">Cruzeiro — Licença anual</div>
+            <div style="font-size:24px;font-weight:700;color:var(--accent)">R$ 79,00 <span style="font-size:13px;font-weight:400;color:var(--text3)">/ano</span></div>
+            <div style="font-size:12px;color:var(--text3);margin-top:4px">Acesso completo a todas as funcionalidades</div>
+          </div>
+
+          <div style="font-size:13px;color:var(--text2);margin-bottom:12px">
+            Após o pagamento, você receberá um <strong>código de licença</strong> por email. Insira abaixo:
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div>
+              <label class="lbl">Email usado na compra</label>
+              <input class="inp" type="email" id="lic-email-inp" placeholder="seu@email.com" style="width:100%">
+            </div>
+            <div>
+              <label class="lbl">Código de licença</label>
+              <input class="inp" type="text" id="lic-code-inp" placeholder="XXXX-XXXX-XXXX-XXXX"
+                style="width:100%;font-family:'DM Mono',monospace;letter-spacing:2px;text-transform:uppercase"
+                oninput="this.value=this.value.toUpperCase()">
+            </div>
+            <div id="lic-error" style="font-size:12px;color:var(--red);min-height:16px"></div>
+            <button class="btn primary" onclick="licActivate()">✓ Ativar licença</button>
+          </div>
+
+          <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;color:var(--text3)">
+            Ainda não tem uma licença?
+            <a href="#" onclick="licBuy()" style="color:var(--accent)">Comprar agora →</a>
+          </div>
+        </div>
+
+        <!-- Licensed -->
+        <div id="lic-licensed-section" style="display:none">
+          <div style="background:#dcfce7;border:1px solid #16a34a;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;color:#14532d">
+            <strong>✅ Licença ativa</strong><br>
+            <span id="lic-licensed-email"></span>
+          </div>
+          <button class="btn xs" style="color:var(--text3)" onclick="licDeactivate()">Remover licença deste dispositivo</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn primary" id="lic-continue-btn" onclick="licContinue()">Continuar usando</button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
