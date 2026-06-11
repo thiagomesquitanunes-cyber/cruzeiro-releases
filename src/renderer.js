@@ -1437,6 +1437,10 @@ async function ctxDuplicate(useToday) {
   const ids = selectedRows.size > 0 ? [...selectedRows] : (_ctxTargetId ? [_ctxTargetId] : []);
   if (!ids.length) return;
   const txs = window._lastTxs || [];
+  if (_licStatus?.status === 'payment_required') {
+    toast('⚠️ Licença necessária para registrar novos lançamentos. Acesse Configurações → Licença.');
+    return;
+  }
   for (const id of ids) {
     const tx = txs.find(t => t.id === id);
     if (!tx) continue;
@@ -1695,6 +1699,11 @@ const SPLIT_RULES_DEF = [
 ];
 
 async function saveTx() {
+  // Block NEW transactions when license is required (editing existing is still allowed)
+  if (_licStatus?.status === 'payment_required' && !editingTxId) {
+    toast('⚠️ Licença necessária para registrar novos lançamentos. Acesse Configurações → Licença.');
+    return;
+  }
   const account_id = parseInt(G('tx-account').value);
   const date       = G('tx-date').value;
   const memo       = G('tx-memo').value.trim();
@@ -2884,6 +2893,10 @@ function shiftMonths(isoDate, months) {
 let _pendingImport = null; // {rows, parcelInstallments, accountId, checkDailySaldo}
 
 async function confirmBankImport() {
+  if (_licStatus?.status === 'payment_required') {
+    toast('⚠️ Licença necessária para importar lançamentos. Acesse Configurações → Licença.');
+    return;
+  }
   const accountId = parseInt(G('bank-account').value);
   if (!accountId) { toast('Selecione uma conta de destino'); return; }
   if (!_bankParsed.length) { toast('Nenhum dado para importar'); return; }
@@ -4611,6 +4624,10 @@ function cancelBrokerImport() {
 }
 
 async function confirmBrokerImport() {
+  if (_licStatus?.status === 'payment_required') {
+    toast('⚠️ Licença necessária para importar dados. Acesse Configurações → Licença.');
+    return;
+  }
   const preview = G('broker-preview');
   const parsed = preview?._parsed;
   if (!parsed) return;
@@ -5282,7 +5299,11 @@ async function saveRecurring(){
     const n = result?.generated ?? 0;
     toast(`Recorrência atualizada — ${n} lançamentos futuros regenerados`);
   } else {
-    const result = await ff.createRecurring({ account_id, memo, category, amount, frequency, next_date, end_date, transfer_to_account_id });
+    if (_licStatus?.status === 'payment_required') {
+    toast('⚠️ Licença necessária para criar recorrências. Acesse Configurações → Licença.');
+    return;
+  }
+  const result = await ff.createRecurring({ account_id, memo, category, amount, frequency, next_date, end_date, transfer_to_account_id });
     const n = result?.generated ?? 0;
     const endMsg = end_date ? ` até ${fmtDate(end_date)}` : ' (indefinida, 5 anos à frente)';
     toast(`Recorrência criada — ${n} lançamentos gerados${endMsg}`);
@@ -12919,16 +12940,15 @@ async function checkLicense() {
 
   G('lic-message').innerHTML = '';
 
-  // Show modal only if payment required
-  if (status === 'payment_required') {
-    G('lic-continue-btn').style.display = 'none';
-    modal.style.display = 'flex'; modal.classList.add('open');
-  } else {
+  // payment_required: show a persistent non-blocking banner (modal still accessible via Settings)
+  // Do NOT block navigation — only block transaction creation (enforced in saveTx/import)
+  const payBanner = G('lic-payment-banner');
+  if (payBanner) payBanner.style.display = status === 'payment_required' ? '' : 'none';
+
+  // Show modal non-blockingly on first visit or trial nearing end
+  if (status === 'trial' && daysLeft <= 30) {
     G('lic-continue-btn').style.display = '';
-    // Show modal on first run or if trial — non-blocking info
-    if (status === 'trial' && daysLeft <= 30) {
-      modal.style.display = 'flex'; modal.classList.add('open');
-    }
+    modal.style.display = 'flex'; modal.classList.add('open');
   }
 }
 
@@ -12965,6 +12985,7 @@ function licBuy() {
   require('electron').shell.openExternal('https://cruzeiro.app/comprar');
 }
 
+function showLicenseModal() { openLicenseModal(); } // alias used by payment banner
 function openLicenseModal() {
   checkLicense().then(() => {
     const _lm = G('modal-license');
