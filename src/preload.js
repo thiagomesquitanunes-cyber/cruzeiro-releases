@@ -11,6 +11,7 @@ const api = {
   installUpdate:  ()      => ipcRenderer.invoke('update:install'),
   onUpdateStatus: (cb)    => ipcRenderer.on('update-status', (_, data) => cb(data)),
   onDbError:          (cb) => ipcRenderer.on('db:error', (_, data) => cb(data)),
+  onDbReloaded:       (cb) => ipcRenderer.on('db:reloaded', () => cb()),
   clearTransferPair:  (d)  => ipcRenderer.invoke('tx:clear-transfer-pair', d),
   invMonthlyTotals:   (d)  => ipcRenderer.invoke('inv:monthly-totals', d),
   brokerMlLearn:      (d)  => ipcRenderer.invoke('broker:ml-learn', d),
@@ -45,6 +46,7 @@ const api = {
   createTx:       (tx)    => ipcRenderer.invoke('tx:create', tx),
   updateTx:       (tx)    => ipcRenderer.invoke('tx:update', tx),
   deleteTx:       (id)    => ipcRenderer.invoke('tx:delete', id),
+  bankCheckMemoDups: (d)  => ipcRenderer.invoke('bank:check-memo-dups', d),
   transfer:       (data)  => ipcRenderer.invoke('tx:transfer', data),
   importBatch:    (data)  => ipcRenderer.invoke('tx:import-batch', data),
 
@@ -101,7 +103,7 @@ const api = {
   showConfirm: (msg, detail) => ipcRenderer.invoke('dialog:confirm', { message: msg, detail }),
   patFinancingContractGet:  (d) => ipcRenderer.invoke('pat:financing-contract-get', d),
   patFinancingContractSave: (d) => ipcRenderer.invoke('pat:financing-contract-save', d),
-  saveLang:    (lang) => ipcRenderer.invoke('settings:save', { language: lang }),
+  saveLang:    (lang) => ipcRenderer.invoke('settings:save-data', { language: lang }),
   licenseStatus:     ()            => ipcRenderer.invoke('license:status'),
   licenseActivate:   (code, email) => ipcRenderer.invoke('license:activate', { code, email }),
   licenseDeactivate: ()            => ipcRenderer.invoke('license:deactivate'),
@@ -131,7 +133,7 @@ const api = {
   settingsClearDataDir:()    => ipcRenderer.invoke('settings:clear-data-dir'),
   // Login window handlers
   checkPassword:       (pw)  => ipcRenderer.invoke('login:check', pw),
-  loginOk:             ()    => ipcRenderer.invoke('login:ok'),
+  loginOk:             ()    => ipcRenderer.invoke('settings:login-ok'),
   evolucaoIpcaGet:    ()   => ipcRenderer.invoke('evolucao:ipca-get'),
   evolucaoIpcaSave:   (d)  => ipcRenderer.invoke('evolucao:ipca-save', d),
   evolucaoIpcaFetch:  ()   => ipcRenderer.invoke('evolucao:ipca-fetch'),
