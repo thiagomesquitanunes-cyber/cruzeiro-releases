@@ -1848,6 +1848,31 @@ ipcMain.handle('import-defaults:save', (_, defaults) => {
     return {ok:true};
   } catch(e) { return {ok:false}; }
 });
+
+// ── Password-protected Office file support (e.g. BTG fatura XLSX) ──
+// Decryption needs Node's `crypto` + file-format parsing (cfb/xml2js), which
+// aren't available in the sandboxed renderer (contextIsolation/nodeIntegration
+// off), so it's done here in the main process via officecrypto-tool.
+ipcMain.handle('office:is-encrypted', (_, arrayBuffer) => {
+  try {
+    const officeCrypto = require('officecrypto-tool');
+    return officeCrypto.isEncrypted(Buffer.from(arrayBuffer));
+  } catch (e) {
+    return false; // if the check itself fails, treat as not encrypted (fall through to normal parsing)
+  }
+});
+
+ipcMain.handle('office:decrypt', async (_, { buffer: arrayBuffer, password }) => {
+  try {
+    const officeCrypto = require('officecrypto-tool');
+    const decrypted = await officeCrypto.decrypt(Buffer.from(arrayBuffer), { password });
+    // Return as a plain array so it survives IPC structured-clone as an ArrayBuffer on the renderer side
+    return { ok: true, buffer: decrypted.buffer.slice(decrypted.byteOffset, decrypted.byteOffset + decrypted.byteLength) };
+  } catch (e) {
+    return { ok: false, error: e.message || 'Senha incorreta ou arquivo corrompido.' };
+  }
+});
+
 // The renderer reads the file using FileReader + XLSX (already in index.html via CDN)
 // and sends parsed rows here for DB insertion with duplicate detection.
 // ── Round-2 duplicate check: same memo + category, ±7 days, any amount ──

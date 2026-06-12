@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src https://api.exchangerate-api.com https://open.er-api.com https://olinda.bcb.gov.br https://api.bcb.gov.br https://api.emailjs.com;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' https:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; connect-src https://api.exchangerate-api.com https://open.er-api.com https://olinda.bcb.gov.br https://api.bcb.gov.br https://api.emailjs.com;">
 <title>Cruzeiro</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -668,7 +668,7 @@ select.inp option{background:var(--bg2);}
       </div>
 
       <!-- Common fields: account + date filter -->
-      <div class="field-row" style="max-width:560px;margin-bottom:12px">
+      <div class="field-row" id="bank-account-row" style="max-width:560px;margin-bottom:12px">
         <div class="field" style="margin:0">
           <label class="lbl">Conta de destino</label>
           <select class="inp" id="bank-account"></select>
@@ -679,9 +679,14 @@ select.inp option{background:var(--bg2);}
         </div>
       </div>
 
-      <!-- BTG warning -->
-      <div id="btg-warn" style="display:none;margin-bottom:12px">
-        <div class="warn-box">⚠️ Arquivo BTG precisa ser descriptografado antes. Rode <code>descriptografar_btg.py</code> primeiro.</div>
+      <!-- Per-card-holder account selection (shown when the file has multiple cardholders) -->
+      <div id="bank-cardholder-accounts" style="display:none;max-width:560px;margin-bottom:12px">
+        <label class="lbl">Conta de destino por titular do cartão</label>
+        <div id="bank-cardholder-accounts-list" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
+        <div style="font-size:11px;color:var(--text3);margin-top:6px">
+          A fatura tem lançamentos de mais de um cartão/titular. Escolha para qual conta cada um deve ser importado
+          (pode ser a mesma conta para todos).
+        </div>
       </div>
 
       <!-- Status line -->
@@ -2240,6 +2245,26 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
       <div class="modal-footer" style="gap:8px">
         <button class="btn" id="modal-confirm-cancel" onclick="confirmDialogResolve(false)">Cancelar</button>
         <button class="btn primary" id="modal-confirm-ok" onclick="confirmDialogResolve(true)">Confirmar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ PASSWORD PROMPT (for encrypted XLSX/PDF imports) ═══ -->
+  <div class="overlay" id="modal-password" style="z-index:9999">
+    <div class="modal" style="width:380px;padding:0;overflow:hidden">
+      <div style="padding:20px 20px 12px">
+        <div style="font-size:15px;font-weight:600;margin-bottom:8px" id="modal-password-title">Arquivo protegido</div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:12px" id="modal-password-detail">
+          Este arquivo está protegido por senha. Informe a senha para continuar.
+        </div>
+        <input type="password" class="inp" id="modal-password-input" style="width:100%"
+          placeholder="Senha" autocomplete="off"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();passwordDialogResolve(true)}">
+        <div id="modal-password-error" style="display:none;margin-top:8px;font-size:12px;color:var(--red)"></div>
+      </div>
+      <div class="modal-footer" style="gap:8px">
+        <button class="btn" id="modal-password-cancel" onclick="passwordDialogResolve(false)">Cancelar</button>
+        <button class="btn primary" id="modal-password-ok" onclick="passwordDialogResolve(true)">Continuar</button>
       </div>
     </div>
   </div>

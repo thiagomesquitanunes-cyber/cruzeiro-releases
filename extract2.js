@@ -1,0 +1,11 @@
+const extract = require("extract-zip");
+const fs = require("fs");
+const path = require("path");
+console.log("starting...");
+const zipPath = path.join(process.env.LOCALAPPDATA, "electron", "Cache", "9bba7013435de7753e6ceff232a49ca080ff8fc26705ad97ed62e68579c487f5", "electron-v36.9.5-win32-x64.zip");
+const distDir = "C:\\temp\\electron-extract";
+console.log("zip:", zipPath, "dist:", distDir, "exists:", fs.existsSync(zipPath));
+const p = extract(zipPath, { dir: distDir });
+console.log("promise created:", typeof p, p instanceof Promise);
+p.then(function(){ console.log("SUCCESS"); }, function(e){ console.log("FAILURE:", e && e.message); console.log(e && e.stack); });
+setInterval(function(){}, 1000);
