@@ -1,7 +1,7 @@
 {
   "name": "cruzeiro",
-  "version": "4.2.0",
-  "description": "Gestão financeira pessoal",
+  "version": "4.2.4",
+  "description": "Gest\u00e3o financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
   "scripts": {
