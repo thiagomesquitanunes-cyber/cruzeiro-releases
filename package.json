@@ -1,6 +1,6 @@
 {
   "name": "cruzeiro",
-  "version": "4.2.4",
+  "version": "4.3.2",
   "description": "Gest\u00e3o financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.1.7",
+    "officecrypto-tool": "^0.0.19",
     "sql.js": "^1.10.3"
   },
   "build": {

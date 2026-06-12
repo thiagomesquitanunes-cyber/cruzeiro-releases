@@ -1,10 +1,11 @@
 {
-  "tourDone": false,
+  "tourDone": true,
   "categories": [],
   "language": "pt",
   "benchmarks": {
     "cdi": {},
     "ibov": {},
     "lastUpdate": null
-  }
+  },
+  "firstRun": "2026-06-12"
 }

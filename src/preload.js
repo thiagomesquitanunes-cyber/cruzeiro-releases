@@ -38,6 +38,8 @@ const api = {
   benchmarksFetchAll:  ()  => ipcRenderer.invoke('benchmarks:fetch-all'),
   importDefaultsGet:  ()  => ipcRenderer.invoke('import-defaults:get'),
   importDefaultsSave: (d) => ipcRenderer.invoke('import-defaults:save', d),
+  officeIsEncrypted: (buf)            => ipcRenderer.invoke('office:is-encrypted', buf),
+  officeDecrypt:     (buf, password)  => ipcRenderer.invoke('office:decrypt', { buffer: buf, password }),
   getBalance:        (id)    => ipcRenderer.invoke('accounts:balance', id),
   getBalanceBefore:  (opts)  => ipcRenderer.invoke('accounts:balance-before', opts),
 
