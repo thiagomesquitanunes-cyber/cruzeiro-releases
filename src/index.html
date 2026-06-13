@@ -70,6 +70,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;font-size:var(--font-base);colo
 
 /* ── STATS ── */
 .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}
+.stats-grid.cols-5{grid-template-columns:repeat(5,1fr);gap:8px;}
+.stats-grid.cols-5 .stat-card{padding:10px 12px;}
+.stats-grid.cols-5 .stat-lbl{font-size:10px;margin-bottom:3px;}
+.stats-grid.cols-5 .stat-val{font-size:16px;}
+.stats-grid.cols-5 .stat-val[style*="22px"]{font-size:18px!important;}
 .stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;}
 .stat-lbl{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;font-weight:600;}
 .stat-val{font-size:19px;font-weight:700;font-family:'DM Mono',monospace;}
@@ -1136,7 +1141,7 @@ select.inp option{background:var(--bg2);}
     </div>
 
     <!-- Summary cards -->
-    <div class="stats-grid" id="pat-cards" style="margin-bottom:16px"></div>
+    <div class="stats-grid cols-5" id="pat-cards" style="margin-bottom:16px"></div>
 
     <!-- TABLE VIEW -->
     <div id="pat-view-table-wrap" class="tbl-card">
@@ -1162,6 +1167,13 @@ select.inp option{background:var(--bg2);}
           <span style="font-weight:600;font-size:13px">🏠 Patrimônio Imobilizado</span>
         </div>
         <div style="position:relative;height:220px"><canvas id="pat-chart-imob"></canvas></div>
+      </div>
+      <!-- 2b. Dívidas Pessoais (hidden if no debt data) -->
+      <div class="tbl-card" id="pat-chart-debt-card" style="padding:18px;margin-bottom:16px;display:none">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <span style="font-weight:600;font-size:13px">💳 Dívidas Pessoais</span>
+        </div>
+        <div style="position:relative;height:220px"><canvas id="pat-chart-debt"></canvas></div>
       </div>
       <!-- 3. Investimentos financeiros -->
       <div class="tbl-card" style="padding:18px;margin-bottom:16px">
@@ -1385,6 +1397,118 @@ select.inp option{background:var(--bg2);}
     </div>
   </div>
 
+  <!-- Modal: Nova/Editar Dívida Pessoal -->
+  <div class="overlay" id="modal-debt" style="z-index:400">
+    <div class="modal" style="width:640px;max-width:98vw">
+      <div class="modal-hdr">
+        <h3 id="debt-modal-title">Nova dívida pessoal</h3>
+        <button class="btn-icon" onclick="closeModal('modal-debt')">✕</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="debt-id">
+        <div class="field">
+          <label class="lbl">Nome da dívida</label>
+          <input class="inp" id="debt-name" placeholder="Ex: Empréstimo pessoal, Financiamento estudantil...">
+        </div>
+        <div class="field">
+          <label class="lbl">Notas (opcional)</label>
+          <input class="inp" id="debt-notes" placeholder="Observações sobre esta dívida">
+        </div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+        <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Contrato / Cronograma de Pagamento</div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+          <div class="field" style="margin:0">
+            <label class="lbl">Sistema de amortização</label>
+            <select class="inp" id="debt-fin-system" onchange="onDebtFinSystemChange()">
+              <option value="SAC">SAC (parcela decrescente)</option>
+              <option value="PRICE">PRICE (parcela fixa)</option>
+              <option value="SAM">SAM (misto)</option>
+              <option value="PLANTA">Planta (sem juros, só correção)</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Índice de correção</label>
+            <select class="inp" id="debt-fin-index">
+              <option value="none">Sem correção (taxa nominal)</option>
+              <option value="TR">TR (Taxa Referencial)</option>
+              <option value="IPCA">IPCA</option>
+              <option value="IGP-M">IGP-M</option>
+              <option value="INCC">INCC</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Taxa de juros nominal (% a.a.)</label>
+            <input class="inp fin-percent" id="debt-fin-rate" type="text" placeholder="Ex: 10,50%">
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Valor devido (R$)</label>
+            <input class="inp fin-currency" id="debt-fin-principal" type="text" placeholder="R$ 0,00">
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Nº de parcelas mensais</label>
+            <input class="inp" id="debt-fin-installments" type="number" min="1" placeholder="Ex: 24">
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Primeira parcela</label>
+            <div style="display:flex;gap:4px">
+              <input class="inp" id="debt-fin-first-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+              <input class="inp" id="debt-fin-first-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+            </div>
+          </div>
+        </div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+        <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">🔄 Sincronização com conta bancária (opcional)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 100px;gap:8px;margin-bottom:8px">
+          <div class="field" style="margin:0">
+            <label class="lbl">Conta para lançamento das parcelas</label>
+            <select class="inp" id="debt-sync-account">
+              <option value="">— Não sincronizar —</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Categoria</label>
+            <select class="inp" id="debt-sync-category"></select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Dia de vencimento</label>
+            <input class="inp" id="debt-sync-day" type="number" min="1" max="31" placeholder="Ex: 10">
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Se preenchido, as parcelas futuras serão lançadas automaticamente nessa conta como "não conferidas", no dia escolhido de cada mês. Ao conferir o lançamento, a parcela é marcada como paga aqui.</div>
+
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn sm" onclick="debtGenerateSchedule()">⚙️ Gerar cronograma</button>
+          <span id="debt-fin-schedule-summary" style="font-size:11px;color:var(--text3)"></span>
+        </div>
+
+        <!-- Schedule preview (first 6 + projection warning) -->
+        <div id="debt-fin-schedule-preview" style="margin-top:10px;display:none">
+          <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden">
+            <div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
+              <span>Mês</span><span class="right">Parcela</span><span class="right">Principal</span><span class="right">Juros</span><span class="right">Saldo</span><span class="right">Tipo</span>
+            </div>
+            <div id="debt-fin-schedule-body" style="max-height:200px;overflow-y:auto;font-size:11px"></div>
+          </div>
+          <div style="margin-top:6px;font-size:11px;color:#f59e0b;background:#fef3c7;padding:6px 10px;border-radius:6px;border:1px solid #fde68a">
+            ⚠️ As parcelas futuras são uma projeção em valores constantes (sem correção monetária futura), calculada para referência. O saldo devedor só será reduzido conforme o registro de parcelas pagas nas contas bancárias.
+          </div>
+        </div>
+
+        <label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="debt-hidden">
+          Ocultar dívida (ex: já liquidada ou não mais relevante)
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-debt')">Cancelar</button>
+        <button class="btn primary" onclick="saveDebt()">Salvar</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: Novo/Editar Ativo -->
   <div class="overlay" id="modal-pat-asset" style="z-index:400">
     <div class="modal" style="width:680px;max-width:98vw">
@@ -1421,7 +1545,7 @@ select.inp option{background:var(--bg2);}
         </div>
         <div id="pat-initial-value-section">
           <div class="field">
-            <label class="lbl">Mês de entrada</label>
+            <label class="lbl">Mês de compra</label>
             <div style="display:flex;gap:8px;align-items:center">
               <input class="inp" id="pat-asset-month-m" type="number" min="1" max="12" placeholder="Mês (1-12)" style="width:110px">
               <span style="color:var(--text3)">/</span>
@@ -1429,7 +1553,7 @@ select.inp option{background:var(--bg2);}
             </div>
           </div>
           <div class="field">
-            <label class="lbl">Valor inicial</label>
+            <label class="lbl">Valor de compra</label>
             <input class="inp" id="pat-asset-value" type="number" step="0.01" placeholder="0,00">
           </div>
           <div class="info-box" style="font-size:12px;margin-top:4px">
@@ -1444,6 +1568,22 @@ select.inp option{background:var(--bg2);}
         <div id="pat-financing-section" style="display:none">
           <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
           <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Contrato de Financiamento</div>
+
+          <div id="pat-fin-contract-selector" style="display:none;margin-bottom:10px;padding:8px;background:var(--bg3);border-radius:8px;border:1px solid var(--border)">
+            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+              <div class="field" style="margin:0;flex:1;min-width:160px">
+                <label class="lbl">Contrato</label>
+                <select class="inp" id="pat-fin-contract-select" onchange="onFinContractSelect()"></select>
+              </div>
+              <button class="btn sm" onclick="finNewContract()" title="Encerra o contrato atual (se houver) e inicia um novo, em branco">+ Novo contrato</button>
+              <button class="btn sm" id="pat-fin-close-btn" style="color:#dc2626" onclick="finCloseContract()" title="Marca este contrato como encerrado, preservando o histórico">Encerrar este contrato</button>
+            </div>
+            <div class="field" style="margin:8px 0 0">
+              <label class="lbl">Identificação do contrato (opcional)</label>
+              <input class="inp" id="fin-contract-label" type="text" placeholder="Ex: INCC — planta, Bancário — chaves">
+            </div>
+            <div id="pat-fin-closed-notice" style="display:none;margin-top:8px;font-size:11px;color:var(--text3)">⚠️ Este contrato está encerrado e é mostrado apenas para histórico. Os campos abaixo não podem ser editados. Para editar, selecione outro contrato ou crie um novo.</div>
+          </div>
 
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
             <div class="field" style="margin:0">
@@ -1511,6 +1651,26 @@ select.inp option{background:var(--bg2);}
               title="Valor de mercado do bem. Registra o ativo com este valor e uma movimentação de compra no mês inicial.">
           </div>
 
+          <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+          <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">🔄 Sincronização com conta bancária (opcional)</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 100px;gap:8px;margin-bottom:8px">
+            <div class="field" style="margin:0">
+              <label class="lbl">Conta para lançamento das parcelas</label>
+              <select class="inp" id="fin-sync-account">
+                <option value="">— Não sincronizar —</option>
+              </select>
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Categoria</label>
+              <select class="inp" id="fin-sync-category"></select>
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Dia de vencimento</label>
+              <input class="inp" id="fin-sync-day" type="number" min="1" max="31" placeholder="Ex: 10">
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Se preenchido, as parcelas futuras serão lançadas automaticamente nessa conta como "não conferidas", no dia escolhido de cada mês. Ao conferir o lançamento, a parcela é marcada como paga aqui.</div>
+
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <button class="btn sm" onclick="patGenerateSchedule()">⚙️ Gerar cronograma</button>
             <button class="btn sm" onclick="ff.financingFetchIndexes().then(r => { const ok=r.updated.join(', ')||'nenhum'; const err=r.errors.length?` | Erros: ${r.errors.join(', ')}`:'';
@@ -1534,11 +1694,12 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
 
         <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
         <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Histórico mensal — Movimentações</div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Coluna de movimentação aceita valores negativos (saída de caixa) e positivos (entrada). Tipos que afetam o valor do ativo atualizam automaticamente a posição.</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Coluna de movimentação aceita valores negativos (saída de caixa) e positivos (entrada). Tipos que afetam o valor do ativo atualizam automaticamente a posição. Movimentações com data de hoje ou futura, vinculadas a uma conta, são lançadas automaticamente como não conferidas.</div>
         <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden;margin-bottom:8px">
-          <div style="display:grid;grid-template-columns:110px 1fr 140px 140px 36px;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
-            <span>Mês</span>
+          <div style="display:grid;grid-template-columns:110px 1fr 150px 120px 120px 36px;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
+            <span>Data</span>
             <span>Tipo</span>
+            <span>Conta</span>
             <span style="text-align:right;padding-right:4px">Valor ativo (R$)</span>
             <span style="text-align:right;padding-right:4px">Movimentação</span>
             <span></span>
@@ -1557,15 +1718,32 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
           <div class="field" style="margin:0;flex:1;min-width:120px">
             <label class="lbl">Mês de venda</label>
             <div style="display:flex;gap:6px">
-              <input class="inp" id="pat-asset-sold-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px">
-              <input class="inp" id="pat-asset-sold-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:90px">
+              <input class="inp" id="pat-asset-sold-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px" onchange="patUpdateSaleSection()">
+              <input class="inp" id="pat-asset-sold-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:90px" onchange="patUpdateSaleSection()">
             </div>
           </div>
           <div class="field" style="margin:0;flex:1;min-width:120px">
             <label class="lbl">Valor de venda</label>
-            <input class="inp" id="pat-asset-sold-value" type="number" step="0.01" placeholder="0,00">
+            <input class="inp" id="pat-asset-sold-value" type="number" step="0.01" placeholder="0,00" onchange="patUpdateSaleSection()">
           </div>
         </div>
+
+        <div id="pat-sale-payment-section" style="display:none;margin-top:10px">
+          <div class="field" style="margin:0;max-width:320px">
+            <label class="lbl">Forma de pagamento</label>
+            <select class="inp" id="pat-sale-payment-type" onchange="patUpdateSaleSection()">
+              <option value="vista">À vista</option>
+              <option value="parcelado">Parcelado</option>
+            </select>
+          </div>
+          <div id="pat-sale-installments-hint" class="info-box" style="display:none;margin-top:8px;font-size:12px">
+            Adicione as parcelas do recebimento na tabela <strong>"Histórico mensal — Movimentações"</strong> abaixo, usando o tipo <strong>"🔴 Parcela de venda"</strong> — uma linha por mês/valor a receber. O "Valor de venda" acima deve ser o <strong>total</strong> da venda (a soma de todas as parcelas).
+          </div>
+          <div id="pat-sale-vista-hint" class="info-box" style="margin-top:8px;font-size:12px">
+            Ao registrar o recebimento na conta bancária, vincule a transação a este ativo com o tipo <strong>"🔴 Venda"</strong> para marcar como recebido.
+          </div>
+        </div>
+
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;font-size:13px">
           <input type="checkbox" id="pat-asset-hidden">
           Ocultar ativo (ex: já vendido ou não mais relevante)
@@ -1900,9 +2078,26 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
               <option value="despesa">📋 Despesa do ativo</option>
               <option value="parcela_financiamento">🏦 Parcela de financiamento</option>
               <option value="venda">🔴 Venda</option>
+              <option value="venda_parcela">🔴 Parcela de venda</option>
             </select>
           </div>
         </div>
+      </div>
+      <div style="border-top:1px solid var(--border);margin:0 16px 4px;padding-top:8px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text3)">
+          <input type="checkbox" id="tx-debt-toggle" onchange="G('tx-debt-section').style.display=this.checked?'':'none'">
+          Vincular a dívida pessoal
+        </label>
+      </div>
+      <div id="tx-debt-section" style="margin:0 16px 10px;padding-top:6px;display:none">
+        <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">💳 Vincular a dívida pessoal (opcional)</div>
+        <div class="field" style="margin:0">
+          <label class="lbl">Dívida</label>
+          <select class="inp" id="tx-debt-id">
+            <option value="">— Nenhuma —</option>
+          </select>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:6px">Esta transação será registrada como pagamento de parcela, atualizando o saldo devedor.</div>
       </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal('modal-tx')" data-i18n="btn_cancel">Cancelar</button>
@@ -2246,6 +2441,16 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
         <button class="btn" id="modal-confirm-cancel" onclick="confirmDialogResolve(false)">Cancelar</button>
         <button class="btn primary" id="modal-confirm-ok" onclick="confirmDialogResolve(true)">Confirmar</button>
       </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="modal-info" style="z-index:9999">
+    <div class="modal" style="width:560px;max-width:92vw;padding:0;overflow:hidden">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:15px;font-weight:600" id="modal-info-title"></div>
+        <button class="btn-icon" onclick="closeInfoModal()" style="font-size:18px">×</button>
+      </div>
+      <div id="modal-info-body"></div>
     </div>
   </div>
 
