@@ -1875,6 +1875,18 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
       <div style="padding:12px 16px;font-size:13px;color:var(--text2)">
         6 meses gratuitos · R$79/ano após o período · Gratuito para renda &lt; R$3.000/mês, despesa &lt; R$5.000/mês e patrimônio &lt; R$100.000
       </div>
+      <div style="padding:0 16px 14px;border-top:1px solid var(--border);margin-top:4px">
+        <div style="font-size:11px;color:var(--text3);margin:10px 0 6px;text-transform:uppercase;letter-spacing:.4px">🧪 Modo de teste (simular status)</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select class="inp sm" id="lic-debug-select" style="width:auto" onchange="licDebugSet(this.value)">
+            <option value="">— Normal (sem simulação) —</option>
+            <option value="trial">Simular: Período gratuito</option>
+            <option value="free_social">Simular: Gratuito (uso social)</option>
+            <option value="payment_required">Simular: Licença necessária</option>
+          </select>
+          <span style="font-size:11px;color:var(--text3)">Afeta apenas este dispositivo — não esquecer de voltar para "Normal" depois dos testes.</span>
+        </div>
+      </div>
     </div>
 
     <!-- Export -->
@@ -2497,18 +2509,18 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
 
         <!-- Payment required -->
         <div id="lic-payment-section" style="display:none">
-          <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;color:#92400e">
-            <strong>⚠️ Período gratuito encerrado</strong><br>
+          <div id="lic-payment-warning" style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:12px;margin-bottom:16px;font-size:13px;color:#92400e">
+            <strong>🔒 Licença necessária para novos lançamentos</strong><br>
             <span id="lic-payment-reason"></span>
           </div>
 
-          <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+          <div id="lic-payment-price" style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
             <div style="font-size:16px;font-weight:700;margin-bottom:4px">Cruzeiro — Licença anual</div>
             <div style="font-size:24px;font-weight:700;color:var(--accent)">R$ 79,00 <span style="font-size:13px;font-weight:400;color:var(--text3)">/ano</span></div>
             <div style="font-size:12px;color:var(--text3);margin-top:4px">Acesso completo a todas as funcionalidades</div>
           </div>
 
-          <div style="font-size:13px;color:var(--text2);margin-bottom:12px">
+          <div id="lic-payment-intro" style="font-size:13px;color:var(--text2);margin-bottom:12px">
             Após o pagamento, você receberá um <strong>código de licença</strong> por email. Insira abaixo:
           </div>
 

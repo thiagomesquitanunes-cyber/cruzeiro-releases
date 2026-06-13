@@ -485,6 +485,11 @@ async function goPage(name) {
       el.textContent = map[s.status] || s.status;
       el.style.color = s.status === 'payment_required' ? 'var(--red)' : s.status === 'licensed' ? 'var(--green)' : 'var(--text3)';
     }).catch(()=>{});
+    // Reflect current debug override (if any) in the simulator dropdown
+    ff.settingsGet().then(set => {
+      const sel = G('lic-debug-select');
+      if (sel) sel.value = set?.debugLicenseOverride || '';
+    }).catch(()=>{});
   }
   if (name === 'aposentadoria') aposInit();
 }
@@ -1438,7 +1443,7 @@ async function ctxDuplicate(useToday) {
   if (!ids.length) return;
   const txs = window._lastTxs || [];
   if (_licStatus?.status === 'payment_required') {
-    toast('⚠️ Licença necessária para registrar novos lançamentos. Acesse Configurações → Licença.');
+    openLicenseModal();
     return;
   }
   for (const id of ids) {
@@ -1720,7 +1725,7 @@ const SPLIT_RULES_DEF = [
 async function saveTx() {
   // Block NEW transactions when license is required (editing existing is still allowed)
   if (_licStatus?.status === 'payment_required' && !editingTxId) {
-    toast('⚠️ Licença necessária para registrar novos lançamentos. Acesse Configurações → Licença.');
+    openLicenseModal();
     return;
   }
   const account_id = parseInt(G('tx-account').value);
@@ -3060,7 +3065,7 @@ let _pendingImport = null; // {rows, parcelInstallments, accountId, checkDailySa
 
 async function confirmBankImport() {
   if (_licStatus?.status === 'payment_required') {
-    toast('⚠️ Licença necessária para importar lançamentos. Acesse Configurações → Licença.');
+    openLicenseModal();
     return;
   }
   const holders = getCardHolders(_bankParsed);
@@ -4920,7 +4925,7 @@ function cancelBrokerImport() {
 
 async function confirmBrokerImport() {
   if (_licStatus?.status === 'payment_required') {
-    toast('⚠️ Licença necessária para importar dados. Acesse Configurações → Licença.');
+    openLicenseModal();
     return;
   }
   const preview = G('broker-preview');
@@ -5929,16 +5934,89 @@ async function refreshML() {
   Object.entries(groups).forEach(([k,[lbl,color]])=>{
     if (!groups[k].length) return;
     html+=`<div style="margin-bottom:16px"><div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><span style="width:10px;height:10px;border-radius:50%;background:${color};display:inline-block"></span><strong style="font-size:13px">${lbl}</strong><span style="font-size:12px;color:var(--text3)">${groups[k].length} regra${groups[k].length>1?'s':''}</span></div>
-    <div class="tbl-card"><div class="tbl-outer"><table class="ledger"><thead><tr><th>Palavra-chave</th><th>Memorando</th><th>Categoria</th><th class="center">Usos</th><th class="right">Valor médio</th></tr></thead><tbody>
+    <div class="tbl-card"><div class="tbl-outer"><table class="ledger"><thead><tr><th>Palavra-chave</th><th>Memorando</th><th>Categoria</th><th class="center">Usos</th><th class="right">Valor médio</th><th></th></tr></thead><tbody>
     ${groups[k].slice(0,20).map(r=>{
       const mean=r.n_val>0?fmtBRL(r.sum_val/r.n_val):'—';
-      return `<tr><td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2)">${esc(r.keyword)}</td><td style="font-size:13px">${esc(r.memo||'—')}</td><td style="font-size:13px">${esc(r.category||'—')}</td><td class="center">${r.count}</td><td class="right" style="font-family:'DM Mono',monospace">${mean}</td></tr>`;
+      const kw = esc(r.keyword).replace(/'/g,"\\'");
+      return `<tr>
+        <td style="font-family:'DM Mono',monospace;font-size:12px;color:var(--text2)">${esc(r.keyword)}</td>
+        <td style="font-size:13px;cursor:pointer" title="Clique para editar" onclick="mlEditMemo(this,'${kw}','${esc(r.memo||'').replace(/'/g,"\\'")}')">${esc(r.memo||'—')}</td>
+        <td style="font-size:13px;cursor:pointer" title="Clique para editar" onclick="mlEditCategory(this,'${kw}','${esc(r.category||'').replace(/'/g,"\\'")}')">${esc(r.category||'—')}</td>
+        <td class="center">${r.count}</td>
+        <td class="right" style="font-family:'DM Mono',monospace">${mean}</td>
+        <td class="center"><button class="btn-icon" style="color:#dc2626;font-size:14px" title="Excluir esta regra" onclick="mlDeleteRule('${kw}')">×</button></td>
+      </tr>`;
     }).join('')}
     </tbody></table></div></div></div>`;
   });
   G('ml-groups').innerHTML=html||'<div class="empty"><div class="ei">🧠</div><p>Nenhuma regra ainda</p></div>';
 }
 async function clearML(){ if(!await showConfirmDialog('Apagar todo aprendizado?', 'Esta ação não pode ser desfeita.', 'Apagar', true)) return; await ff.mlClear(); toast('Apagado'); refreshML(); }
+
+// Inline edit of a single ML rule's memo
+function mlEditMemo(td, keyword, currentVal) {
+  if (td.querySelector('input')) return;
+  const orig = td.innerHTML;
+  td.innerHTML = `<input type="text" value="${esc(currentVal)}" style="width:100%;font-size:13px;padding:2px 4px">`;
+  const inp = td.querySelector('input');
+  inp.focus(); inp.select();
+  let done = false;
+  async function commit() {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (v !== currentVal) {
+      const rules = await ff.mlList();
+      const rule = rules.find(r => r.keyword === keyword);
+      await ff.mlUpdate({ keyword, memo: v, category: rule?.category || '' });
+      refreshML();
+    } else {
+      td.innerHTML = orig;
+    }
+  }
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') commit();
+    if (e.key === 'Escape') { done = true; td.innerHTML = orig; }
+  });
+  inp.addEventListener('blur', () => commit());
+}
+
+// Inline edit of a single ML rule's category
+function mlEditCategory(td, keyword, currentVal) {
+  if (td.querySelector('input')) return;
+  const orig = td.innerHTML;
+  td.innerHTML = `<input type="text" value="${esc(currentVal)}" style="width:100%;font-size:13px;padding:2px 4px" autocomplete="off">`;
+  const inp = td.querySelector('input');
+  inp.focus(); inp.select();
+  openGlobalCatDrop(inp);
+  let done = false;
+  async function commit() {
+    if (done) return; done = true;
+    const v = inp.value.trim();
+    if (v !== currentVal) {
+      const rules = await ff.mlList();
+      const rule = rules.find(r => r.keyword === keyword);
+      await ff.mlUpdate({ keyword, memo: rule?.memo || '', category: v });
+      refreshML();
+    } else {
+      td.innerHTML = orig;
+    }
+  }
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') commit();
+    if (e.key === 'Escape') { done = true; td.innerHTML = orig; }
+  });
+  inp.addEventListener('blur', () => setTimeout(commit, 150));
+}
+
+// Delete a single ML rule
+async function mlDeleteRule(keyword) {
+  const ok = await showConfirmDialog('Excluir esta regra?', `A palavra-chave "${keyword}" deixará de sugerir categoria/memorando automaticamente.`, 'Excluir', true);
+  if (!ok) return;
+  await ff.mlDelete({ keyword });
+  toast('Regra excluída');
+  refreshML();
+}
+
 async function exportML(){ const r=await ff.mlExport(); await ff.saveFile({ defaultPath:'regras_ml.json', content:JSON.stringify(r,null,2) }); toast('Exportado'); }
 async function importML(ev){ const f=ev.target.files[0]; if(!f) return; const t=await f.text(); try { await ff.mlImport(JSON.parse(t)); toast('Importado'); refreshML(); } catch(e){ toast('Erro no arquivo'); } }
 
@@ -6095,7 +6173,7 @@ async function saveRecurring(){
     toast(`Recorrência atualizada — ${n} lançamentos futuros regenerados`);
   } else {
     if (_licStatus?.status === 'payment_required') {
-    toast('⚠️ Licença necessária para criar recorrências. Acesse Configurações → Licença.');
+    openLicenseModal();
     return;
   }
   const result = await ff.createRecurring({ account_id, memo, category, amount, frequency, next_date, end_date, transfer_to_account_id });
@@ -6473,7 +6551,22 @@ function closeModal(id){
   el.classList.remove('open');
   // Never call document.body.focus() — it freezes subsequent input
 }
-document.addEventListener('click',e=>{ if(e.target.classList.contains('overlay')) closeModal(e.target.id); });
+// Modals close only via explicit Cancel/close buttons or the Escape key —
+// clicking outside (or releasing a drag-selection outside) no longer closes
+// them, to avoid accidental dismissal while selecting text in a field.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  // Don't interfere with inline-editors or dropdowns that handle their own Escape
+  // (they call e.preventDefault()/stopPropagation() in their own listeners, but
+  // as a safeguard we only act here if nothing else has already handled it).
+  if (e.defaultPrevented) return;
+  const openModals = [...document.querySelectorAll('.overlay.open')];
+  if (!openModals.length) return;
+  // Close the last-opened (topmost) modal only
+  const top = openModals[openModals.length - 1];
+  if (top.id === 'modal-confirm' || top.id === 'modal-password') return; // handled by their own listeners
+  closeModal(top.id);
+});
 
 // ── Password prompt (for encrypted XLSX/PDF imports) ──
 let _passwordResolve = null;
@@ -8557,6 +8650,7 @@ async function startInlineEdit(e, txId, field, span) {
     }
     span.replaceWith(input);
     input.focus(); input.select();
+    setupDateMask(input);
     const done = async () => {
       const v = input.value.trim();
       // Parse DD/MM/YYYY → YYYY-MM-DD
@@ -8794,6 +8888,20 @@ function toast(msg,dur=2500){ const t=G('toast'); t.textContent=msg; t.classList
 // ── Currency input formatter ──────────────────────────────────────────────
 // Turns a plain <input type="text"> into a live R$ formatted field.
 // rawValue() returns the numeric float for use in calculations.
+// Auto-format a text input as DD/MM/YYYY while typing: digits only, slashes
+// inserted automatically after day and month, max 10 chars.
+function setupDateMask(input) {
+  if (!input || input.dataset.dateMaskSetup) return;
+  input.dataset.dateMaskSetup = '1';
+  input.addEventListener('input', () => {
+    let digits = input.value.replace(/\D/g, '').slice(0, 8);
+    let out = digits;
+    if (digits.length > 4) out = `${digits.slice(0,2)}/${digits.slice(2,4)}/${digits.slice(4)}`;
+    else if (digits.length > 2) out = `${digits.slice(0,2)}/${digits.slice(2)}`;
+    input.value = out;
+  });
+}
+
 function setupCurrencyInput(el) {
   if (!el || el.dataset.currencySetup) return;
   el.dataset.currencySetup = '1';
@@ -8954,18 +9062,18 @@ async function exportReportCSV() {
   const fmtN   = v => (v<0?'-':'') + Math.abs(v).toFixed(2).replace('.', ',');
   const fmtSub = v => (v<0?'-':'') + Math.abs(v).toFixed(2);
 
-  let csv = 'Intervalo de datas,Categoria,Subcategoria,Montante\r\n';
+  let csv = 'Intervalo de datas;Categoria;Subcategoria;Montante\r\n';
   parents.forEach(p => {
     const net = p.income - p.expenses;
     if (!p.children.length) {
-      csv += `"${periodLabel}","${p.category}","${p.category}","${fmtN(net)}"\r\n`;
+      csv += `"${periodLabel}";"${p.category}";"${p.category}";"${fmtN(net)}"\r\n`;
     } else {
       p.children.sort((a,b)=>a.subName.localeCompare(b.subName,'pt-BR')).forEach(c => {
         const cnet = c.income - c.expenses;
-        csv += `"${periodLabel}","${p.category}","${c.subName}","${fmtN(cnet)}"\r\n`;
+        csv += `"${periodLabel}";"${p.category}";"${c.subName}";"${fmtN(cnet)}"\r\n`;
       });
     }
-    csv += `,Subtotal,,"${fmtSub(net)}"\r\n`;
+    csv += `;Subtotal;;"${fmtSub(net)}"\r\n`;
   });
 
   const saved = await ff.saveFile({ defaultPath:`exportacao_${from||'completo'}.csv`, content: csv });
@@ -14815,14 +14923,38 @@ async function checkLicense() {
   // Update UI sections
   G('lic-trial-banner').style.display    = status === 'trial'           ? '' : 'none';
   G('lic-social-banner').style.display   = status === 'free_social'     ? '' : 'none';
-  G('lic-payment-section').style.display = status === 'payment_required'? '' : 'none';
+  G('lic-payment-section').style.display = (status === 'payment_required' || status === 'trial' || status === 'free_social') ? '' : 'none';
   G('lic-licensed-section').style.display= status === 'licensed'        ? '' : 'none';
+
+  // During trial / free-social, the payment section is shown but framed as
+  // "already have a code?" — the warning banner about the trial ending is hidden,
+  // and the price card is collapsed since the user isn't required to pay yet.
+  const payWarning  = G('lic-payment-warning');
+  const payPriceBox = G('lic-payment-price');
+  const payIntro    = G('lic-payment-intro');
+  if (status === 'trial' || status === 'free_social') {
+    if (payWarning)  payWarning.style.display  = 'none';
+    if (payPriceBox) payPriceBox.style.display = 'none';
+    if (payIntro)    payIntro.innerHTML = 'Já tem um código de licença? Você pode ativá-lo agora, mesmo durante o período gratuito:';
+  } else {
+    if (payWarning)  payWarning.style.display  = '';
+    if (payPriceBox) payPriceBox.style.display = '';
+    if (payIntro)    payIntro.innerHTML = 'Após o pagamento, você receberá um <strong>código de licença</strong> por email. Insira abaixo:';
+  }
 
   if (status === 'trial') {
     G('lic-trial-days').textContent = `${daysLeft} dias restantes do período gratuito de 6 meses.`;
   }
   if (status === 'payment_required') {
-    G('lic-payment-reason').textContent = reason;
+    const parts = [];
+    if (avgIncome  >= 3000)   parts.push(`renda média de ${fmtBRL(avgIncome)}/mês`);
+    if (avgExpense >= 5000)   parts.push(`despesas médias de ${fmtBRL(avgExpense)}/mês`);
+    if (totalWealth >= 100000) parts.push(`patrimônio de ${fmtBRL(totalWealth)}`);
+    const detail = parts.length ? parts.join(', ') : reason;
+    G('lic-payment-reason').innerHTML =
+      `Seu uso do Cruzeiro (${detail}) está acima do limite gratuito.<br><br>` +
+      `Você ainda pode <strong>navegar, consultar e exportar seus dados normalmente</strong> — ` +
+      `mas para <strong>registrar novos lançamentos</strong>, é necessária uma licença.`;
   }
   if (status === 'licensed') {
     const s = await ff.settingsGet().catch(()=>({}));
@@ -14869,6 +15001,27 @@ async function licDeactivate() {
 function licContinue() {
   const m = G('modal-license');
   if (m) { m.style.display = 'none'; m.classList.remove('open'); }
+}
+
+// Simulate a license status for testing (Configurações → Licença → Modo de teste)
+async function licDebugSet(value) {
+  await ff.licenseDebugOverride(value || null);
+  await checkLicense();
+  if (value) {
+    const labels = { trial: 'Período gratuito', free_social: 'Gratuito (uso social)', payment_required: 'Licença necessária' };
+    toast(`🧪 Simulando: ${labels[value] || value}`);
+    openLicenseModal();
+  } else {
+    toast('Voltou ao status normal');
+  }
+  // Refresh the badge in Settings too
+  ff.licenseStatus().then(s => {
+    const el = G('settings-lic-status');
+    if (!el) return;
+    const map = { trial:'🟡 Período gratuito', free_social:'🟢 Gratuito', licensed:'✅ Licenciado', payment_required:'🔴 Licença necessária' };
+    el.textContent = map[s.status] || s.status;
+    el.style.color = s.status === 'payment_required' ? 'var(--red)' : s.status === 'licensed' ? 'var(--green)' : 'var(--text3)';
+  }).catch(()=>{});
 }
 
 function licBuy() {
@@ -14922,15 +15075,18 @@ async function exportCSV() {
 
     const txs = result.data.transactions || [];
     const header = ['Data', 'Conta', 'Categoria', 'Memorando', 'Valor', 'Conferido', 'Transferência'];
+    const escCsv = s => `"${String(s).replace(/"/g, '""')}"`;
     const rows = txs.map(t => [
-      t.date, t.account_name || '', t.category || '',
-      (t.memo || '').replace(/,/g, ';'),
+      t.date, escCsv(t.account_name || ''), escCsv(t.category || ''),
+      escCsv(t.memo || ''),
       t.amount.toFixed(2).replace('.', ','),
       t.cleared ? 'Sim' : 'Não',
       t.transfer_id ? 'Sim' : 'Não',
     ]);
 
-    const csv = [header, ...rows].map(r => r.join(',')).join('\n');
+    // Semicolon delimiter (Brazilian CSV convention) — avoids conflict with
+    // comma decimal separators when using "Text to Columns" in Excel.
+    const csv = [header, ...rows].map(r => r.join(';')).join('\r\n');
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }); // BOM for Excel
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');

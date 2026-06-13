@@ -930,6 +930,16 @@ ipcMain.handle('ml:learn', (_, { desc, memo, category, amount }) => {
 });
 ipcMain.handle('ml:list',   () => all('SELECT * FROM ml_rules ORDER BY count DESC'));
 ipcMain.handle('ml:clear',  () => { run('DELETE FROM ml_rules'); return {ok:true}; });
+ipcMain.handle('ml:update', (_, { keyword, memo, category }) => {
+  run('UPDATE ml_rules SET memo=?, category=? WHERE keyword=?', [memo||'', category||'', keyword]);
+  save();
+  return { ok: true };
+});
+ipcMain.handle('ml:delete', (_, { keyword }) => {
+  run('DELETE FROM ml_rules WHERE keyword=?', [keyword]);
+  save();
+  return { ok: true };
+});
 ipcMain.handle('ml:export', () => all('SELECT * FROM ml_rules'));
 ipcMain.handle('ml:import', (_, rules) => {
   rules.forEach(r => {
@@ -2713,7 +2723,12 @@ ipcMain.handle('bcb:fetch-series', async (_, { series, n }) => {
 ipcMain.handle('manual:open', (_, { lang }) => {
   const validLangs = ['pt','en','es'];
   const l = validLangs.includes(lang) ? lang.toUpperCase() : 'PT';
-  const manualPath = path.join(__dirname, '..', 'assets', 'manuals', `Cruzeiro_Manual_${l}.pdf`);
+  // In packaged builds, "assets" is copied via extraResources to resourcesPath/assets
+  // (outside app.asar — shell.openPath can't open files inside the asar archive).
+  // In development, assets/ lives alongside src/ in the project root.
+  const manualPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'assets', 'manuals', `Cruzeiro_Manual_${l}.pdf`)
+    : path.join(__dirname, '..', 'assets', 'manuals', `Cruzeiro_Manual_${l}.pdf`);
   if (fs.existsSync(manualPath)) {
     require('electron').shell.openPath(manualPath);
     return { ok: true };
@@ -4057,6 +4072,25 @@ function validateLicenseCode(code) {
 function computeLicenseStatus() {
   const s = loadSettings();
 
+  // ── DEBUG OVERRIDE (testing only) ──
+  // Set settings.debugLicenseOverride to 'trial' | 'free_social' | 'payment_required' | 'licensed'
+  // to simulate that status regardless of actual dates/thresholds. Remove or set
+  // to null/undefined for normal behavior. Exposed via Settings for easy testing.
+  if (s.debugLicenseOverride === 'payment_required') {
+    return {
+      status: 'payment_required',
+      reason: 'Licença necessária (modo de teste)',
+      daysLeft: 0,
+      avgIncome: 0, avgExpense: 0, totalWealth: 0,
+    };
+  }
+  if (s.debugLicenseOverride === 'free_social') {
+    return { status: 'free_social', reason: 'Gratuito (modo de teste)', daysLeft: 0, avgIncome: 0, avgExpense: 0, totalWealth: 0 };
+  }
+  if (s.debugLicenseOverride === 'trial') {
+    return { status: 'trial', reason: 'Período gratuito (modo de teste)', daysLeft: 30 };
+  }
+
   // 1. If valid license code stored → always unlocked
   if (s.licenseCode && validateLicenseCode(s.licenseCode)) {
     return { status: 'licensed', reason: 'Licença válida', daysLeft: null };
@@ -4154,6 +4188,15 @@ function computeLicenseStatus() {
 }
 
 ipcMain.handle('license:status', () => computeLicenseStatus());
+
+// ── DEBUG: override license status for testing (see computeLicenseStatus) ──
+ipcMain.handle('license:debug-override', (_, { value }) => {
+  const s = loadSettings();
+  if (value) s.debugLicenseOverride = value;
+  else delete s.debugLicenseOverride;
+  saveSettings(s);
+  return computeLicenseStatus();
+});
 
 ipcMain.handle('license:activate', (_, { code, email }) => {
   if (!code || !email) return { ok: false, error: 'Código e email são obrigatórios.' };
