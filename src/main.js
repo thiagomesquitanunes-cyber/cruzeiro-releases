@@ -95,6 +95,8 @@ async function initDB() {
       recurring_id INTEGER,
       pat_asset_id INTEGER,
       pat_tx_id    INTEGER,
+      pat_debt_id  INTEGER,
+      pat_installment_month TEXT,
       created_at   TEXT    DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS recurring (
@@ -150,6 +152,7 @@ async function initDB() {
     CREATE TABLE IF NOT EXISTS pat_financing (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
       asset_id     INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
+      contract_id  INTEGER REFERENCES pat_financing_contracts(id) ON DELETE CASCADE,
       month        TEXT    NOT NULL,
       installment  REAL    NOT NULL,
       principal    REAL,
@@ -158,11 +161,15 @@ async function initDB() {
       balance_end  REAL,
       is_projection INTEGER NOT NULL DEFAULT 1,
       paid         INTEGER NOT NULL DEFAULT 0,
-      UNIQUE(asset_id, month)
+      linked_tx_id INTEGER,
+      UNIQUE(contract_id, month)
     );
     CREATE TABLE IF NOT EXISTS pat_financing_contracts (
       id                INTEGER PRIMARY KEY AUTOINCREMENT,
-      asset_id          INTEGER NOT NULL UNIQUE REFERENCES pat_assets(id) ON DELETE CASCADE,
+      asset_id          INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
+      label             TEXT,
+      status            TEXT    NOT NULL DEFAULT 'active',
+      closed_month      TEXT,
       system            TEXT    NOT NULL DEFAULT 'SAC',
       index_type        TEXT    NOT NULL DEFAULT 'none',
       annual_rate       REAL    NOT NULL DEFAULT 0,
@@ -173,6 +180,9 @@ async function initDB() {
       extra_annual_month INTEGER,
       extra_annual_value REAL,
       notes             TEXT,
+      sync_account_id   INTEGER,
+      sync_day          INTEGER,
+      sync_category     TEXT,
       created_at        TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_pat_history_asset ON pat_history(asset_id, month);
@@ -183,9 +193,53 @@ async function initDB() {
       tx_type     TEXT    NOT NULL,
       total_value REAL    NOT NULL,
       notes       TEXT,
+      tx_date     TEXT,
+      account_id  INTEGER,
+      linked_tx_id INTEGER,
       created_at  TEXT    DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_pat_tx_asset ON pat_transactions(asset_id, month);
+    CREATE TABLE IF NOT EXISTS personal_debts (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT    NOT NULL,
+      notes       TEXT,
+      sort_order  INTEGER NOT NULL DEFAULT 0,
+      hidden      INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT    DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS personal_debt_contracts (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      debt_id           INTEGER NOT NULL UNIQUE REFERENCES personal_debts(id) ON DELETE CASCADE,
+      system            TEXT    NOT NULL DEFAULT 'SAC',
+      index_type        TEXT    NOT NULL DEFAULT 'none',
+      annual_rate       REAL    NOT NULL DEFAULT 0,
+      principal         REAL    NOT NULL DEFAULT 0,
+      n_installments    INTEGER NOT NULL DEFAULT 0,
+      first_month       TEXT    NOT NULL,
+      balloon_at_keys   REAL,
+      extra_annual_month INTEGER,
+      extra_annual_value REAL,
+      notes             TEXT,
+      sync_account_id   INTEGER,
+      sync_day          INTEGER,
+      sync_category     TEXT,
+      created_at        TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS personal_debt_installments (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      debt_id      INTEGER NOT NULL REFERENCES personal_debts(id) ON DELETE CASCADE,
+      month        TEXT    NOT NULL,
+      installment  REAL    NOT NULL,
+      principal    REAL,
+      interest     REAL,
+      correction   REAL,
+      balance_end  REAL,
+      is_projection INTEGER NOT NULL DEFAULT 1,
+      paid         INTEGER NOT NULL DEFAULT 0,
+      linked_tx_id INTEGER,
+      UNIQUE(debt_id, month)
+    );
+    CREATE INDEX IF NOT EXISTS idx_debt_installments ON personal_debt_installments(debt_id, month);
     CREATE TABLE IF NOT EXISTS inv_assets (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       name          TEXT    NOT NULL,
@@ -237,6 +291,7 @@ async function initDB() {
   try { db.run('ALTER TABLE pat_financing ADD COLUMN correction REAL'); } catch(e) {}
   try { db.run('ALTER TABLE pat_financing ADD COLUMN balance_end REAL'); } catch(e) {}
   try { db.run('ALTER TABLE pat_financing ADD COLUMN is_projection INTEGER NOT NULL DEFAULT 1'); } catch(e) {}
+  try { db.run('ALTER TABLE pat_financing ADD COLUMN linked_tx_id INTEGER'); } catch(e) {}
   try { db.run(`CREATE TABLE IF NOT EXISTS pat_financing_contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     asset_id INTEGER NOT NULL UNIQUE REFERENCES pat_assets(id) ON DELETE CASCADE,
@@ -245,6 +300,80 @@ async function initDB() {
     n_installments INTEGER NOT NULL DEFAULT 0, first_month TEXT NOT NULL,
     balloon_at_keys REAL, extra_annual_month INTEGER, extra_annual_value REAL,
     notes TEXT, created_at TEXT DEFAULT (datetime('now')))`); } catch(e) {}
+  try { db.run('ALTER TABLE pat_financing_contracts ADD COLUMN sync_account_id INTEGER'); } catch(e) {}
+  try { db.run('ALTER TABLE pat_financing_contracts ADD COLUMN sync_day INTEGER'); } catch(e) {}
+  try { db.run('ALTER TABLE pat_financing_contracts ADD COLUMN sync_category TEXT'); } catch(e) {}
+  try { db.run('ALTER TABLE pat_financing_contracts ADD COLUMN label TEXT'); } catch(e) {}
+  try { db.run("ALTER TABLE pat_financing_contracts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"); } catch(e) {}
+  try { db.run('ALTER TABLE pat_financing_contracts ADD COLUMN closed_month TEXT'); } catch(e) {}
+  // Migration: pat_financing_contracts previously had UNIQUE(asset_id), which
+  // SQLite can't drop via ALTER TABLE. Rebuild the table without that constraint
+  // so an asset can have multiple contracts (sequential financing history).
+  try {
+    const tableInfo = first("SELECT sql FROM sqlite_master WHERE type='table' AND name='pat_financing_contracts'");
+    if (tableInfo?.sql && tableInfo.sql.includes('UNIQUE')) {
+      db.run('ALTER TABLE pat_financing_contracts RENAME TO pat_financing_contracts_old');
+      db.run(`CREATE TABLE pat_financing_contracts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_id INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
+        label TEXT, status TEXT NOT NULL DEFAULT 'active', closed_month TEXT,
+        system TEXT NOT NULL DEFAULT 'SAC', index_type TEXT NOT NULL DEFAULT 'none',
+        annual_rate REAL NOT NULL DEFAULT 0, principal REAL NOT NULL DEFAULT 0,
+        n_installments INTEGER NOT NULL DEFAULT 0, first_month TEXT NOT NULL,
+        balloon_at_keys REAL, extra_annual_month INTEGER, extra_annual_value REAL,
+        notes TEXT, sync_account_id INTEGER, sync_day INTEGER, sync_category TEXT,
+        created_at TEXT DEFAULT (datetime('now')))`);
+      db.run(`INSERT INTO pat_financing_contracts
+        (id,asset_id,label,status,closed_month,system,index_type,annual_rate,principal,n_installments,
+         first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes,sync_account_id,sync_day,sync_category,created_at)
+        SELECT id,asset_id,label,COALESCE(status,'active'),closed_month,system,index_type,annual_rate,principal,n_installments,
+         first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes,sync_account_id,sync_day,sync_category,created_at
+        FROM pat_financing_contracts_old`);
+      db.run('DROP TABLE pat_financing_contracts_old');
+    }
+  } catch(e) {}
+  try { db.run('ALTER TABLE pat_financing ADD COLUMN contract_id INTEGER REFERENCES pat_financing_contracts(id) ON DELETE CASCADE'); } catch(e) {}
+  // Backfill contract_id for existing installments (each asset had exactly one
+  // contract before this migration, so map by asset_id).
+  try {
+    run(`UPDATE pat_financing SET contract_id = (
+           SELECT id FROM pat_financing_contracts WHERE pat_financing_contracts.asset_id = pat_financing.asset_id LIMIT 1
+         ) WHERE contract_id IS NULL`);
+  } catch(e) {}
+  // Cleanup: if the same asset/month ended up with two pat_financing rows (one
+  // paid, one still-projected) due to a contract_id mismatch from an earlier
+  // version, drop the stale projected duplicate and keep the paid one.
+  try {
+    run(`DELETE FROM pat_financing
+         WHERE paid=0 AND is_projection=1
+         AND EXISTS (
+           SELECT 1 FROM pat_financing p2
+           WHERE p2.asset_id = pat_financing.asset_id AND p2.month = pat_financing.month
+           AND p2.paid=1 AND p2.id != pat_financing.id
+         )`);
+  } catch(e) {}
+  // Migration: pat_financing previously had UNIQUE(asset_id, month). Rebuild
+  // without that constraint so multiple contracts (sequential history) can
+  // each have their own installment for the same calendar month if needed.
+  try {
+    const tableInfo = first("SELECT sql FROM sqlite_master WHERE type='table' AND name='pat_financing'");
+    if (tableInfo?.sql && tableInfo.sql.includes('UNIQUE(asset_id')) {
+      db.run('ALTER TABLE pat_financing RENAME TO pat_financing_old');
+      db.run(`CREATE TABLE pat_financing (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_id INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
+        contract_id INTEGER REFERENCES pat_financing_contracts(id) ON DELETE CASCADE,
+        month TEXT NOT NULL, installment REAL NOT NULL, principal REAL, interest REAL,
+        correction REAL, balance_end REAL, is_projection INTEGER NOT NULL DEFAULT 1,
+        paid INTEGER NOT NULL DEFAULT 0, linked_tx_id INTEGER,
+        UNIQUE(contract_id, month))`);
+      db.run(`INSERT INTO pat_financing
+        (id,asset_id,contract_id,month,installment,principal,interest,correction,balance_end,is_projection,paid,linked_tx_id)
+        SELECT id,asset_id,contract_id,month,installment,principal,interest,correction,balance_end,is_projection,paid,linked_tx_id
+        FROM pat_financing_old`);
+      db.run('DROP TABLE pat_financing_old');
+    }
+  } catch(e) {}
   // Load financing index data
   try {
     const idxPath = getDbPath().replace('.db', '_financing_indexes.json');
@@ -258,7 +387,35 @@ async function initDB() {
     asset_id INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
     month TEXT NOT NULL, tx_type TEXT NOT NULL, total_value REAL NOT NULL,
     notes TEXT, created_at TEXT DEFAULT (datetime('now')))`); } catch(e) {}
+  try { db.run('ALTER TABLE pat_transactions ADD COLUMN tx_date TEXT'); } catch(e) {}
+  try { db.run('ALTER TABLE pat_transactions ADD COLUMN account_id INTEGER'); } catch(e) {}
+  try { db.run('ALTER TABLE pat_transactions ADD COLUMN linked_tx_id INTEGER'); } catch(e) {}
   try { db.run('CREATE INDEX IF NOT EXISTS idx_pat_tx_asset ON pat_transactions(asset_id, month)'); } catch(e) {}
+  try { db.run('ALTER TABLE transactions ADD COLUMN pat_debt_id INTEGER'); } catch(e) {}
+  try { db.run('ALTER TABLE transactions ADD COLUMN pat_installment_month TEXT'); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS personal_debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL, notes TEXT, sort_order INTEGER NOT NULL DEFAULT 0,
+    hidden INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))`); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS personal_debt_contracts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    debt_id INTEGER NOT NULL UNIQUE REFERENCES personal_debts(id) ON DELETE CASCADE,
+    system TEXT NOT NULL DEFAULT 'SAC', index_type TEXT NOT NULL DEFAULT 'none',
+    annual_rate REAL NOT NULL DEFAULT 0, principal REAL NOT NULL DEFAULT 0,
+    n_installments INTEGER NOT NULL DEFAULT 0, first_month TEXT NOT NULL,
+    balloon_at_keys REAL, extra_annual_month INTEGER, extra_annual_value REAL,
+    notes TEXT, created_at TEXT DEFAULT (datetime('now')))`); } catch(e) {}
+  try { db.run('ALTER TABLE personal_debt_contracts ADD COLUMN sync_account_id INTEGER'); } catch(e) {}
+  try { db.run('ALTER TABLE personal_debt_contracts ADD COLUMN sync_day INTEGER'); } catch(e) {}
+  try { db.run('ALTER TABLE personal_debt_contracts ADD COLUMN sync_category TEXT'); } catch(e) {}
+  try { db.run(`CREATE TABLE IF NOT EXISTS personal_debt_installments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    debt_id INTEGER NOT NULL REFERENCES personal_debts(id) ON DELETE CASCADE,
+    month TEXT NOT NULL, installment REAL NOT NULL, principal REAL, interest REAL,
+    correction REAL, balance_end REAL, is_projection INTEGER NOT NULL DEFAULT 1,
+    paid INTEGER NOT NULL DEFAULT 0, UNIQUE(debt_id, month))`); } catch(e) {}
+  try { db.run('ALTER TABLE personal_debt_installments ADD COLUMN linked_tx_id INTEGER'); } catch(e) {}
+  try { db.run('CREATE INDEX IF NOT EXISTS idx_debt_installments ON personal_debt_installments(debt_id, month)'); } catch(e) {}
   // Financial goals table
   db.run(`CREATE TABLE IF NOT EXISTS goals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -395,17 +552,25 @@ ipcMain.handle('tx:list', (_, { accountId, sortBy, order, fromDate }) => {
   return all(sql, params);
 });
 ipcMain.handle('tx:create', (_, tx) => {
-  const id = run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,transfer_id,recurring_id,pat_asset_id,pat_tx_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    [tx.account_id, tx.date, tx.category||'', tx.memo||'', tx.amount, tx.cleared||0, tx.transfer_id||null, tx.recurring_id||null, tx.pat_asset_id||null, tx.pat_tx_id||null]);
+  const id = run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,transfer_id,recurring_id,pat_asset_id,pat_tx_id,pat_debt_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [tx.account_id, tx.date, tx.category||'', tx.memo||'', tx.amount, tx.cleared||0, tx.transfer_id||null, tx.recurring_id||null, tx.pat_asset_id||null, tx.pat_tx_id||null, tx.pat_debt_id||null]);
   pushUndo(`Criar "${tx.memo||tx.category||'lançamento'}"`, [
     { sql: 'DELETE FROM transactions WHERE id=?', params: [id] }
   ]);
   return first('SELECT * FROM transactions WHERE id=?', [id]);
 });
-ipcMain.handle('tx:update', (_, { id, date, category, memo, amount, cleared, pat_asset_id, pat_tx_id }) => {
+ipcMain.handle('tx:update', (_, { id, date, category, memo, amount, cleared, pat_asset_id, pat_tx_id, pat_debt_id }) => {
   const old = first('SELECT * FROM transactions WHERE id=?', [id]);
-  run('UPDATE transactions SET date=?,category=?,memo=?,amount=?,cleared=?,pat_asset_id=?,pat_tx_id=? WHERE id=?',
-    [date, category, memo, amount, cleared?1:0, pat_asset_id||null, pat_tx_id||null, id]);
+  run('UPDATE transactions SET date=?,category=?,memo=?,amount=?,cleared=?,pat_asset_id=?,pat_tx_id=?,pat_debt_id=? WHERE id=?',
+    [date, category, memo, amount, cleared?1:0, pat_asset_id||null, pat_tx_id||null, pat_debt_id||null, id]);
+
+  // If "cleared" changed on a transaction linked to a financing/debt installment
+  // (auto-synced from Patrimônio), reflect the paid status there too.
+  if (old && old.cleared !== (cleared?1:0) && old.pat_installment_month) {
+    const updated = first('SELECT * FROM transactions WHERE id=?', [id]);
+    if (cleared) _onInstallmentTxCleared(updated);
+    else _onInstallmentTxUncleared(updated);
+  }
 
   // If this is part of a transfer, sync date and memo to the paired leg (invert amount)
   if (old?.transfer_id) {
@@ -1361,6 +1526,14 @@ ipcMain.handle('tx:inline-update', (_, { id, field, value }) => {
       const syncValue = field === 'amount' ? -value : value;
       db.run(`UPDATE transactions SET ${field}=? WHERE id=?`, [syncValue, paired.id]);
     }
+  }
+
+  // If this toggled "cleared" on a transaction linked to a financing/debt
+  // installment (auto-synced from Patrimônio), reflect the paid status there too.
+  if (field === 'cleared' && old.pat_installment_month) {
+    const updated = first('SELECT * FROM transactions WHERE id=?', [id]);
+    if (value === 1 || value === true) _onInstallmentTxCleared(updated);
+    else _onInstallmentTxUncleared(updated);
   }
 
   save();
@@ -2721,56 +2894,182 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
   return schedule;
 }
 
-ipcMain.handle('pat:financing-contract-get', (_, { assetId }) =>
-  first('SELECT * FROM pat_financing_contracts WHERE asset_id=?', [assetId]) || null
+// ══ BANK SYNC: auto-create future bank transactions for financing/debt installments ══
+// Given a schedule (asset financing or personal debt), a target account, and a
+// fixed "day of month" for the due date, create uncleared bank transactions for
+// every FUTURE (today or later) projected installment that doesn't already have
+// a linked transaction. Idempotent: re-running won't create duplicates, since it
+// checks `pat_installment_month` for an existing link before inserting.
+function _syncInstallmentsToBank({ schedule, accountId, syncDay, category, assetId, contractId, debtId, memoPrefix }) {
+  if (!accountId || !syncDay) return { created: 0 };
+  const today = new Date().toISOString().slice(0,10);
+  let created = 0;
+
+  schedule.forEach(row => {
+    const month = row.month.slice(0,7); // "YYYY-MM"
+    // Build the due date using the configured day-of-month, clamped to the
+    // actual number of days in that month (e.g. day 31 in April -> 30).
+    const [y, mo] = month.split('-').map(Number);
+    const lastDay = new Date(y, mo, 0).getDate();
+    const day = Math.min(syncDay, lastDay);
+    const dueDate = `${month}-${String(day).padStart(2,'0')}`;
+
+    if (dueDate < today) return; // never create retroactive/unconfirmed past entries
+
+    // Skip months already marked as paid in the DB (the freshly-generated
+    // `schedule` array always has is_projection=1, so we must check the DB).
+    const dbRow = assetId
+      ? first('SELECT paid FROM pat_financing WHERE contract_id=? AND month=?', [contractId, row.month])
+      : first('SELECT paid FROM personal_debt_installments WHERE debt_id=? AND month=?', [debtId, row.month]);
+    if (dbRow?.paid === 1) return;
+
+    // Check if a linked transaction already exists for this asset/debt + month
+    const whereLink = assetId
+      ? 'pat_asset_id=? AND pat_installment_month=?'
+      : 'pat_debt_id=? AND pat_installment_month=?';
+    const existing = first(`SELECT id FROM transactions WHERE ${whereLink}`, [assetId || debtId, month]);
+    if (existing) return;
+
+    run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_debt_id,pat_installment_month)
+         VALUES (?,?,?,?,?,0,?,?,?)`,
+      [accountId, dueDate, category || 'Financiamento', memoPrefix, -Math.abs(row.installment),
+       assetId || null, debtId || null, month]);
+    created++;
+  });
+
+  if (created) save();
+  return { created };
+}
+
+// When a synced installment transaction is marked cleared (conferido), mark the
+// corresponding pat_financing / personal_debt_installments row as paid.
+function _onInstallmentTxCleared(tx) {
+  if (!tx || tx.cleared !== 1 || !tx.pat_installment_month) return;
+  const month = tx.pat_installment_month;
+  if (tx.pat_asset_id) {
+    const contract = _activeFinancingContract(tx.pat_asset_id);
+    const row = first('SELECT * FROM pat_financing WHERE contract_id=? AND month LIKE ?', [contract?.id ?? null, month+'%']);
+    if (row && row.paid !== 1) {
+      run('UPDATE pat_financing SET is_projection=0, paid=1, linked_tx_id=? WHERE id=?', [tx.id, row.id]);
+    }
+  } else if (tx.pat_debt_id) {
+    const row = first('SELECT * FROM personal_debt_installments WHERE debt_id=? AND month LIKE ?', [tx.pat_debt_id, month+'%']);
+    if (row && row.paid !== 1) {
+      run('UPDATE personal_debt_installments SET is_projection=0, paid=1, linked_tx_id=? WHERE id=?', [tx.id, row.id]);
+      _rebalanceDebtSchedule(tx.pat_debt_id);
+    }
+  }
+}
+
+// When a synced installment transaction is UNmarked (cleared 1->0), revert the
+// corresponding installment row back to "projection" (undo the mark-as-paid).
+function _onInstallmentTxUncleared(tx) {
+  if (!tx || tx.cleared !== 0 || !tx.pat_installment_month) return;
+  const month = tx.pat_installment_month;
+  if (tx.pat_asset_id) {
+    const contract = _activeFinancingContract(tx.pat_asset_id);
+    const row = first('SELECT * FROM pat_financing WHERE contract_id=? AND month LIKE ?', [contract?.id ?? null, month+'%']);
+    if (row && row.paid === 1) {
+      run('UPDATE pat_financing SET is_projection=1, paid=0, linked_tx_id=NULL WHERE id=?', [row.id]);
+      _rebalanceSchedule(tx.pat_asset_id);
+    }
+  } else if (tx.pat_debt_id) {
+    const row = first('SELECT * FROM personal_debt_installments WHERE debt_id=? AND month LIKE ?', [tx.pat_debt_id, month+'%']);
+    if (row && row.paid === 1) {
+      run('UPDATE personal_debt_installments SET is_projection=1, paid=0, linked_tx_id=NULL WHERE id=?', [row.id]);
+      _rebalanceDebtSchedule(tx.pat_debt_id);
+    }
+  }
+}
+
+// List all financing contracts for an asset (active + closed), most recent first
+ipcMain.handle('pat:financing-contracts-list', (_, { assetId }) =>
+  all("SELECT * FROM pat_financing_contracts WHERE asset_id=? ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, id DESC", [assetId])
 );
 
-ipcMain.handle('pat:financing-contract-save', (_, { assetId, contract }) => {
-  const { system, index_type, annual_rate, principal, n_installments, first_month,
-          balloon_at_keys, extra_annual_month, extra_annual_value, notes } = contract;
+// Get a specific contract by id, or the active one for an asset if contractId omitted
+ipcMain.handle('pat:financing-contract-get', (_, { assetId, contractId }) => {
+  if (contractId) return first('SELECT * FROM pat_financing_contracts WHERE id=?', [contractId]) || null;
+  return first("SELECT * FROM pat_financing_contracts WHERE asset_id=? AND status='active' ORDER BY id DESC LIMIT 1", [assetId]) || null;
+});
 
-  // Upsert contract
-  run(`INSERT INTO pat_financing_contracts
-    (asset_id,system,index_type,annual_rate,principal,n_installments,first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(asset_id) DO UPDATE SET
-      system=excluded.system, index_type=excluded.index_type, annual_rate=excluded.annual_rate,
-      principal=excluded.principal, n_installments=excluded.n_installments, first_month=excluded.first_month,
-      balloon_at_keys=excluded.balloon_at_keys, extra_annual_month=excluded.extra_annual_month,
-      extra_annual_value=excluded.extra_annual_value, notes=excluded.notes`,
-    [assetId, system, index_type||'none', annual_rate, principal, n_installments, first_month,
-     balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null]);
+// Close a contract (e.g. financing paid off / replaced by a new one), keeping
+// its history visible in the table.
+ipcMain.handle('pat:financing-contract-close', (_, { contractId, closedMonth }) => {
+  run("UPDATE pat_financing_contracts SET status='closed', closed_month=? WHERE id=?", [closedMonth || null, contractId]);
+  save();
+  return { ok: true };
+});
+
+ipcMain.handle('pat:financing-contract-save', (_, { assetId, contractId, contract }) => {
+  const { label, system, index_type, annual_rate, principal, n_installments, first_month,
+          balloon_at_keys, extra_annual_month, extra_annual_value, notes,
+          sync_account_id, sync_day, sync_category } = contract;
+
+  let cId = contractId;
+  if (cId) {
+    // Update existing contract
+    run(`UPDATE pat_financing_contracts SET
+        label=COALESCE(?, label), system=?, index_type=?, annual_rate=?, principal=?, n_installments=?, first_month=?,
+        balloon_at_keys=?, extra_annual_month=?, extra_annual_value=?, notes=?,
+        sync_account_id=COALESCE(?, sync_account_id), sync_day=COALESCE(?, sync_day), sync_category=COALESCE(?, sync_category)
+      WHERE id=?`,
+      [label||null, system, index_type||'none', annual_rate, principal, n_installments, first_month,
+       balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null,
+       sync_account_id||null, sync_day||null, sync_category||null, cId]);
+  } else {
+    // New contract — insert as the active one
+    cId = run(`INSERT INTO pat_financing_contracts
+      (asset_id,label,status,system,index_type,annual_rate,principal,n_installments,first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes,sync_account_id,sync_day,sync_category)
+      VALUES (?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [assetId, label||null, system, index_type||'none', annual_rate, principal, n_installments, first_month,
+       balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null,
+       sync_account_id||null, sync_day||null, sync_category||null]);
+  }
 
   // Generate and save schedule (only projected rows — don't overwrite paid rows)
   const schedule = generateSchedule(contract);
-  const curM = new Date().toISOString().slice(0,7);
 
-  // Keep existing paid rows, replace projected ones
-  run('DELETE FROM pat_financing WHERE asset_id=? AND is_projection=1', [assetId]);
+  // Keep existing paid rows, replace projected ones — scoped to this contract
+  run('DELETE FROM pat_financing WHERE contract_id=? AND is_projection=1', [cId]);
   schedule.forEach(row => {
     // Don't overwrite months that have been paid
-    const existing = first('SELECT id FROM pat_financing WHERE asset_id=? AND month=? AND is_projection=0', [assetId, row.month]);
+    const existing = first('SELECT id FROM pat_financing WHERE contract_id=? AND month=? AND is_projection=0', [cId, row.month]);
     if (!existing) {
-      run(`INSERT OR REPLACE INTO pat_financing (asset_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
-           VALUES (?,?,?,?,?,?,?,1,0)`,
-        [assetId, row.month, row.installment, row.principal, row.interest, row.correction, row.balance_end]);
+      run(`INSERT OR REPLACE INTO pat_financing (asset_id,contract_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+           VALUES (?,?,?,?,?,?,?,?,1,0)`,
+        [assetId, cId, row.month, row.installment, row.principal, row.interest, row.correction, row.balance_end]);
     }
   });
 
-  // Update financing_total on asset
+  // Update financing_total on asset (reflects the active contract's principal)
   run('UPDATE pat_assets SET financing_total=?, financed=1 WHERE id=?', [principal, assetId]);
 
+  // Auto-sync future installments to the configured bank account (if set)
+  const asset = first('SELECT name FROM pat_assets WHERE id=?', [assetId]);
+  _syncInstallmentsToBank({
+    schedule, assetId, contractId: cId,
+    accountId: sync_account_id, syncDay: sync_day, category: sync_category,
+    memoPrefix: `Parcela financiamento — ${label ? label+' — ' : ''}${asset?.name || 'ativo'}`,
+  });
+
   save();
-  return { ok: true, schedule };
+  return { ok: true, schedule, contractId: cId };
 });
 
 // Mark installment as paid (called when a pat_transaction of type parcela_financiamento is saved)
-ipcMain.handle('pat:financing-mark-paid', (_, { assetId, month, amount }) => {
-  const contract = first('SELECT * FROM pat_financing_contracts WHERE asset_id=?', [assetId]);
-  const r = contract ? (contract.annual_rate / 100 / 12) : 0;
+// Resolve the active financing contract for an asset (or null)
+function _activeFinancingContract(assetId) {
+  return first("SELECT * FROM pat_financing_contracts WHERE asset_id=? AND (status='active' OR status IS NULL) ORDER BY id DESC LIMIT 1", [assetId]);
+}
 
-  // Find balance BEFORE this month (balance_end of previous row)
-  const rows = all('SELECT * FROM pat_financing WHERE asset_id=? ORDER BY month', [assetId]);
+ipcMain.handle('pat:financing-mark-paid', (_, { assetId, month, amount }) => {
+  const contract = _activeFinancingContract(assetId);
+  const r = contract ? (contract.annual_rate / 100 / 12) : 0;
+  const cId = contract?.id ?? null;
+
+  // Find balance BEFORE this month (balance_end of previous row, within this contract)
+  const rows = all('SELECT * FROM pat_financing WHERE contract_id=? ORDER BY month', [cId]);
   const idx  = rows.findIndex(row => row.month.slice(0,7) === month);
   const prevBal = idx > 0 ? (rows[idx-1].balance_end ?? 0) : (contract?.principal ?? 0);
 
@@ -2779,13 +3078,13 @@ ipcMain.handle('pat:financing-mark-paid', (_, { assetId, month, amount }) => {
   const principal  = Math.max(0, Math.round((amount - interest) * 100) / 100);
   const balanceEnd = Math.max(0, Math.round((prevBal - principal) * 100) / 100);
 
-  const existing = first('SELECT * FROM pat_financing WHERE asset_id=? AND month=?', [assetId, month]);
+  const existing = first('SELECT * FROM pat_financing WHERE contract_id=? AND month=?', [cId, month]);
   if (existing) {
-    run('UPDATE pat_financing SET is_projection=0, paid=1, installment=?, principal=?, interest=?, balance_end=? WHERE asset_id=? AND month=?',
-      [amount, principal, interest, balanceEnd, assetId, month]);
+    run('UPDATE pat_financing SET is_projection=0, paid=1, installment=?, principal=?, interest=?, balance_end=? WHERE contract_id=? AND month=?',
+      [amount, principal, interest, balanceEnd, cId, month]);
   } else {
-    run('INSERT INTO pat_financing (asset_id,month,installment,principal,interest,correction,balance_end,is_projection,paid) VALUES (?,?,?,?,?,0,?,0,1)',
-      [assetId, month, amount, principal, interest, balanceEnd]);
+    run('INSERT INTO pat_financing (asset_id,contract_id,month,installment,principal,interest,correction,balance_end,is_projection,paid) VALUES (?,?,?,?,?,?,0,?,0,1)',
+      [assetId, cId, month, amount, principal, interest, balanceEnd]);
   }
   _rebalanceSchedule(assetId);
   save();
@@ -2794,10 +3093,10 @@ ipcMain.handle('pat:financing-mark-paid', (_, { assetId, month, amount }) => {
 
 // Restore a paid installment back to projection (called when payment is deleted)
 ipcMain.handle('pat:financing-unpay', (_, { assetId, month }) => {
-  // Re-generate what the projection for this month should be
-  const contract = first('SELECT * FROM pat_financing_contracts WHERE asset_id=?', [assetId]);
+  const contract = _activeFinancingContract(assetId);
+  const cId = contract?.id ?? null;
   if (!contract) {
-    // No contract — just delete the row entirely
+    // No active contract — just delete the row entirely
     run('DELETE FROM pat_financing WHERE asset_id=? AND month=? AND is_projection=0', [assetId, month]);
   } else {
     // Rebuild the full projected schedule and find this month's row
@@ -2805,18 +3104,211 @@ ipcMain.handle('pat:financing-unpay', (_, { assetId, month }) => {
     const projRow = fullSchedule.find(r => r.month.slice(0,7) === month.slice(0,7));
     if (projRow) {
       run(`INSERT OR REPLACE INTO pat_financing
-           (asset_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
-           VALUES (?,?,?,?,?,0,?,1,0)`,
-        [assetId, projRow.month, projRow.installment, projRow.principal, projRow.interest, projRow.balance_end]);
+           (asset_id,contract_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+           VALUES (?,?,?,?,?,?,0,?,1,0)`,
+        [assetId, cId, projRow.month, projRow.installment, projRow.principal, projRow.interest, projRow.balance_end]);
     } else {
       // Beyond schedule end — just delete
-      run('DELETE FROM pat_financing WHERE asset_id=? AND month=?', [assetId, month]);
+      run('DELETE FROM pat_financing WHERE contract_id=? AND month=?', [cId, month]);
     }
   }
   _rebalanceSchedule(assetId);
   save();
   return { ok: true };
 });
+
+// Direct manual edit of a single installment (amount and/or paid status) —
+// used by inline editing in the Patrimônio table. Unlike mark-paid/unpay,
+// this doesn't recompute principal/interest split from a payment amount;
+// it just sets the values directly and rebalances downstream months.
+ipcMain.handle('pat:financing-installment-set', (_, { assetId, month, installment, paid }) => {
+  const contract = _activeFinancingContract(assetId);
+  const cId = contract?.id ?? null;
+  let existing = first('SELECT * FROM pat_financing WHERE contract_id=? AND month=?', [cId, month]);
+  if (!existing) {
+    // Fallback: a row for this asset/month exists but wasn't backfilled with the
+    // right contract_id (legacy data) — update it in place instead of inserting
+    // a duplicate row for the same month.
+    existing = first('SELECT * FROM pat_financing WHERE asset_id=? AND month=?', [assetId, month]);
+    if (existing && cId != null) run('UPDATE pat_financing SET contract_id=? WHERE id=?', [cId, existing.id]);
+  }
+  if (existing) {
+    run('UPDATE pat_financing SET installment=?, paid=?, is_projection=? WHERE id=?',
+      [installment, paid ? 1 : 0, paid ? 0 : existing.is_projection, existing.id]);
+  } else {
+    run(`INSERT INTO pat_financing (asset_id,contract_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+         VALUES (?,?,?,?,0,0,0,?,?)`,
+      [assetId, cId, month, installment, paid ? 0 : 1, paid ? 1 : 0]);
+  }
+  _rebalanceSchedule(assetId);
+  save();
+  return { ok: true };
+});
+
+
+ipcMain.handle('debt:list', () =>
+  all('SELECT * FROM personal_debts ORDER BY sort_order, id')
+);
+
+ipcMain.handle('debt:save', (_, { id, name, notes, sort_order, hidden }) => {
+  if (id) {
+    const existing = first('SELECT sort_order FROM personal_debts WHERE id=?', [id]);
+    const so = sort_order ?? existing?.sort_order ?? 0;
+    run('UPDATE personal_debts SET name=?,notes=?,sort_order=?,hidden=? WHERE id=?',
+      [name, notes||null, so, hidden?1:0, id]);
+    return { id };
+  } else {
+    const newId = run('INSERT INTO personal_debts (name,notes,sort_order,hidden) VALUES (?,?,?,?)',
+      [name, notes||null, sort_order ?? 0, hidden?1:0]);
+    const resolvedId = newId || first('SELECT id FROM personal_debts WHERE name=? ORDER BY id DESC LIMIT 1', [name])?.id;
+    return { id: resolvedId };
+  }
+});
+
+ipcMain.handle('debt:delete', (_, { id }) => {
+  run('DELETE FROM personal_debts WHERE id=?', [id]);
+  save();
+  return { ok: true };
+});
+
+ipcMain.handle('debt:installments-get', (_, { debtId }) =>
+  all('SELECT * FROM personal_debt_installments WHERE debt_id=? ORDER BY month', [debtId])
+);
+
+ipcMain.handle('debt:contract-get', (_, { debtId }) =>
+  first('SELECT * FROM personal_debt_contracts WHERE debt_id=?', [debtId]) || null
+);
+
+ipcMain.handle('debt:contract-save', (_, { debtId, contract }) => {
+  const { system, index_type, annual_rate, principal, n_installments, first_month,
+          balloon_at_keys, extra_annual_month, extra_annual_value, notes,
+          sync_account_id, sync_day, sync_category } = contract;
+
+  // Upsert contract
+  run(`INSERT INTO personal_debt_contracts
+    (debt_id,system,index_type,annual_rate,principal,n_installments,first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes,sync_account_id,sync_day,sync_category)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(debt_id) DO UPDATE SET
+      system=excluded.system, index_type=excluded.index_type, annual_rate=excluded.annual_rate,
+      principal=excluded.principal, n_installments=excluded.n_installments, first_month=excluded.first_month,
+      balloon_at_keys=excluded.balloon_at_keys, extra_annual_month=excluded.extra_annual_month,
+      extra_annual_value=excluded.extra_annual_value, notes=excluded.notes,
+      sync_account_id=COALESCE(excluded.sync_account_id, personal_debt_contracts.sync_account_id),
+      sync_day=COALESCE(excluded.sync_day, personal_debt_contracts.sync_day),
+      sync_category=COALESCE(excluded.sync_category, personal_debt_contracts.sync_category)`,
+    [debtId, system, index_type||'none', annual_rate, principal, n_installments, first_month,
+     balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null,
+     sync_account_id||null, sync_day||null, sync_category||null]);
+
+  // Generate and save schedule (only projected rows — don't overwrite paid rows)
+  const schedule = generateSchedule(contract);
+
+  run('DELETE FROM personal_debt_installments WHERE debt_id=? AND is_projection=1', [debtId]);
+  schedule.forEach(row => {
+    const existing = first('SELECT id FROM personal_debt_installments WHERE debt_id=? AND month=? AND is_projection=0', [debtId, row.month]);
+    if (!existing) {
+      run(`INSERT OR REPLACE INTO personal_debt_installments (debt_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+           VALUES (?,?,?,?,?,?,?,1,0)`,
+        [debtId, row.month, row.installment, row.principal, row.interest, row.correction, row.balance_end]);
+    }
+  });
+
+  // Auto-sync future installments to the configured bank account (if set)
+  const debt = first('SELECT name FROM personal_debts WHERE id=?', [debtId]);
+  _syncInstallmentsToBank({
+    schedule, debtId,
+    accountId: sync_account_id, syncDay: sync_day, category: sync_category,
+    memoPrefix: `Parcela dívida — ${debt?.name || 'dívida pessoal'}`,
+  });
+
+  save();
+  return { ok: true, schedule };
+});
+
+// Mark installment as paid (called when a transaction is linked as "parcela desta dívida")
+ipcMain.handle('debt:mark-paid', (_, { debtId, month, amount }) => {
+  const contract = first('SELECT * FROM personal_debt_contracts WHERE debt_id=?', [debtId]);
+  const r = contract ? (contract.annual_rate / 100 / 12) : 0;
+
+  const rows = all('SELECT * FROM personal_debt_installments WHERE debt_id=? ORDER BY month', [debtId]);
+  const idx  = rows.findIndex(row => row.month.slice(0,7) === month);
+  const prevBal = idx > 0 ? (rows[idx-1].balance_end ?? 0) : (contract?.principal ?? 0);
+
+  const interest   = Math.round(prevBal * r * 100) / 100;
+  const principal  = Math.max(0, Math.round((amount - interest) * 100) / 100);
+  const balanceEnd = Math.max(0, Math.round((prevBal - principal) * 100) / 100);
+
+  const existing = first('SELECT * FROM personal_debt_installments WHERE debt_id=? AND month=?', [debtId, month]);
+  if (existing) {
+    run('UPDATE personal_debt_installments SET is_projection=0, paid=1, installment=?, principal=?, interest=?, balance_end=? WHERE debt_id=? AND month=?',
+      [amount, principal, interest, balanceEnd, debtId, month]);
+  } else {
+    run('INSERT INTO personal_debt_installments (debt_id,month,installment,principal,interest,correction,balance_end,is_projection,paid) VALUES (?,?,?,?,?,0,?,0,1)',
+      [debtId, month, amount, principal, interest, balanceEnd]);
+  }
+  _rebalanceDebtSchedule(debtId);
+  save();
+  return { ok: true };
+});
+
+// Restore a paid installment back to projection (called when payment is deleted/unlinked)
+ipcMain.handle('debt:unpay', (_, { debtId, month }) => {
+  const contract = first('SELECT * FROM personal_debt_contracts WHERE debt_id=?', [debtId]);
+  if (!contract) {
+    run('DELETE FROM personal_debt_installments WHERE debt_id=? AND month=? AND is_projection=0', [debtId, month]);
+  } else {
+    const fullSchedule = generateSchedule(contract);
+    const projRow = fullSchedule.find(r => r.month.slice(0,7) === month.slice(0,7));
+    if (projRow) {
+      run(`INSERT OR REPLACE INTO personal_debt_installments
+           (debt_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+           VALUES (?,?,?,?,?,0,?,1,0)`,
+        [debtId, projRow.month, projRow.installment, projRow.principal, projRow.interest, projRow.balance_end]);
+    } else {
+      run('DELETE FROM personal_debt_installments WHERE debt_id=? AND month=?', [debtId, month]);
+    }
+  }
+  _rebalanceDebtSchedule(debtId);
+  save();
+  return { ok: true };
+});
+
+// Direct manual edit of a single debt installment (amount and/or paid status) —
+// used by inline editing in the Patrimônio table.
+ipcMain.handle('debt:installment-set', (_, { debtId, month, installment, paid }) => {
+  const existing = first('SELECT * FROM personal_debt_installments WHERE debt_id=? AND month=?', [debtId, month]);
+  if (existing) {
+    run('UPDATE personal_debt_installments SET installment=?, paid=?, is_projection=? WHERE id=?',
+      [installment, paid ? 1 : 0, paid ? 0 : existing.is_projection, existing.id]);
+  } else {
+    run(`INSERT INTO personal_debt_installments (debt_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+         VALUES (?,?,?,0,0,0,0,?,?)`,
+      [debtId, month, installment, paid ? 0 : 1, paid ? 1 : 0]);
+  }
+  _rebalanceDebtSchedule(debtId);
+  save();
+  return { ok: true };
+});
+
+function _rebalanceDebtSchedule(debtId) {
+  const rows     = all('SELECT * FROM personal_debt_installments WHERE debt_id=? ORDER BY month', [debtId]);
+  const contract = first('SELECT * FROM personal_debt_contracts WHERE debt_id=?', [debtId]);
+  const r = contract ? (contract.annual_rate / 100 / 12) : 0;
+
+  let balance = null;
+  rows.forEach(row => {
+    if (balance === null) {
+      balance = row.balance_end ?? 0;
+      return;
+    }
+    const interest   = Math.round(balance * r * 100) / 100;
+    const principal  = Math.max(0, Math.round((row.installment - interest) * 100) / 100);
+    const newBal     = Math.max(0, Math.round((balance - principal) * 100) / 100);
+    run('UPDATE personal_debt_installments SET principal=?, interest=?, balance_end=? WHERE id=?',
+      [principal, interest, newBal, row.id]);
+    balance = newBal;
+  });
+}
 
 // Fetch financing indexes (INCC, IGP-M, TR, IPC-FIPE)
 ipcMain.handle('financing:fetch-indexes', async () => {
@@ -2870,8 +3362,9 @@ ipcMain.handle('financing:fetch-indexes', async () => {
 ipcMain.handle('financing:get-indexes', () => global._financingIndexes || {});
 
 function _rebalanceSchedule(assetId) {
-  const rows     = all('SELECT * FROM pat_financing WHERE asset_id=? ORDER BY month', [assetId]);
-  const contract = first('SELECT * FROM pat_financing_contracts WHERE asset_id=?', [assetId]);
+  const contract = _activeFinancingContract(assetId);
+  const cId = contract?.id ?? null;
+  const rows = all('SELECT * FROM pat_financing WHERE contract_id=? ORDER BY month', [cId]);
   const r = contract ? (contract.annual_rate / 100 / 12) : 0;
 
   let balance = null;
@@ -2964,11 +3457,24 @@ const PAT_TX_AFFECTS_VALUE = {
   reducao: 'sub',    // value -= total_value
 };
 
+// Cash-flow sign convention, mirroring PAT_TX_CASH in renderer.js — used when
+// auto-creating a bank transaction for a future-dated pat_transactions row.
+const PAT_TX_CASH_SIGN = {
+  compra: -1, aporte: -1, despesa: -1, parcela_financiamento: -1,
+  reducao: +1, aluguel: +1, dividendo: +1, jcp: +1, venda: +1, venda_parcela: +1,
+};
+const PAT_TX_LABELS = {
+  compra: 'Compra', aporte: 'Aporte de capital', despesa: 'Despesa do ativo',
+  parcela_financiamento: 'Parcela de financiamento', reducao: 'Redução de capital',
+  aluguel: 'Aluguel recebido', dividendo: 'Dividendo', jcp: 'JCP',
+  venda: 'Venda', venda_parcela: 'Parcela de venda',
+};
+
 ipcMain.handle('pat:tx-list', (_, { assetId }) =>
   all('SELECT * FROM pat_transactions WHERE asset_id=? ORDER BY month, id', [assetId])
 );
 
-ipcMain.handle('pat:tx-save', (_, { id, assetId, month, tx_type, total_value, notes }) => {
+ipcMain.handle('pat:tx-save', (_, { id, assetId, month, tx_type, total_value, notes, tx_date, account_id, skipHistoryEffect }) => {
   // If updating, read the OLD values first so we can reverse their effect
   const oldTx = id ? first('SELECT * FROM pat_transactions WHERE id=?', [id]) : null;
   const oldAssetId = oldTx?.asset_id ?? assetId;
@@ -2977,15 +3483,15 @@ ipcMain.handle('pat:tx-save', (_, { id, assetId, month, tx_type, total_value, no
   const oldVal     = oldTx?.total_value ?? 0;
 
   if (id) {
-    run('UPDATE pat_transactions SET month=?,tx_type=?,total_value=?,notes=? WHERE id=?',
-      [month, tx_type, total_value, notes||null, id]);
+    run('UPDATE pat_transactions SET month=?,tx_type=?,total_value=?,notes=?,tx_date=?,account_id=? WHERE id=?',
+      [month, tx_type, total_value, notes||null, tx_date||null, account_id||null, id]);
   } else {
-    run('INSERT INTO pat_transactions (asset_id,month,tx_type,total_value,notes) VALUES (?,?,?,?,?)',
-      [assetId, month, tx_type, total_value, notes||null]);
+    run('INSERT INTO pat_transactions (asset_id,month,tx_type,total_value,notes,tx_date,account_id) VALUES (?,?,?,?,?,?,?)',
+      [assetId, month, tx_type, total_value, notes||null, tx_date||null, account_id||null]);
   }
 
   // If this is an UPDATE, first reverse the OLD effect on pat_history
-  if (oldTx) {
+  if (oldTx && !skipHistoryEffect) {
     const oldEffect = PAT_TX_AFFECTS_VALUE[oldType];
     if (oldEffect) {
       const hist = first('SELECT value FROM pat_history WHERE asset_id=? AND month=?', [oldAssetId, oldMonth]);
@@ -3004,8 +3510,10 @@ ipcMain.handle('pat:tx-save', (_, { id, assetId, month, tx_type, total_value, no
     }
   }
 
-  // Apply NEW effect on pat_history
-  const effect = PAT_TX_AFFECTS_VALUE[tx_type];
+  // Apply NEW effect on pat_history (unless explicitly skipped — e.g. the
+  // down-payment "compra" row for a financed asset, where pat_history is
+  // managed independently via the financing contract's full asset value)
+  const effect = skipHistoryEffect ? null : PAT_TX_AFFECTS_VALUE[tx_type];
   if (effect) {
     const existing = first('SELECT value FROM pat_history WHERE asset_id=? AND month=?', [assetId, month]);
     const prevVal = existing?.value ?? 0;
@@ -3028,6 +3536,18 @@ ipcMain.handle('pat:tx-save', (_, { id, assetId, month, tx_type, total_value, no
       const newAmount = linkedTx.amount >= 0 ? total_value : -total_value;
       run('UPDATE transactions SET amount=?,memo=? WHERE id=?',
         [newAmount, notes || linkedTx.memo, linkedTx.id]);
+    } else if (account_id && tx_date) {
+      // Forward sync: create a future bank transaction for this movement, if the
+      // date is today or later (never retroactive) and one doesn't already exist.
+      const today = new Date().toISOString().slice(0,10);
+      if (tx_date >= today) {
+        const sign = PAT_TX_CASH_SIGN[tx_type] ?? 1;
+        const asset = first('SELECT name FROM pat_assets WHERE id=?', [assetId]);
+        const txId = run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_tx_id)
+             VALUES (?,?,?,?,?,0,?,?)`,
+          [account_id, tx_date, 'Patrimônio', notes || `${PAT_TX_LABELS[tx_type]||tx_type} — ${asset?.name||''}`,
+           sign * Math.abs(total_value), assetId, savedId]);
+      }
     }
   }
 

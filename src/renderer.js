@@ -1605,7 +1605,24 @@ function openTxModal(tx=null) {
     // Look up the pat_tx_type from _pat.txAll
     const existingPatTx = _pat.txAll.find(t => t.id === tx.pat_tx_id);
     if (existingPatTx && G('tx-pat-type')) G('tx-pat-type').value = existingPatTx.tx_type;
+  } else if (hasPatLink && tx?.pat_installment_month && G('tx-pat-type')) {
+    // Auto-synced financing/debt installment (no pat_transactions row) — default
+    // to "Parcela de financiamento" instead of the dropdown's first option.
+    G('tx-pat-type').value = 'parcela_financiamento';
   }
+
+  // Populate personal debt dropdown and reset toggle
+  const debtSel     = G('tx-debt-id');
+  const debtSection = G('tx-debt-section');
+  const debtToggle  = G('tx-debt-toggle');
+  if (debtSel) {
+    debtSel.innerHTML = '<option value="">— Nenhuma —</option>' +
+      (_pat.debts||[]).map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+    debtSel.value = tx?.pat_debt_id || '';
+  }
+  const hasDebtLink = !!(tx?.pat_debt_id);
+  if (debtToggle) debtToggle.checked = hasDebtLink;
+  if (debtSection) debtSection.style.display = hasDebtLink ? '' : 'none';
 
   openModal('modal-tx');
 }
@@ -1616,24 +1633,26 @@ function onImportPatAssetChange(sel, i) {
   const typeInp = G('bank-preview-body')?.querySelectorAll('.import-pat-type-inp')[i];
   if (!memoInp || !typeInp || !sel.value) return;
   const memo = memoInp.value.toLowerCase();
+  const asset = _pat.assets.find(a => a.id === parseInt(sel.value));
   if (memo.includes('aluguel'))              typeInp.value = 'aluguel';
   else if (memo.includes('dividendo'))        typeInp.value = 'dividendo';
   else if (memo.includes('jcp') || memo.includes('juros sobre capital')) typeInp.value = 'jcp';
   else if (memo.includes('compra') || memo.includes('aquisi')) typeInp.value = 'compra';
-  else if (memo.includes('venda'))            typeInp.value = 'venda';
+  else if (memo.includes('venda'))            typeInp.value = asset?.sold_month ? 'venda_parcela' : 'venda';
   else if (memo.includes('parcel') || memo.includes('financ')) typeInp.value = 'parcela_financiamento';
 }
 
 function onTxPatAssetChange() {
   // Auto-suggest tx type based on memo content when asset is selected
-  const memo = (G('tx-memo')?.value || '').toLowerCase();
-  const sel  = G('tx-pat-type');
+  const memo  = (G('tx-memo')?.value || '').toLowerCase();
+  const sel   = G('tx-pat-type');
+  const asset = _pat.assets.find(a => a.id === parseInt(G('tx-pat-asset')?.value || '0'));
   if (!sel || G('tx-pat-asset')?.value === '') return;
   if (memo.includes('aluguel'))  sel.value = 'aluguel';
   else if (memo.includes('dividendo')) sel.value = 'dividendo';
   else if (memo.includes('jcp') || memo.includes('juros sobre capital')) sel.value = 'jcp';
   else if (memo.includes('compra') || memo.includes('aquisi')) sel.value = 'compra';
-  else if (memo.includes('venda')) sel.value = 'venda';
+  else if (memo.includes('venda')) sel.value = asset?.sold_month ? 'venda_parcela' : 'venda';
   else if (memo.includes('parcel') || memo.includes('financ')) sel.value = 'parcela_financiamento';
 }
 
@@ -1743,13 +1762,40 @@ async function saveTx() {
     if (currentPage === 'patrimonio') refreshPatrimonioTable();
   }
 
+  // Resolve personal debt linkage (mark installment as paid)
+  const debtId = parseInt(G('tx-debt-id')?.value || '0');
+  if (debtId) {
+    const txMonth = date.slice(0, 7);
+    // If editing and the debt/month changed, unpay the old linkage first
+    if (editingTxId) {
+      const oldTx = window._lastTxs?.find(t => t.id === editingTxId);
+      if (oldTx?.pat_debt_id) {
+        const oldMonth = oldTx.date.slice(0, 7);
+        if (oldTx.pat_debt_id !== debtId || oldMonth !== txMonth) {
+          await ff.debtUnpay({ debtId: oldTx.pat_debt_id, month: oldMonth }).catch(() => {});
+        }
+      }
+    }
+    await ff.debtMarkPaid({ debtId, month: txMonth, amount: Math.abs(amount) }).catch(() => {});
+    _pat.debtInstallments[debtId] = await ff.debtInstallmentsGet({ debtId }).catch(() => []);
+    if (currentPage === 'patrimonio') refreshPatrimonioTable();
+  } else if (editingTxId) {
+    // Toggle was turned off — unpay any previous debt linkage
+    const oldTx = window._lastTxs?.find(t => t.id === editingTxId);
+    if (oldTx?.pat_debt_id) {
+      await ff.debtUnpay({ debtId: oldTx.pat_debt_id, month: oldTx.date.slice(0,7) }).catch(() => {});
+      _pat.debtInstallments[oldTx.pat_debt_id] = await ff.debtInstallmentsGet({ debtId: oldTx.pat_debt_id }).catch(() => []);
+      if (currentPage === 'patrimonio') refreshPatrimonioTable();
+    }
+  }
+
   if (editingTxId) {
     await ff.updateTx({ id:editingTxId, date, amount, memo, category, cleared:0,
-      pat_asset_id: patAssetId||null, pat_tx_id: patTxId||null });
+      pat_asset_id: patAssetId||null, pat_tx_id: patTxId||null, pat_debt_id: debtId||null });
     toast(t('msg_tx_updated'));
   } else {
     await ff.createTx({ account_id, date, amount, memo, category,
-      pat_asset_id: patAssetId||null, pat_tx_id: patTxId||null });
+      pat_asset_id: patAssetId||null, pat_tx_id: patTxId||null, pat_debt_id: debtId||null });
     toast(t('msg_tx_created'));
   }
   if (memo || category) ff.mlLearn({ desc: memo, memo, category, amount });
@@ -1773,6 +1819,7 @@ async function deleteTx(id) {
   if (!confirmed) return;
   const tx = window._lastTxs?.find(t => t.id === id);
   const hasPatLink = !!(tx?.pat_asset_id);
+  const hasDebtLink = !!(tx?.pat_debt_id);
   // If linked to financing installment, restore projection before deleting
   if (hasPatLink && tx?.pat_tx_id) {
     const patTx = _pat.txAll.find(t => t.id === tx.pat_tx_id);
@@ -1780,9 +1827,13 @@ async function deleteTx(id) {
       await ff.patFinancingUnpay({ assetId: tx.pat_asset_id, month: patTx.month }).catch(() => {});
     }
   }
+  // If linked to a personal debt installment, restore projection before deleting
+  if (hasDebtLink) {
+    await ff.debtUnpay({ debtId: tx.pat_debt_id, month: tx.date.slice(0,7) }).catch(() => {});
+  }
   await ff.deleteTx(id);
-  if (hasPatLink) {
-    await refreshPatrimonio(); // reloads txAll, financing, historyAll
+  if (hasPatLink || hasDebtLink) {
+    await refreshPatrimonio(); // reloads txAll, financing, historyAll, debts
     await loadAccounts();
     if (currentPage === 'account') refreshAccount();
     return;
@@ -6398,6 +6449,14 @@ function confirmDialogResolve(result) {
   closeModal('modal-confirm');
   if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
 }
+
+// Generic info modal — shows a title + arbitrary HTML body, with just a close button.
+function showInfoModal(title, bodyHtml) {
+  if (G('modal-info-title')) G('modal-info-title').textContent = title;
+  if (G('modal-info-body'))  G('modal-info-body').innerHTML    = bodyHtml;
+  openModal('modal-info');
+}
+function closeInfoModal() { closeModal('modal-info'); }
 document.addEventListener('keydown', e => {
   if (!G('modal-confirm')?.classList.contains('open')) return;
   if (e.key === 'Escape') { e.preventDefault(); confirmDialogResolve(false); }
@@ -9791,6 +9850,7 @@ function refreshPatrimonioChart() {
   _pat.historyAll.forEach(h => { if (h.month <= curM) monthSet.add(h.month); });
   _pat.accountBalances.forEach(a => a.history.forEach(h => { if (h.month <= curM) monthSet.add(h.month); }));
   _inv.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
+  _pat.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
   const months = [...monthSet].sort();
 
   // ── Asset value by month (imobilizado) ──
@@ -9804,6 +9864,31 @@ function refreshPatrimonioChart() {
     let t = 0;
     _pat.assets.forEach(a => { const v = histMap[a.id]?.[m]; if (v != null) t += v; });
     imobByMonth[m] = t;
+  });
+
+  // Net out outstanding financing debt (saldo devedor) from each asset's value,
+  // matching the "Total Imobilizado" row in the table — otherwise the chart
+  // overstates imobilizado for financed assets.
+  _pat.assets.forEach(a => {
+    if (!a.financed || !_pat.financing[a.id]?.length) return;
+    const allFins = _pat.financing[a.id].slice().sort((x,y) => x.month.localeCompare(y.month));
+    const finsByContract = {};
+    allFins.forEach(r => {
+      const cid = r.contract_id ?? 'legacy';
+      (finsByContract[cid] = finsByContract[cid] || []).push(r);
+    });
+    Object.values(finsByContract).forEach(fins => {
+      const firstInstMonth = fins[0].month;
+      months.forEach(m => {
+        if (m < firstInstMonth) return;
+        const rowsUpTo = fins.filter(r => r.month.slice(0,7) <= m);
+        if (!rowsUpTo.length) return;
+        const lastRow = rowsUpTo[rowsUpTo.length - 1];
+        const balance = lastRow.balance_end != null ? lastRow.balance_end
+          : Math.max(0, (a.financing_total||0) - rowsUpTo.reduce((s,r) => s + r.installment, 0));
+        if (balance > 0.01) imobByMonth[m] = (imobByMonth[m]||0) - balance;
+      });
+    });
   });
 
   // ── Account balances by month ──
@@ -9868,6 +9953,49 @@ function refreshPatrimonioChart() {
     spanGaps: false,
   }];
   _patCharts.imob = patMakeChart('pat-chart-imob', imobDs, trimImob.months, 'BRL');
+
+  // ── 2b. Dívidas Pessoais — sum of outstanding balances across all personal debts ──
+  // Hidden entirely if there's no debt data (all months zero/empty).
+  // This chart alone extends into future months where installments are projected,
+  // so the user can see the projected payoff trajectory.
+  const debtMonthSet = new Set(months);
+  Object.values(_pat.debtInstallments || {}).forEach(rows => {
+    (rows||[]).forEach(r => { if (r.is_projection === 1) debtMonthSet.add(r.month.slice(0,7)); });
+  });
+  const debtMonths = [...debtMonthSet].sort();
+  const debtByMonth = {};
+  debtMonths.forEach(m => {
+    let t = 0;
+    (_pat.debts || []).forEach(d => {
+      const rows = (_pat.debtInstallments[d.id] || []).filter(r => r.month.slice(0,7) <= m).sort((a,b) => a.month.localeCompare(b.month));
+      if (rows.length) {
+        const last = rows[rows.length-1];
+        if (last.balance_end > 0.01) t += last.balance_end;
+      }
+    });
+    debtByMonth[m] = t;
+  });
+  const hasAnyDebt = debtMonths.some(m => (debtByMonth[m]||0) > 0);
+  const debtCard = G('pat-chart-debt-card');
+  if (hasAnyDebt) {
+    if (debtCard) debtCard.style.display = '';
+    const debtRaw = debtMonths.map(m => debtByMonth[m] > 0 ? debtByMonth[m] : null);
+    const trimDebt = trimLeading(debtMonths, debtRaw);
+    const debtDs = [{
+      label: 'Dívidas Pessoais',
+      data: trimDebt.series[0],
+      borderColor: '#dc2626',
+      backgroundColor: 'rgba(220,38,38,.08)',
+      borderWidth: 2.5,
+      pointRadius: 2,
+      tension: 0.3,
+      fill: true,
+      spanGaps: false,
+    }];
+    _patCharts.debt = patMakeChart('pat-chart-debt', debtDs, trimDebt.months, 'BRL');
+  } else if (debtCard) {
+    debtCard.style.display = 'none';
+  }
 
   // ── 3. Investimentos vs benchmarks — TWR por ativo, agregado ──
   // Estratégia: calcular TWR individualmente para cada ativo (apenas entre meses
@@ -10321,6 +10449,8 @@ let _pat = {
   accountBalances: [],
   financing: {},    // {assetId: [{month, installment, paid}]}
   txAll: [],        // pat_transactions for all assets
+  debts: [],            // personal_debts
+  debtInstallments: {}, // {debtId: [{month, installment, balance_end, ...}]}
   currentMonth: '',
 };
 
@@ -10335,6 +10465,7 @@ const PAT_TX_CASH = {
   dividendo:              { label: '💰 Dividendo',                 sign: +1 },
   jcp:                    { label: '💵 JCP',                       sign: +1 },
   venda:                  { label: '🔴 Venda',                     sign: +1 },
+  venda_parcela:          { label: '🔴 Parcela de venda',          sign: +1 },
 };
 
 const PAT_ASSET_TYPES = {
@@ -10389,13 +10520,21 @@ async function refreshPatrimonio() {
   _pat.txAll           = await ff.patTxAll().catch(() => []);
   _pat.historyAll      = await ff.patHistoryAll();
   _pat.accountBalances = await ff.patAccountBalances();
-  // Load financing installments for all financed assets
+  // Load financing installments + contracts for all financed assets
   _pat.financing = {};
+  _pat.financingContracts = {};
   for (const a of _pat.assets) {
     if (a.financed) {
       const rows = await ff.patFinancingGet({ assetId: a.id });
       _pat.financing[a.id] = rows;
+      _pat.financingContracts[a.id] = await ff.patFinancingContractsList({ assetId: a.id }).catch(() => []);
     }
+  }
+  // Load personal debts and their installment schedules
+  _pat.debts = await ff.debtList().catch(() => []);
+  _pat.debtInstallments = {};
+  for (const d of _pat.debts) {
+    _pat.debtInstallments[d.id] = await ff.debtInstallmentsGet({ debtId: d.id }).catch(() => []);
   }
   await refreshInvestimentos();
 
@@ -10406,6 +10545,7 @@ async function refreshPatrimonio() {
   _pat.historyAll.forEach(h => monthSet.add(h.month));
   _pat.accountBalances.forEach(a => a.history.forEach(h => monthSet.add(h.month)));
   _inv.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
+  _pat.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
 
   const months = [...monthSet].sort();
   const selEl = G('pat-month');
@@ -10456,6 +10596,7 @@ function refreshPatrimonioTable() {
   _pat.historyAll.forEach(h => { if (h.month <= curM) monthSet.add(h.month); });
   _pat.accountBalances.forEach(a => a.history.forEach(h => { if (h.month <= curM) monthSet.add(h.month); }));
   _inv.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
+  _pat.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
   const months = [...monthSet].sort();
   const COL_W = 130;
 
@@ -10482,6 +10623,7 @@ function refreshPatrimonioTable() {
     <div class="stat-card"><div class="stat-lbl">🏠 Imobilizado</div><div class="stat-val green">${fmtBRL(totalAssets)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card"><div class="stat-lbl">🏦 Contas</div><div class="stat-val green">${fmtBRL(totalAccounts)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card" id="pat-card-inv"><div class="stat-lbl">📈 Investimentos</div><div class="stat-val green">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
+    <div class="stat-card" id="pat-card-debt"><div class="stat-lbl">💳 Dívidas Pessoais</div><div class="stat-val red">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card" id="pat-card-total"><div class="stat-lbl">📊 Total Patrimônio</div><div class="stat-val accent" style="font-size:22px">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>`;
 
   // Shared month header
@@ -10525,33 +10667,43 @@ function refreshPatrimonioTable() {
       if (v != null) assetTotalByMonth[m] += v;
     });
     if (a.financed && _pat.financing[a.id]?.length) {
-      const fins = _pat.financing[a.id].sort((x,y) => x.month.localeCompare(y.month));
-      const firstInstMonth = fins[0].month;
+      const allFins = _pat.financing[a.id].sort((x,y) => x.month.localeCompare(y.month));
+      // Group installments by contract (each contract gets its own "Saldo devedor" row)
+      const finsByContract = {};
+      allFins.forEach(r => {
+        const cid = r.contract_id ?? 'legacy';
+        (finsByContract[cid] = finsByContract[cid] || []).push(r);
+      });
       debtByAsset[a.id]     = {};
       debtProjByAsset[a.id] = {};
-      months.forEach(m => {
-        if (m < firstInstMonth) return;
-        // Find the last schedule row at or before m
-        const rowsUpTo = fins.filter(r => r.month.slice(0,7) <= m);
-        if (!rowsUpTo.length) return;
-        const lastRow = rowsUpTo[rowsUpTo.length - 1];
-        let balance;
-        if (lastRow.balance_end != null) {
-          // Use balance_end directly — most accurate
-          balance = lastRow.balance_end;
-        } else {
-          // Fallback: financing_total − paid
-          const total = a.financing_total || 0;
-          const paid  = rowsUpTo.reduce((s, r) => s + r.installment, 0);
-          balance = Math.max(0, total - paid);
-        }
-        if (balance > 0.01) {
-          debtByAsset[a.id][m]     = -balance;
-          // Mark as projection if the last real payment before m was projected
-          const lastPaid = rowsUpTo.filter(r => r.is_projection === 0 || r.paid === 1);
-          const isProjM  = lastRow.is_projection === 1 && m > (lastPaid.at(-1)?.month || '');
-          debtProjByAsset[a.id][m] = isProjM;
-        }
+      Object.entries(finsByContract).forEach(([cid, fins]) => {
+        const firstInstMonth = fins[0].month;
+        debtByAsset[a.id][cid]     = {};
+        debtProjByAsset[a.id][cid] = {};
+        months.forEach(m => {
+          if (m < firstInstMonth) return;
+          // Find the last schedule row at or before m
+          const rowsUpTo = fins.filter(r => r.month.slice(0,7) <= m);
+          if (!rowsUpTo.length) return;
+          const lastRow = rowsUpTo[rowsUpTo.length - 1];
+          let balance;
+          if (lastRow.balance_end != null) {
+            // Use balance_end directly — most accurate
+            balance = lastRow.balance_end;
+          } else {
+            // Fallback: financing_total − paid
+            const total = a.financing_total || 0;
+            const paid  = rowsUpTo.reduce((s, r) => s + r.installment, 0);
+            balance = Math.max(0, total - paid);
+          }
+          if (balance > 0.01) {
+            debtByAsset[a.id][cid][m]     = -balance;
+            // Mark as projection if the last real payment before m was projected
+            const lastPaid = rowsUpTo.filter(r => r.is_projection === 0 || r.paid === 1);
+            const isProjM  = lastRow.is_projection === 1 && m > (lastPaid.at(-1)?.month || '');
+            debtProjByAsset[a.id][cid][m] = isProjM;
+          }
+        });
       });
     }
   });
@@ -10594,54 +10746,65 @@ function refreshPatrimonioTable() {
         <button class="btn-icon" onclick="deletePatAsset(${a.id})" style="color:var(--red)" title="Excluir">✕</button>
       </td>
     </tr>`;
-    // ── Debt row immediately below parent asset, same stripe bg ──
+    // ── Debt row(s) immediately below parent asset, same stripe bg — one pair per contract ──
     if (a.financed && debtByAsset[a.id]) {
-      const debtMap = debtByAsset[a.id];
-      const debtProjMap = debtProjByAsset[a.id] || {};
-      const dCells = months.map(m => {
-        const v = debtMap[m];
-        const isProj = debtProjMap[m];
-        const cellBg = m === curM ? 'var(--accent-lt)' : bg;
-        if (v == null) return `<td class="right" style="color:var(--text3);font-size:11px;padding:4px 10px;background:${cellBg}">—</td>`;
-        const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
-        const projTip   = isProj ? ' title="Projeção (valor constante, sem correção futura)"' : '';
-        return `<td class="amt-exp right"${projTip} style="font-size:11px;padding:4px 10px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">${fmtBRL(v)}${isProj ? '<span style="font-size:8px;margin-left:2px;color:#f59e0b">~</span>' : ''}</td>`;
-      }).join('');
-      // Build installment flow cells (parcelas pagas e projetadas)
-      const finRows = (_pat.financing[a.id] || []).sort((x,y) => x.month.localeCompare(y.month));
-      const installByMonth = {};
-      const installProjByMonth = {};
-      finRows.forEach(r => {
-        const m = r.month.slice(0,7);
-        installByMonth[m]     = r.installment;
-        installProjByMonth[m] = r.is_projection === 1;
-      });
-      const iCells = months.map(m => {
-        const v = installByMonth[m];
-        const isProj = installProjByMonth[m];
-        const cellBg = m === curM ? 'var(--accent-lt)' : bg;
-        if (!v) return `<td class="right" style="color:var(--text3);font-size:11px;padding:3px 8px;background:${cellBg}">—</td>`;
-        const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
-        const projTip   = isProj ? ' title="Projeção"' : ' title="Parcela registrada"';
-        return `<td class="amt-exp right"${projTip} style="font-size:11px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">-${fmtBRL(v)}${isProj?'<span style="font-size:8px;color:#f59e0b;margin-left:1px">~</span>':''}</td>`;
-      }).join('');
+      const contracts = _pat.financingContracts[a.id] || [];
+      Object.entries(debtByAsset[a.id]).forEach(([cid, debtMap]) => {
+        const debtProjMap = (debtProjByAsset[a.id] || {})[cid] || {};
+        const contract = contracts.find(c => String(c.id) === String(cid));
+        const isClosed = contract?.status === 'closed';
+        const label = contract?.label || (contracts.length > 1 ? `Contrato #${cid}` : 'Financiamento');
+        const dCells = months.map(m => {
+          const v = debtMap[m];
+          const isProj = debtProjMap[m];
+          const cellBg = m === curM ? 'var(--accent-lt)' : bg;
+          if (v == null) return `<td class="right" style="color:var(--text3);font-size:11px;padding:4px 10px;background:${cellBg}">—</td>`;
+          const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
+          const projTip   = isProj ? ' title="Projeção (valor constante, sem correção futura)"' : '';
+          return `<td class="amt-exp right"${projTip} style="font-size:11px;padding:4px 10px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">${fmtBRL(v)}${isProj ? '<span style="font-size:8px;margin-left:2px;color:#f59e0b">~</span>' : ''}</td>`;
+        }).join('');
+        // Build installment flow cells — show ONLY still-projected (unpaid) installments.
+        // Once a month is paid, it shows in "Fluxo nominal" (via parcela_financiamento
+        // cash flow) instead, to avoid showing the same value in two rows.
+        const finRows = (_pat.financing[a.id] || []).filter(r => String(r.contract_id ?? 'legacy') === String(cid)).sort((x,y) => x.month.localeCompare(y.month));
+        const installByMonth = {};
+        const installProjByMonth = {};
+        finRows.forEach(r => {
+          const m = r.month.slice(0,7);
+          if (r.is_projection === 1 && r.paid !== 1) {
+            installByMonth[m]     = r.installment;
+            installProjByMonth[m] = true;
+          }
+        });
+        const iCells = months.map(m => {
+          const v = installByMonth[m];
+          const isProj = installProjByMonth[m];
+          const cellBg = m === curM ? 'var(--accent-lt)' : bg;
+          const clickable = isClosed ? '' : `onclick="patInstallmentInlineEdit(this,${a.id},'${m}',${v||0},${isProj?1:0})" title="Clique para editar (valor / pago)" style="cursor:pointer"`;
+          if (!v) return `<td class="right" ${clickable} style="color:var(--text3);font-size:11px;padding:3px 8px;background:${cellBg}">—</td>`;
+          const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
+          const projTip   = isProj ? ' title="Projeção — clique para editar"' : ' title="Parcela registrada — clique para editar"';
+          return `<td class="amt-exp right"${projTip} ${clickable} style="font-size:11px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">-${fmtBRL(v)}${isProj?'<span style="font-size:8px;color:#f59e0b;margin-left:1px">~</span>':''}</td>`;
+        }).join('');
 
-      assetRows += `<tr style="background:${bg}">
-        <td style="${STICKY};left:0;min-width:160px;max-width:160px;font-size:11px;padding:3px 12px 4px 24px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:${bg}">
-          <span style="color:#dc2626;margin-right:4px">🏦</span><span style="color:#dc2626">Saldo devedor</span>
-        </td>
-        <td style="${STICKY};left:200px;min-width:80px;max-width:80px;font-size:10px;color:#dc2626;background:${bg}">Financiamento</td>
-        <td style="${STICKY};left:280px;min-width:90px;max-width:90px;background:${bg}"></td>
-        <td style="${STICKY};left:370px;min-width:90px;max-width:90px;background:${bg}"></td>
-        ${dCells}
-        <td style="${STICKY};right:0;min-width:60px;background:${bg}"></td>
-      </tr>
-      <tr style="background:${bg}">
-        <td style="${STICKY};left:0;font-size:10px;color:#dc2626;padding:2px 12px 2px 24px;background:${bg}" colspan="4">📅 Parcelas (pagas e projetadas)</td>
-        ${iCells}
-        <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
-      </tr>`;
-      months.forEach(m => { if (debtMap[m] != null) assetTotalByMonth[m] += debtMap[m]; });
+        const closedTag = isClosed ? `<span style="font-size:9px;color:var(--text3);margin-left:4px">(encerrado${contract?.closed_month?' '+fmtMonth(contract.closed_month):''})</span>` : '';
+        assetRows += `<tr style="background:${bg}${isClosed?';opacity:.6':''}">
+          <td style="${STICKY};left:0;min-width:160px;max-width:160px;font-size:11px;padding:3px 12px 4px 24px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:${bg}">
+            <span style="color:#dc2626;margin-right:4px">🏦</span><span style="color:#dc2626">Saldo devedor</span>${closedTag}
+          </td>
+          <td style="${STICKY};left:200px;min-width:80px;max-width:80px;font-size:10px;color:#dc2626;background:${bg};overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(label)}">${esc(label)}</td>
+          <td style="${STICKY};left:280px;min-width:90px;max-width:90px;background:${bg}"></td>
+          <td style="${STICKY};left:370px;min-width:90px;max-width:90px;background:${bg}"></td>
+          ${dCells}
+          <td style="${STICKY};right:0;min-width:60px;background:${bg}"></td>
+        </tr>${isClosed ? '' : `
+        <tr style="background:${bg}">
+          <td style="${STICKY};left:0;font-size:10px;color:#dc2626;padding:2px 12px 2px 24px;background:${bg}" colspan="4">📅 Parcelas projetadas (não pagas)</td>
+          ${iCells}
+          <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
+        </tr>`}`;
+        months.forEach(m => { if (debtMap[m] != null) assetTotalByMonth[m] += debtMap[m]; });
+      });
     }
 
     // ── Cash flow rows for this pat asset (if transactions exist) ──
@@ -10652,37 +10815,71 @@ function refreshPatrimonioTable() {
         const m = t.month.slice(0,7);
         patNetCash[m] = (patNetCash[m] || 0) + (PAT_TX_CASH[t.tx_type]?.sign ?? 1) * t.total_value;
       });
+      // Provisionally include projected (unpaid) financing installments as negative
+      // cash flows — lets the user see the effect of financing on returns even
+      // before payments are actually made/registered.
+      const hasRealFlowMonth = new Set(aTxs.filter(t => t.tx_type === 'parcela_financiamento').map(t => t.month.slice(0,7)));
+      (_pat.financing[a.id] || []).forEach(r => {
+        const m = r.month.slice(0,7);
+        if (r.is_projection === 1 && r.paid !== 1 && !hasRealFlowMonth.has(m)) {
+          patNetCash[m] = (patNetCash[m] || 0) - Math.abs(r.installment);
+        }
+      });
       const endM = a.sold_month || curM;
       const histEntries = months.filter(m => m <= endM && histMap[a.id]?.[m]?.value != null);
-      const latestPatVal = histEntries.length ? histMap[a.id][histEntries[histEntries.length-1]].value : 0;
+      const grossPatVal = histEntries.length ? histMap[a.id][histEntries[histEntries.length-1]].value : 0;
+      // If the asset is financed, "selling" it also means paying off the remaining
+      // debt — net the outstanding balance (across all contracts) out of the
+      // hypothetical sale value, otherwise P&L/TIR overstate the equity by the debt.
+      let outstandingDebt = 0;
+      if (a.financed && debtByAsset[a.id]) {
+        Object.values(debtByAsset[a.id]).forEach(debtMap => {
+          // Find the most recent debt value at or before endM
+          const debtMonths = Object.keys(debtMap).filter(m => m <= endM).sort();
+          if (debtMonths.length) outstandingDebt += Math.abs(debtMap[debtMonths.at(-1)]);
+        });
+      }
+      const latestPatVal = Math.max(0, grossPatVal - outstandingDebt);
 
       // Next month after endM — hypothetical sale for IRR (same as inv_assets)
       const [ey, emo] = endM.split('-').map(Number);
       const nextM = emo === 12 ? `${ey+1}-01` : `${ey}-${String(emo+1).padStart(2,'0')}`;
 
-      // TIR: include hypothetical sale at nextM (value of asset as if sold then)
+      // TIR: include hypothetical sale at nextM (value of asset as if sold then) —
+      // but NOT if the asset is already sold and real venda/venda_parcela proceeds
+      // are already present in patNetCash (would double-count the sale value).
+      const hasRealSaleFlows = aTxs.some(t => t.tx_type === 'venda' || t.tx_type === 'venda_parcela');
+      const includeHypotheticalSale = !(a.sold_month && hasRealSaleFlows);
       const firstTxM = Object.keys(patNetCash).sort()[0];
+      const lastCashFlowM = Object.keys(patNetCash).sort().at(-1); // last month with any real flow
       let patIrrNom = null, patIrrReal = null;
-      if (firstTxM && latestPatVal > 0) {
-        // Use months up to and including nextM
+      if (firstTxM && (latestPatVal > 0 || !includeHypotheticalSale)) {
+        // Use months up to and including nextM (hypothetical sale), or through the
+        // LAST real cash flow when the asset is sold (installments may extend past sold_month)
+        const lastIrrM = includeHypotheticalSale ? nextM : (lastCashFlowM > endM ? lastCashFlowM : endM);
         const irrMs = [];
         let bm = firstTxM;
-        while (bm <= nextM) {
+        while (bm <= lastIrrM) {
           irrMs.push(bm);
           const [y2,mo2] = bm.split('-').map(Number);
           bm = mo2===12 ? `${y2+1}-01` : `${y2}-${String(mo2+1).padStart(2,'0')}`;
         }
         const nomFlows  = irrMs.map(m => patNetCash[m] ?? 0);
         const realFlows = irrMs.map(m => (patNetCash[m] ?? 0) * ipcaCumFn2(m));
-        // Add hypothetical sale at nextM
-        nomFlows[nomFlows.length-1]  += latestPatVal;
-        realFlows[realFlows.length-1] += latestPatVal;
+        // Add hypothetical sale at nextM (only if not already sold with real proceeds)
+        if (includeHypotheticalSale) {
+          nomFlows[nomFlows.length-1]  += latestPatVal;
+          realFlows[realFlows.length-1] += latestPatVal;
+        }
         patIrrNom  = calcIRR(nomFlows);
         patIrrReal = calcIRR(realFlows);
       }
 
       // P&L
-      const patPnl = Object.values(patNetCash).reduce((s,v) => s+v, 0) + latestPatVal;
+      // P&L: cumulative net cash flow already includes real sale proceeds (venda/venda_parcela)
+      // when the asset is sold — only add the current valuation (latestPatVal) as "remaining value"
+      // when the asset hasn't been sold yet (or has no recorded sale proceeds).
+      const patPnl = Object.values(patNetCash).reduce((s,v) => s+v, 0) + (includeHypotheticalSale ? latestPatVal : 0);
       const patPnlLabel = patPnl >= 0 ? `▲ ${fmtBRL(patPnl)}` : `▼ ${fmtBRL(Math.abs(patPnl))}`;
       const patPnlColor = patPnl >= 0 ? '#16a34a' : '#dc2626';
 
@@ -10739,6 +10936,105 @@ function refreshPatrimonioTable() {
       </tr>`;
     }
   });
+
+  // ── Dívidas Pessoais ──
+  const visibleDebts = (_pat.debts || []).filter(d => showHidden || !d.hidden);
+  const debtTotalByMonth = {};
+  months.forEach(m => { debtTotalByMonth[m] = 0; });
+
+  let debtRows = '';
+  visibleDebts.forEach((d, ri) => {
+    const bg = stripe(ri);
+    const rows = (_pat.debtInstallments?.[d.id] || []).sort((x,y) => x.month.localeCompare(y.month));
+
+    // saldo devedor por mês (balance_end da última parcela até o mês m)
+    const balByMonth  = {};
+    const balProjByMonth = {};
+    const installByMonth = {};
+    const installProjByMonth = {};
+    rows.forEach(r => {
+      const m = r.month.slice(0,7);
+      installByMonth[m]     = r.installment;
+      installProjByMonth[m] = r.is_projection === 1;
+    });
+    if (rows.length) {
+      const firstMonth = rows[0].month.slice(0,7);
+      months.forEach(m => {
+        if (m < firstMonth) return;
+        const rowsUpTo = rows.filter(r => r.month.slice(0,7) <= m);
+        if (!rowsUpTo.length) return;
+        const lastRow = rowsUpTo[rowsUpTo.length-1];
+        const balance = lastRow.balance_end ?? 0;
+        if (balance > 0.01) {
+          balByMonth[m] = -balance;
+          const lastPaid = rowsUpTo.filter(r => r.is_projection === 0 || r.paid === 1);
+          balProjByMonth[m] = lastRow.is_projection === 1 && m > (lastPaid.at(-1)?.month || '');
+        }
+      });
+    }
+    months.forEach(m => { if (balByMonth[m] != null) debtTotalByMonth[m] += balByMonth[m]; });
+
+    const bCells = months.map(m => {
+      const v = balByMonth[m];
+      const isProj = balProjByMonth[m];
+      const cellBg = m === curM ? 'var(--accent-lt)' : bg;
+      if (v == null) return `<td class="right" style="color:var(--text3);font-size:12px;padding:6px 10px;background:${cellBg}">—</td>`;
+      const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
+      const projTip   = isProj ? ' title="Projeção (valor constante, sem correção futura)"' : '';
+      return `<td class="amt-exp right"${projTip} style="font-size:12px;padding:6px 10px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">${fmtBRL(v)}${isProj ? '<span style="font-size:8px;margin-left:2px;color:#f59e0b">~</span>' : ''}</td>`;
+    }).join('');
+
+    const iCells = months.map(m => {
+      const v = installByMonth[m];
+      const isProj = installProjByMonth[m];
+      const cellBg = m === curM ? 'var(--accent-lt)' : bg;
+      const clickable = `onclick="patInstallmentInlineEdit(this,${d.id},'${m}',${v||0},${isProj?1:0},true)" title="Clique para editar (valor / pago)" style="cursor:pointer"`;
+      if (!v) return `<td class="right" ${clickable} style="color:var(--text3);font-size:11px;padding:3px 8px;background:${cellBg}">—</td>`;
+      const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
+      const projTip   = isProj ? ' title="Projeção — clique para editar"' : ' title="Parcela registrada — clique para editar"';
+      return `<td class="amt-exp right"${projTip} ${clickable} style="font-size:11px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">-${fmtBRL(v)}${isProj?'<span style="font-size:8px;color:#f59e0b;margin-left:1px">~</span>':''}</td>`;
+    }).join('');
+
+    debtRows += `<tr draggable="true" style="background:${bg};height:38px;cursor:grab"
+      ondragstart="patDragStart(event,${d.id},'debt')"
+      ondragend="patDragEnd(event)"
+      ondragover="patDragOver(event,${d.id},'debt')"
+      ondragleave="patDragLeave(event)"
+      ondrop="patDrop(event,${d.id},'debt')">
+      <td style="${STICKY};left:0;min-width:160px;max-width:160px;font-size:12px;font-weight:500;padding:6px 12px;overflow:hidden;background:${bg}" title="${esc(d.name)}">
+        <div style="display:flex;align-items:center;gap:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          <span style="color:var(--text3);font-size:13px">⠿</span>
+          <span>${esc(d.name)}</span>
+          ${d.hidden?`<span style="font-size:9px;color:var(--text3)">oculto</span>`:''}
+        </div>
+      </td>
+      <td style="${STICKY};left:200px;min-width:80px;max-width:80px;font-size:11px;color:var(--text3);background:${bg}">Dívida</td>
+      <td style="${STICKY};left:280px;min-width:90px;max-width:90px;background:${bg}"></td>
+      <td style="${STICKY};left:370px;min-width:90px;max-width:90px;background:${bg}"></td>
+      ${bCells}
+      <td style="text-align:center;${STICKY};right:0;min-width:60px;background:${bg}">
+        <button class="btn-icon" onclick="openDebtModal(${d.id})" title="Editar">✎</button>
+        <button class="btn-icon" onclick="deletePatDebt(${d.id})" style="color:var(--red)" title="Excluir">✕</button>
+      </td>
+    </tr>
+    <tr style="background:${bg}">
+      <td style="${STICKY};left:0;font-size:10px;color:#dc2626;padding:2px 12px 2px 24px;background:${bg}" colspan="4">📅 Parcelas (pagas e projetadas)</td>
+      ${iCells}
+      <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
+    </tr>`;
+  });
+
+  const debtTotalRowCells = months.map(m => {
+    const cellBg3 = m === curM ? ';background:var(--accent-lt)' : '';
+    const v = debtTotalByMonth[m];
+    const cls = v < 0 ? 'amt-exp' : 'amt-inc';
+    return `<td class="${cls} right" style="font-size:12px;font-family:'DM Mono',monospace;padding:6px 10px${cellBg3}">${fmtBRL(v)}</td>`;
+  }).join('');
+  const debtTotalRow = `<tr style="font-weight:700;background:var(--bg4);border-top:2px solid var(--border2);border-bottom:2px solid var(--border2)">
+    <td style="${STICKY4};left:0;min-width:400px;font-size:12px;padding:8px 12px" colspan="4">Total Dívidas Pessoais</td>
+    ${debtTotalRowCells}
+    <td style="${STICKY4};right:0;min-width:60px"></td>
+  </tr>`;
 
 
 
@@ -10804,9 +11100,21 @@ function refreshPatrimonioTable() {
   const { totals: invTotalByMonth, netCashByMonth: invNetCashByMonth, extFlowByMonth: invExtFlowByMonth, incFlowByMonth: invIncFlowByMonth } = calcInvTotalByMonth(months);
   let totalInv = invTotalByMonth[curM] || 0;
 
+  // Total personal debt outstanding as of curM (sum of latest balance_end per debt)
+  let totalDebt = 0;
+  (_pat.debts || []).forEach(d => {
+    const rows = (_pat.debtInstallments?.[d.id] || []);
+    const rowsUpTo = rows.filter(r => r.month.slice(0,7) <= curM);
+    if (rowsUpTo.length) {
+      const last = rowsUpTo[rowsUpTo.length-1];
+      totalDebt += last.balance_end ?? 0;
+    }
+  });
+
   // Update investment and total cards with correct values
-  const grandTotal = totalAssets + totalAccounts + totalInv;
+  const grandTotal = totalAssets + totalAccounts + totalInv - totalDebt;
   if (G('pat-card-inv'))   G('pat-card-inv').innerHTML   = `<div class="stat-lbl">📈 Investimentos</div><div class="stat-val green">${fmtBRL(totalInv)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
+  if (G('pat-card-debt'))  G('pat-card-debt').innerHTML  = `<div class="stat-lbl">💳 Dívidas Pessoais</div><div class="stat-val red">${fmtBRL(-totalDebt)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
   if (G('pat-card-total')) G('pat-card-total').innerHTML = `<div class="stat-lbl">📊 Total Patrimônio</div><div class="stat-val accent" style="font-size:22px">${fmtBRL(grandTotal)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
 
   // Store for use by overview
@@ -10903,23 +11211,26 @@ function refreshPatrimonioTable() {
   window._patTotalByMonth = {};
   window._invTotalByMonth  = {};
   window._assetTotalByMonth = {};
+  window._debtTotalByMonth = {};
   months.forEach(m => {
-    window._patTotalByMonth[m]   = assetTotalByMonth[m] + accTotalByMonth[m] + (invTotalByMonth[m]||0);
+    window._patTotalByMonth[m]   = assetTotalByMonth[m] + accTotalByMonth[m] + (invTotalByMonth[m]||0) + (debtTotalByMonth[m]||0);
     window._invTotalByMonth[m]   = invTotalByMonth[m]   || 0;
     window._assetTotalByMonth[m] = assetTotalByMonth[m] || 0;
+    window._debtTotalByMonth[m]  = debtTotalByMonth[m]  || 0;
   });
 
-  // Update grand total to include investments
+  // Update grand total to include investments and personal debts
   const grandTotalRow2 = `<tbody><tr style="font-weight:700;font-size:14px;background:var(--accent-bg);border-top:2px solid var(--accent)">
     <td style="position:sticky;z-index:3;background:var(--accent-bg);left:0;min-width:350px;padding:10px 12px;color:var(--accent)" colspan="4">📊 Total Patrimônio</td>
     ${months.map(m => {
-      const v = assetTotalByMonth[m] + accTotalByMonth[m] + (invTotalByMonth[m]||0);
+      const v = assetTotalByMonth[m] + accTotalByMonth[m] + (invTotalByMonth[m]||0) + (debtTotalByMonth[m]||0);
       const isCur = m === curM;
       return `<td class="right" style="font-family:'DM Mono',monospace;padding:8px 10px;color:var(--accent)${isCur?';background:var(--accent-lt)':''}">${fmtBRL(v)}</td>`;
     }).join('')}
     <td style="background:var(--accent-bg)"></td>
     <td style="position:sticky;z-index:3;background:var(--accent-bg);right:0;min-width:60px"></td>
   </tr></tbody>`;
+
 
   container.innerHTML = `
     <table style="border-collapse:collapse;font-size:13px;width:max-content;min-width:100%">
@@ -10948,6 +11259,20 @@ function refreshPatrimonioTable() {
         ${assetRows || `<tr><td colspan="${months.length+5}" class="empty" style="padding:1.5rem">Nenhum ativo.</td></tr>`}
       </tbody>
       <tbody>${assetTotalRow}</tbody>
+      ${spacer}
+
+      <!-- 2b. DÍVIDAS PESSOAIS -->
+      <tbody>
+        <tr style="background:var(--bg3)">
+          <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">💳 Dívidas Pessoais</td>
+          ${months.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
+          <td style="${STICKY3};right:0;min-width:60px;text-align:right">
+            <button class="btn xs primary" onclick="openDebtModal()" style="font-size:10px">+ Nova</button>
+          </td>
+        </tr>
+        ${debtRows || `<tr><td colspan="${months.length+5}" class="empty" style="padding:1.5rem">Nenhuma dívida pessoal registrada.</td></tr>`}
+      </tbody>
+      <tbody>${debtTotalRow}</tbody>
       ${spacer}
 
       <!-- 3. CONTAS -->
@@ -11056,6 +11381,16 @@ async function patDrop(e, targetId, type) {
       await ff.patAssetSave({ ..._pat.assets[i], sort_order: i });
     }
     _pat.assets = await ff.patAssetsList();
+  } else if (type === 'debt') {
+    const fromIdx = _pat.debts.findIndex(d => d.id === fromId);
+    const toIdx   = _pat.debts.findIndex(d => d.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [moved] = _pat.debts.splice(fromIdx, 1);
+    _pat.debts.splice(toIdx, 0, moved);
+    for (let i = 0; i < _pat.debts.length; i++) {
+      await ff.debtSave({ ..._pat.debts[i], sort_order: i });
+    }
+    _pat.debts = await ff.debtList();
   } else if (type === 'inv') {
     const fromIdx = _inv.assets.findIndex(a => a.id === fromId);
     const toIdx   = _inv.assets.findIndex(a => a.id === targetId);
@@ -11120,6 +11455,60 @@ async function patInlineEdit(td, assetId, month, currentValue) {
   });
 }
 
+// Inline editor for a financing/debt installment cell: lets the user set the
+// actual amount and mark it paid/pending manually, without relying on bank sync.
+async function patInstallmentInlineEdit(td, id, month, currentValue, isProj, isDebt) {
+  if (td.querySelector('input')) return;
+  const orig = td.innerHTML;
+  const wasPaid = isProj === 0;
+  td.innerHTML = `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px" onclick="event.stopPropagation()">
+    <input type="number" step="0.01" value="${currentValue}" style="width:90px;text-align:right;font-size:11px;padding:1px 3px">
+    <label style="font-size:9px;display:flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap">
+      <input type="checkbox" ${wasPaid?'checked':''} style="margin:0;width:11px;height:11px"> Pago
+    </label>
+  </div>`;
+  const inp = td.querySelector('input[type=number]');
+  const chk = td.querySelector('input[type=checkbox]');
+  inp.focus(); inp.select();
+  let committed = false;
+
+  async function commit() {
+    if (committed) return;
+    committed = true;
+    _patInlineActive = false;
+    const v = parseFloat(inp.value.replace(',','.'));
+    const paid = chk.checked;
+    if (!isNaN(v) && (v !== currentValue || paid !== wasPaid)) {
+      if (isDebt) {
+        await ff.debtInstallmentSet({ debtId: id, month, installment: v, paid });
+        _pat.debtInstallments[id] = await ff.debtInstallmentsGet({ debtId: id }).catch(() => []);
+      } else {
+        await ff.patFinancingInstallmentSet({ assetId: id, month, installment: v, paid });
+        _pat.financing[id] = await ff.patFinancingGet({ assetId: id }).catch(() => []);
+      }
+      toast(`✅ Parcela de ${fmtMonth(month)} atualizada`);
+      refreshPatrimonioTable();
+    } else {
+      if (td.isConnected) td.innerHTML = orig;
+    }
+  }
+
+  _patInlineActive = true;
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { commit(); }
+    if (e.key === 'Escape') {
+      committed = true;
+      _patInlineActive = false;
+      if (td.isConnected) td.innerHTML = orig;
+    }
+  });
+  chk.addEventListener('change', commit);
+  // Commit on blur of either control, but only once both have had a chance —
+  // use a short delay so clicking the checkbox after focusing the input doesn't
+  // trigger a premature commit via the input's blur.
+  inp.addEventListener('blur', () => setTimeout(() => { if (!committed) commit(); }, 150));
+}
+
 async function commitPatValue(displayEl, inputEl) {
   const assetId = parseInt(inputEl.dataset.asset);
   const month   = inputEl.dataset.month;
@@ -11153,20 +11542,54 @@ function patTxTypeLabel(type) {
 function patTxRenderTable() {
   const tbody = G('pat-tx-table');
   if (!tbody) return;
+
+  // Bank accounts available for sync (non-hidden bank/cash accounts)
+  const bankAccounts = (accounts||[]).filter(a => !a.hidden && (a.type === 'bank' || a.type === 'cash'));
+  const today = new Date().toISOString().slice(0,10);
+
+  // Default account: the first one chosen anywhere in this table (any row,
+  // regardless of order), used to pre-fill rows that don't have one set yet.
+  const anyChosenAccountId = _patTxRows.find(r => r.account_id != null)?.account_id ?? null;
+  let lastAccountId = anyChosenAccountId;
+
   tbody.innerHTML = _patTxRows.map((row, i) => {
     const movSign = row.total_value !== '' && row.total_value != null
       ? (PAT_TX_CASH[row.tx_type]?.sign ?? 1) * parseFloat(row.total_value || 0) : null;
     const movFmt  = movSign !== null ? fmtBRL(movSign) : '';
     const movColor = movSign === null ? 'var(--text3)' : movSign < 0 ? '#dc2626' : '#16a34a';
     const histVal = row.hist_value != null && row.hist_value !== '' ? row.hist_value : '';
-    return `<div style="display:grid;grid-template-columns:110px 1fr 140px 140px 36px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);gap:4px">
-      <div style="display:flex;gap:3px">
-        <input class="inp" style="width:42px;font-size:12px;padding:3px 4px" type="number" min="1" max="12" value="${row.month ? row.month.slice(5,7).replace(/^0/,'') : ''}" placeholder="Mês" onchange="patTxUpdateRow(${i},'mo',this.value)">
-        <input class="inp" style="width:52px;font-size:12px;padding:3px 4px" type="number" min="2000" value="${row.month ? row.month.slice(0,4) : ''}" placeholder="Ano" onchange="patTxUpdateRow(${i},'yr',this.value)">
-      </div>
+
+    // Default tx_date to the 1st of the row's month if not explicitly set
+    const dateVal = row.tx_date || (row.month ? `${row.month}-01` : '');
+    const isFuture = dateVal && dateVal >= today;
+
+    // Account dropdown: use this row's account, or fall back to the last-used one.
+    // Persist the inherited value back onto the row so it's actually saved on submit
+    // (otherwise the dropdown would show a value that silently isn't stored).
+    let accountId = row.account_id;
+    if (accountId == null && lastAccountId != null) {
+      accountId = lastAccountId;
+      row.account_id = accountId;
+    }
+    if (accountId != null) lastAccountId = accountId;
+
+    const willSync = isFuture && accountId && PAT_TX_CASH[row.tx_type];
+    const syncHint = willSync
+      ? `<span title="Será lançado automaticamente na conta bancária (não conferido)" style="font-size:10px;color:#0ea5e9">🔗 auto</span>`
+      : '';
+
+    return `<div style="display:grid;grid-template-columns:110px 1fr 150px 120px 120px 36px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);gap:4px">
+      <input class="inp" style="font-size:11px;padding:3px 4px" type="date" value="${dateVal}" onchange="patTxUpdateRow(${i},'date',this.value)">
       <select class="inp" style="font-size:11px;padding:3px 4px" onchange="patTxUpdateRow(${i},'type',this.value)">
         ${Object.entries(PAT_TX_CASH).map(([v,d]) => `<option value="${v}" ${row.tx_type===v?'selected':''}>${d.label}</option>`).join('')}
       </select>
+      <div style="display:flex;align-items:center;gap:3px;overflow:hidden">
+        <select class="inp" style="font-size:11px;padding:3px 4px;min-width:0" title="Conta bancária para sincronização automática" onchange="patTxUpdateRow(${i},'account',this.value)">
+          <option value="">— Sem conta —</option>
+          ${bankAccounts.map(a => `<option value="${a.id}" ${String(accountId)===String(a.id)?'selected':''}>${esc(a.name)}</option>`).join('')}
+        </select>
+        ${syncHint}
+      </div>
       <input class="inp" style="font-size:12px;padding:3px 4px;text-align:right" type="number" step="0.01" value="${histVal}" placeholder="Auto (IPCA)" title="Valor do ativo neste mês (deixe vazio para cálculo automático)" onchange="patTxUpdateRow(${i},'hist',this.value)">
       <input class="inp" style="font-size:12px;padding:3px 4px;text-align:right" type="number" step="0.01" value="${row.total_value ?? ''}" placeholder="Movim." onchange="patTxUpdateRow(${i},'val',this.value)">
       <button class="btn-icon" style="color:#dc2626;font-size:15px;padding:0 4px" onclick="patTxDeleteRow(${i})">×</button>
@@ -11177,15 +11600,13 @@ function patTxRenderTable() {
 function patTxUpdateRow(i, field, val) {
   const row = _patTxRows[i];
   if (!row) return;
-  if (field === 'mo') {
-    const mo = String(parseInt(val)||1).padStart(2,'0');
-    const yr = row.month ? row.month.slice(0,4) : new Date().getFullYear();
-    row.month = `${yr}-${mo}`;
-  } else if (field === 'yr') {
-    const mo = row.month ? row.month.slice(5,7) : '01';
-    row.month = `${val}-${mo}`;
+  if (field === 'date') {
+    row.tx_date = val;
+    row.month   = val ? val.slice(0,7) : row.month;
   } else if (field === 'type') {
     row.tx_type = val;
+  } else if (field === 'account') {
+    row.account_id = val !== '' ? parseInt(val) : null;
   } else if (field === 'val') {
     row.total_value = val !== '' ? parseFloat(val) : null;
   } else if (field === 'hist') {
@@ -11209,7 +11630,8 @@ function patTxNextMonth() {
 }
 
 function patTxAddRow() {
-  _patTxRows.push({ id: null, month: patTxNextMonth(), tx_type: 'aluguel', total_value: null, hist_value: null });
+  const lastAccountId = _patTxRows.length ? (_patTxRows[_patTxRows.length-1].account_id ?? null) : null;
+  _patTxRows.push({ id: null, month: patTxNextMonth(), tx_type: 'aluguel', total_value: null, hist_value: null, tx_date: null, account_id: lastAccountId });
   patTxRenderTable();
   // Scroll to bottom
   const tb = G('pat-tx-table');
@@ -11242,6 +11664,17 @@ async function patTxDeleteRow(i) {
   patTxRenderTable();
 }
 
+// Populate a <select> with existing categories (CATS_RAW), sorted, with a
+// preferred default selected if present (falls back to "Contas" or first item).
+function populateCategorySelect(elId, preferredCat) {
+  const el = G(elId);
+  if (!el) return;
+  const sorted = [...CATS_RAW].sort((a,b) => a.localeCompare(b,'pt-BR'));
+  const fallback = sorted.includes('Contas') ? 'Contas' : sorted[0];
+  const selected = (preferredCat && sorted.includes(preferredCat)) ? preferredCat : fallback;
+  el.innerHTML = sorted.map(c => `<option value="${esc(c)}" ${c===selected?'selected':''}>${esc(c)}</option>`).join('');
+}
+
 async function openPatAssetModal(id) {
   const now = new Date();
   const curY = now.getFullYear();
@@ -11257,6 +11690,7 @@ async function openPatAssetModal(id) {
   G('pat-asset-trend').value = 'plus1x';
   G('pat-asset-sold-m').value = '';
   G('pat-asset-sold-y').value = '';
+  if (G('pat-sale-payment-type')) G('pat-sale-payment-type').value = 'vista';
   setupCurrencyInput(G('pat-asset-value'));
   G('pat-asset-value').setValue(null);
   setupCurrencyInput(G('pat-asset-sold-value'));
@@ -11277,7 +11711,20 @@ async function openPatAssetModal(id) {
   if (G('fin-schedule-preview')) G('fin-schedule-preview').style.display = 'none';
   if (G('fin-schedule-summary')) G('fin-schedule-summary').textContent = '';
   if (G('fin-asset-value')) { const el = G('fin-asset-value'); if (el.setValue) el.setValue(null); else el.value = ''; }
+  if (G('fin-sync-account')) {
+    G('fin-sync-account').innerHTML = '<option value="">— Não sincronizar —</option>' +
+      (accounts||[]).filter(a => !a.hidden && (a.type==='bank'||a.type==='cash'))
+        .map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  }
+  if (G('fin-sync-day')) G('fin-sync-day').value = '';
+  populateCategorySelect('fin-sync-category', 'Financiamento');
+  if (G('fin-contract-label')) G('fin-contract-label').value = '';
+  if (G('pat-fin-contract-selector')) G('pat-fin-contract-selector').style.display = 'none';
+  if (G('pat-fin-closed-notice')) G('pat-fin-closed-notice').style.display = 'none';
+  if (G('pat-fin-close-btn')) G('pat-fin-close-btn').style.display = '';
+  _finCurrentContractId = null;
   patToggleFinancingSection();
+  patUpdateSaleSection();
   G('pat-asset-modal-title').textContent = id ? 'Editar ativo' : 'Novo ativo imobilizado';
 
   if (id) {
@@ -11293,6 +11740,10 @@ async function openPatAssetModal(id) {
         G('pat-asset-sold-m').value = sm;
       }
       if (a.sold_value) G('pat-asset-sold-value').setValue(a.sold_value);
+      // Detect installment sale: any venda_parcela rows registered for this asset
+      const hasVendaParcela = _pat.txAll.some(t => t.asset_id === id && t.tx_type === 'venda_parcela');
+      if (G('pat-sale-payment-type')) G('pat-sale-payment-type').value = hasVendaParcela ? 'parcelado' : 'vista';
+      patUpdateSaleSection();
       G('pat-financed-check').checked = !!a.financed;
       patToggleFinancingSection();
       if (a.financed) {
@@ -11311,33 +11762,27 @@ async function openPatAssetModal(id) {
       }
     }
   }
-  // Load financing contract if financed
+  // Load financing contracts if financed — populate the contract selector and
+  // load the active one (or the first available) by default.
   _finSchedule = [];
+  _pat.currentAssetId = id || null;
   if (id) {
-    const contract = await ff.patFinancingContractGet({ assetId: id }).catch(() => null);
-    if (contract) {
-      await new Promise(r => setTimeout(r, 20)); // ensure DOM visible
-      setupFinancingInputs(); // ensure formatters are attached before setting values
-      if (G('fin-system'))      G('fin-system').value      = contract.system;
-      if (G('fin-index'))       G('fin-index').value       = contract.index_type;
-      if (G('fin-rate'))        { const r = G('fin-rate');        if(r.setValue) r.setValue(contract.annual_rate); else r.value = contract.annual_rate; }
-      if (G('fin-principal'))   { const p = G('fin-principal');   if(p.setValue) p.setValue(contract.principal);   else p.value = contract.principal; }
-      if (G('fin-installments'))G('fin-installments').value= contract.n_installments;
-      const [fy, fm] = (contract.first_month||'').split('-');
-      if (G('fin-first-m'))     G('fin-first-m').value     = parseInt(fm)||'';
-      if (G('fin-first-y'))     G('fin-first-y').value     = parseInt(fy)||'';
-      if (G('fin-balloon'))     G('fin-balloon').value     = contract.balloon_at_keys||'';
-      if (G('fin-extra-month')) G('fin-extra-month').value = contract.extra_annual_month||'';
-      if (G('fin-extra-value')) G('fin-extra-value').value = contract.extra_annual_value||'';
-      // Load asset value from existing compra transaction
-      const compraT = _pat.txAll.find(t => t.asset_id === id && t.tx_type === 'compra');
-      if (compraT && G('fin-asset-value')) {
-        setupCurrencyInput(G('fin-asset-value'));
-        G('fin-asset-value').setValue(compraT.total_value);
-      }
-      // Load schedule for preview
-      const schedule = _pat.financing[id] || [];
-      if (schedule.length) { _finSchedule = schedule; patRenderSchedulePreview(schedule); }
+    const contracts = await ff.patFinancingContractsList({ assetId: id }).catch(() => []);
+    _pat.financingContracts[id] = contracts;
+    const sel = G('pat-fin-contract-select');
+    const selectorBox = G('pat-fin-contract-selector');
+    if (contracts.length && sel && selectorBox) {
+      selectorBox.style.display = '';
+      sel.innerHTML = contracts.map(c => {
+        const label = c.label || `Contrato #${c.id}`;
+        const tag = c.status === 'closed' ? ' (encerrado)' : ' (ativo)';
+        return `<option value="${c.id}">${esc(label)}${tag}</option>`;
+      }).join('');
+      const active = contracts.find(c => c.status === 'active') || contracts[0];
+      sel.value = active.id;
+      await loadContractIntoForm(active);
+    } else if (selectorBox) {
+      selectorBox.style.display = 'none';
     }
   }
 
@@ -11407,6 +11852,7 @@ async function savePatAsset() {
     const fy2 = parseInt(G('fin-first-y')?.value||'0');
     if (fn > 0 && fp > 0 && fm2 && fy2) {
       const contract = {
+        label:            G('fin-contract-label')?.value?.trim() || null,
         system:           G('fin-system')?.value || 'SAC',
         index_type:       G('fin-index')?.value  || 'none',
         annual_rate:      readFinField('fin-rate'),
@@ -11416,31 +11862,60 @@ async function savePatAsset() {
         balloon_at_keys:  readFinField('fin-balloon') || null,
         extra_annual_month: parseInt(G('fin-extra-month')?.value||'0')||null,
         extra_annual_value: readFinField('fin-extra-value') || null,
+        sync_account_id:  parseInt(G('fin-sync-account')?.value||'0') || null,
+        sync_day:         parseInt(G('fin-sync-day')?.value||'0') || null,
+        sync_category:    G('fin-sync-category')?.value?.trim() || null,
       };
-      await ff.patFinancingContractSave({ assetId, contract });
+      const finResult = await ff.patFinancingContractSave({ assetId, contractId: _finCurrentContractId, contract });
+      _finCurrentContractId = finResult?.contractId || _finCurrentContractId;
 
-      // Register full asset value + purchase transaction if fin-asset-value is set
-      const assetVal = readFinField('fin-asset-value');
+      // Register full asset value (pat_history) + purchase transaction.
+      // The "compra" cash outflow should reflect what actually left the buyer's
+      // pocket at signing — the down payment ("entrada/chaves") — not the full
+      // asset price, since the remainder is paid over time via parcela_financiamento.
+      const assetVal   = readFinField('fin-asset-value');
+      const downPayment = readFinField('fin-balloon') || 0;
       if (assetVal > 0 && contract.first_month) {
         // Set pat_history for first month = full asset value
         await ff.patHistorySet({ assetId, month: contract.first_month, value: assetVal, manual: true });
-        // Create a "compra" pat_transaction for the full asset value
+        // Create/update a "compra" pat_transaction for the down payment only
         const existingCompra = _pat.txAll.find(t => t.asset_id === assetId && t.tx_type === 'compra');
-        await ff.patTxSave({
-          id: existingCompra?.id || null,
-          assetId, month: contract.first_month,
-          tx_type: 'compra', total_value: assetVal,
-          notes: 'Valor de aquisição do ativo',
-        });
+        if (downPayment > 0) {
+          await ff.patTxSave({
+            id: existingCompra?.id || null,
+            assetId, month: contract.first_month,
+            tx_type: 'compra', total_value: downPayment,
+            notes: 'Entrada / chaves',
+            skipHistoryEffect: true,
+          });
+        } else if (existingCompra) {
+          // No down payment — remove any previously-registered compra row.
+          // Don't pass tx_type/total_value, so the delete doesn't reverse the
+          // pat_history value we just set above via patHistorySet.
+          await ff.patTxDelete({ id: existingCompra.id, assetId, month: existingCompra.month }).catch(() => {});
+        }
       }
     }
   }
 
   // Legacy installment save removed — contract system handles schedule
 
-  // 2b. Save initial value as manual entry (if provided, for non-financed assets)
+  // 2b. Save purchase value as manual entry (if provided, for non-financed assets)
+  // and register a "compra" transaction so the asset has a cost basis for IRR/TWR.
   if (!financed && !isNaN(val) && val > 0 && month) {
     await ff.patHistorySet({ assetId, month, value: val, manual: true });
+    const existingCompra = _pat.txAll.find(t => t.asset_id === assetId && t.tx_type === 'compra');
+    // Only auto-create/update if there's no manually-edited "compra" row already
+    // covered by _patTxRows below (avoids clobbering a user-entered value).
+    const hasManualCompraRow = _patTxRows.some(r => r.tx_type === 'compra' && r.month === month);
+    if (!hasManualCompraRow) {
+      await ff.patTxSave({
+        id: existingCompra?.id || null,
+        assetId, month,
+        tx_type: 'compra', total_value: val,
+        notes: existingCompra?.notes || 'Valor de compra do ativo',
+      });
+    }
   }
 
   // 3a. Save pat_transactions rows + manual hist_value overrides
@@ -11455,6 +11930,8 @@ async function savePatAsset() {
         tx_type: row.tx_type,
         total_value: parseFloat(row.total_value),
         notes: row.notes || null,
+        tx_date: row.tx_date || `${row.month}-01`,
+        account_id: row.account_id || null,
       });
     }
     // Save manual hist_value if provided (overrides IPCA auto-calculation)
@@ -11480,7 +11957,176 @@ async function savePatAsset() {
   toast(`✅ Ativo ${id ? 'atualizado' : 'criado'}`);
 }
 
+// ── Sale section (Venda/Saída) helpers ──
+function patUpdateSaleSection() {
+  const soldM = parseInt(G('pat-asset-sold-m')?.value);
+  const soldY = parseInt(G('pat-asset-sold-y')?.value);
+  const soldValueEl = G('pat-asset-sold-value');
+  const soldValue = soldValueEl?.rawValue ? soldValueEl.rawValue() : parseFloat(soldValueEl?.value);
+  const hasSale = soldM >= 1 && soldM <= 12 && soldY >= 2000 && soldValue > 0;
+
+  const section = G('pat-sale-payment-section');
+  if (!section) return;
+  section.style.display = hasSale ? '' : 'none';
+  if (!hasSale) return;
+
+  const paymentType = G('pat-sale-payment-type')?.value || 'vista';
+  const installmentsHint = G('pat-sale-installments-hint');
+  const vistaHint = G('pat-sale-vista-hint');
+  if (installmentsHint) installmentsHint.style.display = paymentType === 'parcelado' ? '' : 'none';
+  if (vistaHint) vistaHint.style.display = paymentType === 'vista' ? '' : 'none';
+}
+
 // ── Financing section helpers ──
+
+// Track which contract is currently loaded in the financing form
+let _finCurrentContractId = null;
+
+// Load a contract's fields into the financing form. If the contract is closed,
+// fields are disabled (read-only — for historical reference only).
+async function loadContractIntoForm(contract) {
+  _finCurrentContractId = contract.id;
+  const id = _pat.currentAssetId;
+  await new Promise(r => setTimeout(r, 20)); // ensure DOM visible
+  setupFinancingInputs(); // ensure formatters are attached before setting values
+  if (G('fin-system'))      G('fin-system').value      = contract.system;
+  if (G('fin-index'))       G('fin-index').value       = contract.index_type;
+  if (G('fin-rate'))        { const r = G('fin-rate');        if(r.setValue) r.setValue(contract.annual_rate); else r.value = contract.annual_rate; }
+  if (G('fin-principal'))   { const p = G('fin-principal');   if(p.setValue) p.setValue(contract.principal);   else p.value = contract.principal; }
+  if (G('fin-installments'))G('fin-installments').value= contract.n_installments;
+  const [fy, fm] = (contract.first_month||'').split('-');
+  if (G('fin-first-m'))     G('fin-first-m').value     = parseInt(fm)||'';
+  if (G('fin-first-y'))     G('fin-first-y').value     = parseInt(fy)||'';
+  if (G('fin-balloon'))     { const b = G('fin-balloon');      if(b.setValue) b.setValue(contract.balloon_at_keys||null); else b.value = contract.balloon_at_keys||''; }
+  if (G('fin-extra-month')) G('fin-extra-month').value = contract.extra_annual_month||'';
+  if (G('fin-extra-value')) { const ev = G('fin-extra-value'); if(ev.setValue) ev.setValue(contract.extra_annual_value||null); else ev.value = contract.extra_annual_value||''; }
+  if (G('fin-sync-account')) G('fin-sync-account').value = contract.sync_account_id || '';
+  if (G('fin-sync-day'))     G('fin-sync-day').value     = contract.sync_day || '';
+  if (G('fin-contract-label')) G('fin-contract-label').value = contract.label || '';
+  populateCategorySelect('fin-sync-category', contract.sync_category || 'Financiamento');
+
+  // Load full asset value from pat_history at the contract's first month
+  // (the "compra" transaction stores only the down payment, not the full price)
+  const histEntry = _pat.historyAll.find(h => h.asset_id === id && h.month === contract.first_month);
+  if (histEntry && G('fin-asset-value')) {
+    setupCurrencyInput(G('fin-asset-value'));
+    G('fin-asset-value').setValue(histEntry.value);
+  }
+
+  // Load schedule for preview — only this contract's installments
+  const schedule = (_pat.financing[id] || []).filter(r => String(r.contract_id) === String(contract.id));
+  if (schedule.length) { _finSchedule = schedule; patRenderSchedulePreview(schedule); }
+  else { _finSchedule = []; if (G('fin-schedule-preview')) G('fin-schedule-preview').style.display = 'none'; }
+
+  // Read-only mode for closed contracts
+  const isClosed = contract.status === 'closed';
+  const closeBtn = G('pat-fin-close-btn');
+  if (closeBtn) closeBtn.style.display = isClosed ? 'none' : '';
+  if (G('pat-fin-closed-notice')) G('pat-fin-closed-notice').style.display = isClosed ? '' : 'none';
+  ['fin-system','fin-index','fin-rate','fin-principal','fin-installments','fin-first-m','fin-first-y',
+   'fin-balloon','fin-extra-month','fin-extra-value','fin-asset-value','fin-sync-account','fin-sync-day',
+   'fin-sync-category','fin-contract-label'].forEach(elId => {
+    const el = G(elId);
+    if (el) el.disabled = isClosed;
+  });
+  const genBtn = document.querySelector('#pat-financing-section button[onclick="patGenerateSchedule()"]');
+  if (genBtn) genBtn.style.display = isClosed ? 'none' : '';
+}
+
+async function onFinContractSelect() {
+  const sel = G('pat-fin-contract-select');
+  const cid = parseInt(sel?.value || '0');
+  const contract = (_pat.financingContracts[_pat.currentAssetId] || []).find(c => c.id === cid);
+  if (contract) await loadContractIntoForm(contract);
+}
+
+// Start a new (blank) contract for this asset. If there's an active contract,
+// it must be closed first (one active contract at a time).
+async function finNewContract() {
+  const assetId = _pat.currentAssetId;
+  const contracts = _pat.financingContracts[assetId] || [];
+  const active = contracts.find(c => c.status === 'active');
+  if (active) {
+    const ok = await showConfirmDialog(
+      'Encerrar contrato atual?',
+      `O contrato "${active.label || 'atual'}" está ativo. Para criar um novo contrato (ex: financiamento bancário após a entrega das chaves), o contrato atual será marcado como encerrado, preservando seu histórico. Deseja continuar?`,
+      'Encerrar e criar novo', false);
+    if (!ok) return;
+    await ff.patFinancingContractClose({ contractId: active.id, closedMonth: (()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`})() });
+  }
+  // Reset the form to blank values for a new contract
+  _finCurrentContractId = null;
+  ['fin-system','fin-index','fin-rate','fin-principal','fin-installments','fin-first-m','fin-first-y',
+   'fin-balloon','fin-extra-month','fin-extra-value','fin-sync-account','fin-sync-day','fin-sync-category','fin-contract-label'].forEach(elId => {
+    const el = G(elId);
+    if (!el) return;
+    el.disabled = false;
+    if (el.tagName === 'SELECT') el.selectedIndex = 0;
+    else if (el.setValue) el.setValue(null);
+    else el.value = '';
+  });
+  populateCategorySelect('fin-sync-category', 'Financiamento');
+  if (G('fin-schedule-preview')) G('fin-schedule-preview').style.display = 'none';
+  if (G('fin-schedule-summary')) G('fin-schedule-summary').textContent = '';
+  const genBtn = document.querySelector('#pat-financing-section button[onclick="patGenerateSchedule()"]');
+  if (genBtn) genBtn.style.display = '';
+  if (G('pat-fin-close-btn')) G('pat-fin-close-btn').style.display = '';
+  if (G('pat-fin-closed-notice')) G('pat-fin-closed-notice').style.display = 'none';
+  toast('📝 Novo contrato — preencha os dados e clique em "Gerar cronograma"');
+  // Refresh the contracts list (to reflect the just-closed one) and selector
+  _pat.financingContracts[assetId] = await ff.patFinancingContractsList({ assetId }).catch(() => contracts);
+  refreshFinContractSelector();
+  // Add and select a placeholder option for the new (unsaved) contract, so the
+  // dropdown doesn't misleadingly show the just-closed contract as selected.
+  const sel = G('pat-fin-contract-select');
+  if (sel) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '📝 Novo contrato (não salvo)';
+    sel.insertBefore(opt, sel.firstChild);
+    sel.value = '';
+  }
+}
+
+// Mark the currently-loaded contract as closed
+async function finCloseContract() {
+  if (!_finCurrentContractId) { toast('Nenhum contrato selecionado'); return; }
+  const ok = await showConfirmDialog(
+    'Encerrar este contrato?',
+    'O contrato será marcado como encerrado e seu histórico (saldo devedor, parcelas) continuará visível na tabela do Patrimônio, mas não receberá novas projeções nem sincronização automática. Esta ação pode ser desfeita depois (edite o contrato e reative, se necessário).',
+    'Encerrar contrato', true);
+  if (!ok) return;
+  await ff.patFinancingContractClose({ contractId: _finCurrentContractId, closedMonth: (()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`})() });
+  toast('✅ Contrato encerrado');
+  const assetId = _pat.currentAssetId;
+  _pat.financingContracts[assetId] = await ff.patFinancingContractsList({ assetId }).catch(() => []);
+  refreshFinContractSelector();
+  const updated = _pat.financingContracts[assetId].find(c => c.id === _finCurrentContractId);
+  if (updated) await loadContractIntoForm(updated);
+}
+
+// Rebuild the contract selector dropdown from _pat.financingContracts, keeping
+// the currently-loaded contract selected if it still exists.
+function refreshFinContractSelector() {
+  const assetId = _pat.currentAssetId;
+  const contracts = _pat.financingContracts[assetId] || [];
+  const sel = G('pat-fin-contract-select');
+  const selectorBox = G('pat-fin-contract-selector');
+  if (!sel || !selectorBox) return;
+  if (!contracts.length) { selectorBox.style.display = 'none'; return; }
+  selectorBox.style.display = '';
+  sel.innerHTML = contracts.map(c => {
+    const label = c.label || `Contrato #${c.id}`;
+    const tag = c.status === 'closed' ? ' (encerrado)' : ' (ativo)';
+    return `<option value="${c.id}">${esc(label)}${tag}</option>`;
+  }).join('');
+  if (_finCurrentContractId && contracts.some(c => c.id === _finCurrentContractId)) {
+    sel.value = _finCurrentContractId;
+  } else {
+    sel.value = (contracts.find(c => c.status === 'active') || contracts[0]).id;
+  }
+}
+
 function onFinSystemChange() {
   const sys = G('fin-system')?.value;
   // Hide rate field for PLANTA (no interest)
@@ -11547,11 +12193,25 @@ async function patGenerateSchedule() {
 
   // Call backend schedule generation
   const assetId = parseInt(G('pat-asset-id')?.value || '0');
-  const contract = { system, index_type, annual_rate, principal, n_installments: n,
+  const contract = { label: G('fin-contract-label')?.value?.trim() || null,
+    system, index_type, annual_rate, principal, n_installments: n,
     first_month, balloon_at_keys: balloon, extra_annual_month: extraMonth, extra_annual_value: extraValue };
 
   if (assetId) {
-    const result = await ff.patFinancingContractSave({ assetId, contract });
+    // Warn if any installments have already been confirmed/reconciled — regenerating
+    // recalculates principal/interest/balance for ALL rows based on the new contract,
+    // which can change the numbers behind already-paid months.
+    const existingRows = (_pat.financing[assetId] || []).filter(r => String(r.contract_id) === String(_finCurrentContractId));
+    const paidCount = existingRows.filter(r => r.paid === 1 || r.is_projection === 0).length;
+    if (paidCount > 0) {
+      const ok = await showConfirmDialog(
+        `${paidCount} parcela(s) já confirmada(s)`,
+        'Gerar o cronograma novamente recalcula o saldo devedor e os valores de principal/juros de TODAS as parcelas a partir dos novos parâmetros do contrato — incluindo as que já foram marcadas como pagas. Os valores e o status "pago" de cada parcela são preservados, mas o saldo devedor recalculado pode mudar. Deseja continuar?',
+        'Gerar mesmo assim', true);
+      if (!ok) return;
+    }
+    const result = await ff.patFinancingContractSave({ assetId, contractId: _finCurrentContractId, contract });
+    _finCurrentContractId = result?.contractId || _finCurrentContractId;
     _finSchedule = result?.schedule || [];
   } else {
     // Preview only (asset not yet saved) — use a local calculation
@@ -11611,7 +12271,209 @@ function patRenderSchedulePreview(schedule) {
   const body    = G('fin-schedule-body');
   if (!preview || !body || !schedule.length) return;
   const curM = new Date().toISOString().slice(0,7);
-  const rows = schedule.slice(0, 6); // show first 6 as preview
+  const sorted = schedule.slice().sort((a,b) => a.month.localeCompare(b.month));
+  // Show a window around "now": a couple of recent/paid installments plus the
+  // next several projected ones — more useful than always showing the very
+  // first installments (which, for an old contract, would all be "✅ pago").
+  let startIdx = sorted.findIndex(r => r.month.slice(0,7) >= curM);
+  if (startIdx === -1) startIdx = sorted.length; // all in the past
+  startIdx = Math.max(0, startIdx - 2);
+  const rows = sorted.slice(startIdx, startIdx + 6);
+  const renderRow = r => {
+    const isPast = r.month <= curM && r.is_projection === 0;
+    const isFut  = r.is_projection === 1 && r.month > curM;
+    const color  = isPast ? 'var(--text1)' : 'var(--text3)';
+    return `<div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;padding:4px 10px;border-bottom:1px solid var(--border);color:${color}">
+      <span>${fmtMonth(r.month)}</span>
+      <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.installment)}</span>
+      <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.principal)}</span>
+      <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.interest)}</span>
+      <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.balance_end)}</span>
+      <span class="right" style="font-size:9px">${isFut ? '📊 proj.' : isPast ? '✅ pago' : '⏳ pend.'}</span>
+    </div>`;
+  };
+  body.innerHTML = rows.map(renderRow).join('');
+  const remaining = sorted.length - rows.length;
+  if (remaining > 0) {
+    body.innerHTML += `<div style="padding:6px 10px;color:var(--text3);font-size:11px;display:flex;justify-content:space-between;align-items:center">
+      <span>... e mais ${remaining} parcela${remaining===1?'':'s'}</span>
+      <button class="btn xs" onclick="patShowFullSchedule()">Ver todas</button>
+    </div>`;
+  }
+  preview.style.display = '';
+}
+
+// Show a scrollable modal with the FULL installment schedule for the contract
+// currently loaded in the financing form.
+function patShowFullSchedule() {
+  if (!_finSchedule.length) return;
+  const curM = new Date().toISOString().slice(0,7);
+  const sorted = _finSchedule.slice().sort((a,b) => a.month.localeCompare(b.month));
+  const totalInstall = sorted.reduce((s,r) => s+r.installment, 0);
+  const rowsHtml = sorted.map(r => {
+    const isPast = r.month <= curM && r.is_projection === 0;
+    const isFut  = r.is_projection === 1 && r.month > curM;
+    const color  = isPast ? 'var(--text1)' : 'var(--text3)';
+    const rowBg  = r.month.slice(0,7) === curM ? 'background:var(--accent-lt)' : '';
+    return `<div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;padding:4px 10px;border-bottom:1px solid var(--border);color:${color};${rowBg}">
+      <span>${fmtMonth(r.month)}</span>
+      <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.installment)}</span>
+      <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.principal)}</span>
+      <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.interest)}</span>
+      <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.balance_end)}</span>
+      <span class="right" style="font-size:9px">${isFut ? '📊 proj.' : isPast ? '✅ pago' : '⏳ pend.'}</span>
+    </div>`;
+  }).join('');
+  const html = `
+    <div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;padding:6px 10px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;border-bottom:1px solid var(--border2);background:var(--bg4)">
+      <span>Mês</span><span class="right">Parcela</span><span class="right">Principal</span><span class="right">Juros</span><span class="right">Saldo</span><span class="right">Status</span>
+    </div>
+    <div style="max-height:60vh;overflow-y:auto">${rowsHtml}</div>
+    <div style="padding:8px 10px;font-size:11px;color:var(--text3);border-top:1px solid var(--border2)">${sorted.length} parcelas — Total: ${fmtBRL(totalInstall)} — Saldo final: ${fmtBRL(sorted.at(-1)?.balance_end ?? 0)}</div>`;
+  showInfoModal('📅 Cronograma completo de parcelas', html);
+}
+
+function patCollectFinancingRows() {
+  // Legacy: return schedule rows for old save path (no longer used for new contracts)
+  return _finSchedule.map(r => ({ month: r.month, installment: r.installment }));
+}
+
+async function deletePatAsset(id) {
+  const a = _pat.assets.find(a=>a.id===id);
+  const ok = await showConfirmDialog(`Excluir "${a?.name}"?`, 'Todo o histórico será removido. Esta ação não pode ser desfeita.', 'Excluir', true);
+  if (!ok) return;
+  await ff.patAssetDelete({ id });
+  toast('Ativo removido');
+  refreshPatrimonio();
+}
+
+// ══ PERSONAL DEBTS (Dívidas Pessoais) ══
+let _debtSchedule = [];
+
+function readDebtFinField(id) {
+  const el = G(id);
+  if (!el) return 0;
+  if (el.rawValue) return el.rawValue() || 0;
+  return parseFloat(el.value.replace(/[R$\u00a0\s.]/g,'').replace(',','.')) || 0;
+}
+
+function setupDebtFinancingInputs() {
+  document.querySelectorAll('#modal-debt .fin-currency').forEach(el => setupCurrencyInput(el));
+  document.querySelectorAll('#modal-debt .fin-percent').forEach(el => setupPercentInput(el));
+}
+
+function onDebtFinSystemChange() {
+  const sys = G('debt-fin-system')?.value;
+  const rateField = G('debt-fin-rate')?.closest('.field');
+  if (rateField) rateField.style.display = sys === 'PLANTA' ? 'none' : '';
+}
+
+async function openDebtModal(id) {
+  const now = new Date();
+  G('debt-id').value    = id || '';
+  G('debt-name').value  = '';
+  G('debt-notes').value = '';
+  G('debt-hidden').checked = false;
+  G('debt-modal-title').textContent = id ? 'Editar dívida pessoal' : 'Nova dívida pessoal';
+
+  // Reset contract fields
+  if (G('debt-fin-system'))       G('debt-fin-system').value       = 'SAC';
+  if (G('debt-fin-index'))        G('debt-fin-index').value        = 'none';
+  if (G('debt-fin-rate'))         G('debt-fin-rate').value         = '';
+  if (G('debt-fin-principal'))    G('debt-fin-principal').value    = '';
+  if (G('debt-fin-installments')) G('debt-fin-installments').value = '';
+  if (G('debt-fin-first-m'))      G('debt-fin-first-m').value      = now.getMonth()+1;
+  if (G('debt-fin-first-y'))      G('debt-fin-first-y').value      = now.getFullYear();
+  if (G('debt-fin-schedule-preview')) G('debt-fin-schedule-preview').style.display = 'none';
+  if (G('debt-fin-schedule-summary')) G('debt-fin-schedule-summary').textContent = '';
+  if (G('debt-sync-account')) {
+    G('debt-sync-account').innerHTML = '<option value="">— Não sincronizar —</option>' +
+      (accounts||[]).filter(a => !a.hidden && (a.type==='bank'||a.type==='cash'))
+        .map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  }
+  if (G('debt-sync-day')) G('debt-sync-day').value = '';
+  populateCategorySelect('debt-sync-category', 'Dívidas pessoais');
+  _debtSchedule = [];
+
+  if (id) {
+    const d = _pat.debts.find(d => d.id === id);
+    if (d) {
+      G('debt-name').value  = d.name;
+      G('debt-notes').value = d.notes || '';
+      G('debt-hidden').checked = !!d.hidden;
+    }
+    const contract = await ff.debtContractGet({ debtId: id }).catch(() => null);
+    if (contract) {
+      await new Promise(r => setTimeout(r, 20)); // ensure DOM visible
+      setupDebtFinancingInputs();
+      if (G('debt-fin-system'))      G('debt-fin-system').value      = contract.system;
+      if (G('debt-fin-index'))       G('debt-fin-index').value       = contract.index_type;
+      if (G('debt-fin-rate'))        { const r = G('debt-fin-rate');      if(r.setValue) r.setValue(contract.annual_rate); else r.value = contract.annual_rate; }
+      if (G('debt-fin-principal'))   { const p = G('debt-fin-principal'); if(p.setValue) p.setValue(contract.principal);   else p.value = contract.principal; }
+      if (G('debt-fin-installments'))G('debt-fin-installments').value= contract.n_installments;
+      const [fy, fm] = (contract.first_month||'').split('-');
+      if (G('debt-fin-first-m'))     G('debt-fin-first-m').value     = parseInt(fm)||now.getMonth()+1;
+      if (G('debt-fin-first-y'))     G('debt-fin-first-y').value     = parseInt(fy)||now.getFullYear();
+      if (G('debt-sync-account'))    G('debt-sync-account').value    = contract.sync_account_id || '';
+      if (G('debt-sync-day'))        G('debt-sync-day').value        = contract.sync_day || '';
+      populateCategorySelect('debt-sync-category', contract.sync_category || 'Dívidas pessoais');
+      onDebtFinSystemChange();
+      const schedule = _pat.debtInstallments[id] || [];
+      if (schedule.length) { _debtSchedule = schedule; debtRenderSchedulePreview(schedule); }
+    }
+  }
+
+  setTimeout(setupDebtFinancingInputs, 0);
+  openModal('modal-debt');
+}
+
+async function debtGenerateSchedule() {
+  const system      = G('debt-fin-system')?.value || 'SAC';
+  const index_type  = G('debt-fin-index')?.value  || 'none';
+  const annual_rate = readDebtFinField('debt-fin-rate');
+  const principal   = readDebtFinField('debt-fin-principal');
+  const n           = parseInt(G('debt-fin-installments')?.value || '0');
+  const fm          = parseInt(G('debt-fin-first-m')?.value || '0');
+  const fy          = parseInt(G('debt-fin-first-y')?.value || '0');
+
+  if (!principal || !n || !fm || !fy) { toast('Preencha valor devido, nº de parcelas e primeira parcela'); return; }
+  const first_month = `${fy}-${String(fm).padStart(2,'0')}`;
+
+  const debtId = parseInt(G('debt-id')?.value || '0');
+  const sync_account_id = parseInt(G('debt-sync-account')?.value||'0') || null;
+  const sync_day         = parseInt(G('debt-sync-day')?.value||'0') || null;
+  const sync_category    = G('debt-sync-category')?.value?.trim() || null;
+  const contract = { system, index_type, annual_rate, principal, n_installments: n, first_month, sync_account_id, sync_day, sync_category };
+
+  if (debtId) {
+    const existingRows = _pat.debtInstallments[debtId] || [];
+    const paidCount = existingRows.filter(r => r.paid === 1 || r.is_projection === 0).length;
+    if (paidCount > 0) {
+      const ok = await showConfirmDialog(
+        `${paidCount} parcela(s) já confirmada(s)`,
+        'Gerar o cronograma novamente recalcula o saldo devedor e os valores de principal/juros de TODAS as parcelas a partir dos novos parâmetros do contrato — incluindo as que já foram marcadas como pagas. Os valores e o status "pago" de cada parcela são preservados, mas o saldo devedor recalculado pode mudar. Deseja continuar?',
+        'Gerar mesmo assim', true);
+      if (!ok) return;
+    }
+    const result = await ff.debtContractSave({ debtId, contract });
+    _debtSchedule = result?.schedule || [];
+    _pat.debtInstallments[debtId] = _debtSchedule;
+  } else {
+    _debtSchedule = _localGenerateSchedule(contract);
+  }
+
+  debtRenderSchedulePreview(_debtSchedule);
+  const totalInstall = _debtSchedule.reduce((s,r) => s+r.installment, 0);
+  G('debt-fin-schedule-summary').textContent =
+    `${_debtSchedule.length} parcelas — Total: ${fmtBRL(totalInstall)} — Saldo final: ${fmtBRL(_debtSchedule.at(-1)?.balance_end ?? 0)}`;
+}
+
+function debtRenderSchedulePreview(schedule) {
+  const preview = G('debt-fin-schedule-preview');
+  const body    = G('debt-fin-schedule-body');
+  if (!preview || !body || !schedule.length) return;
+  const curM = new Date().toISOString().slice(0,7);
+  const rows = schedule.slice(0, 6);
   body.innerHTML = rows.map(r => {
     const isPast = r.month <= curM && r.is_projection === 0;
     const isFut  = r.is_projection === 1 && r.month > curM;
@@ -11629,17 +12491,51 @@ function patRenderSchedulePreview(schedule) {
   preview.style.display = '';
 }
 
-function patCollectFinancingRows() {
-  // Legacy: return schedule rows for old save path (no longer used for new contracts)
-  return _finSchedule.map(r => ({ month: r.month, installment: r.installment }));
+async function saveDebt() {
+  const id      = G('debt-id').value ? parseInt(G('debt-id').value) : null;
+  const name    = G('debt-name').value.trim();
+  const notes   = G('debt-notes').value.trim();
+  const hidden  = G('debt-hidden')?.checked || false;
+
+  if (!name) { toast('Informe o nome da dívida'); return; }
+
+  closeModal('modal-debt');
+
+  // 1. Save debt record
+  const result = await ff.debtSave({ id, name, notes: notes||null, sort_order: id ? undefined : (_pat.debts?.length||0), hidden });
+  const debtId = result.id;
+
+  // 2. Save contract if filled
+  const fn  = parseInt(G('debt-fin-installments')?.value||'0');
+  const fp  = readDebtFinField('debt-fin-principal');
+  const fm2 = parseInt(G('debt-fin-first-m')?.value||'0');
+  const fy2 = parseInt(G('debt-fin-first-y')?.value||'0');
+  if (fn > 0 && fp > 0 && fm2 && fy2) {
+    const contract = {
+      system:         G('debt-fin-system')?.value || 'SAC',
+      index_type:     G('debt-fin-index')?.value  || 'none',
+      annual_rate:    readDebtFinField('debt-fin-rate'),
+      principal:      fp,
+      n_installments: fn,
+      first_month:    `${fy2}-${String(fm2).padStart(2,'0')}`,
+      sync_account_id: parseInt(G('debt-sync-account')?.value||'0') || null,
+      sync_day:        parseInt(G('debt-sync-day')?.value||'0') || null,
+      sync_category:   G('debt-sync-category')?.value?.trim() || null,
+    };
+    await ff.debtContractSave({ debtId, contract });
+  }
+
+  await refreshPatrimonio();
+  refreshPatrimonioTable();
+  toast(`✅ Dívida ${id ? 'atualizada' : 'criada'}`);
 }
 
-async function deletePatAsset(id) {
-  const a = _pat.assets.find(a=>a.id===id);
-  const ok = await showConfirmDialog(`Excluir "${a?.name}"?`, 'Todo o histórico será removido. Esta ação não pode ser desfeita.', 'Excluir', true);
+async function deletePatDebt(id) {
+  const d = _pat.debts.find(d=>d.id===id);
+  const ok = await showConfirmDialog(`Excluir "${d?.name}"?`, 'Todo o histórico de parcelas será removido. Esta ação não pode ser desfeita.', 'Excluir', true);
   if (!ok) return;
-  await ff.patAssetDelete({ id });
-  toast('Ativo removido');
+  await ff.debtDelete({ id });
+  toast('Dívida removida');
   refreshPatrimonio();
 }
 
