@@ -14188,39 +14188,57 @@ let _aposChart1 = null, _aposChart2 = null;
 let _aposFocusData = null;
 
 function aposSaveConfig() {
+  // Salva o valor exibido no campo (texto formatado) — aposParseInput sabe interpretar
   const cfg = {
     goalType:   document.querySelector('input[name="apos-goal-type"]:checked')?.value || 'patrimonio',
-    goalValue:  G('apos-goal-value')?.dataset.raw || '',
+    goalValue:  G('apos-goal-value')?.value || '',
     ageNow:     G('apos-age-now')?.value || '',
     ageRet:     G('apos-age-ret')?.value || '',
-    patAtual:   G('apos-patrimonio-atual')?.dataset.raw || '',
+    patAtual:   G('apos-patrimonio-atual')?.value || '',
     rateReal:   G('apos-rate-real')?.value || '',
     rateInfl:   G('apos-rate-infl')?.value || '',
-
   };
   try { localStorage.setItem(APOS_STORAGE_KEY, JSON.stringify(cfg)); } catch(e) {}
 }
 
+function aposResetConfig() {
+  try { localStorage.removeItem(APOS_STORAGE_KEY); } catch(e) {}
+  // Limpa todos os campos
+  ['apos-goal-value','apos-patrimonio-atual','apos-age-now','apos-age-ret','apos-rate-real'].forEach(id => {
+    const el = G(id); if (el) el.value = '';
+  });
+  const r = document.querySelector('input[name="apos-goal-type"][value="renda"]');
+  if (r) r.checked = true;
+  if (G('apos-kpis')) G('apos-kpis').innerHTML = '';
+  if (G('apos-table-body')) G('apos-table-body').innerHTML = '';
+}
+
 function aposLoadConfig() {
   try {
-    const cfg = JSON.parse(localStorage.getItem(APOS_STORAGE_KEY) || '{}');
+    const raw = localStorage.getItem(APOS_STORAGE_KEY);
+    if (!raw) return;
+    const cfg = JSON.parse(raw);
+
+    // Sanity-check: se patAtual parseado for suspeito (< 100), descarta config corrompido
+    if (cfg.patAtual) {
+      const testPat = parseFloat(String(cfg.patAtual).replace(/\./g,'').replace(',','.'));
+      if (!isNaN(testPat) && testPat < 100) {
+        console.warn('[Aposentadoria] Config corrompido detectado (patAtual=' + cfg.patAtual + '), descartando.');
+        localStorage.removeItem(APOS_STORAGE_KEY);
+        return;
+      }
+    }
+
     if (cfg.goalType) {
       const r = document.querySelector(`input[name="apos-goal-type"][value="${cfg.goalType}"]`);
       if (r) r.checked = true;
     }
-    if (cfg.goalValue) {
-      const inp = G('apos-goal-value');
-      if (inp) { inp.value = parseFloat(cfg.goalValue).toLocaleString('pt-BR',{minimumFractionDigits:2}); inp.dataset.raw = cfg.goalValue; }
-    }
-    if (cfg.ageNow)   G('apos-age-now').value  = cfg.ageNow;
-    if (cfg.ageRet)   G('apos-age-ret').value  = cfg.ageRet;
-    if (cfg.patAtual) {
-      const inp = G('apos-patrimonio-atual');
-      if (inp) { inp.value = parseFloat(cfg.patAtual).toLocaleString('pt-BR',{minimumFractionDigits:2}); inp.dataset.raw = cfg.patAtual; }
-    }
-    if (cfg.rateReal) G('apos-rate-real').value = cfg.rateReal;
-    if (cfg.rateInfl) G('apos-rate-infl').value = cfg.rateInfl;
-
+    if (cfg.goalValue)  { const inp = G('apos-goal-value');        if (inp) inp.value = cfg.goalValue; }
+    if (cfg.ageNow)     G('apos-age-now').value  = cfg.ageNow;
+    if (cfg.ageRet)     G('apos-age-ret').value  = cfg.ageRet;
+    if (cfg.patAtual)   { const inp = G('apos-patrimonio-atual');   if (inp) inp.value = cfg.patAtual; }
+    if (cfg.rateReal)   G('apos-rate-real').value = cfg.rateReal;
+    if (cfg.rateInfl)   G('apos-rate-infl').value = cfg.rateInfl;
   } catch(e) {}
 }
 
@@ -14312,22 +14330,17 @@ function aposParseInput(id) {
   const el = G(id);
   if (!el) return 0;
   let v = el.value
-    .replace(/R\$[ \s]*/g, '')  // remove "R$" and spaces/nbsp
+    .replace(/R\$[ \s]*/g, '')
     .trim();
-
-  // Detect Brazilian format: if ends with ,dd (exactly 2 decimal digits after comma)
-  // e.g. "20.000,00" → remove dots → "20000,00" → replace comma → "20000.00"
-  if (/,\d{2}$/.test(v)) {
+  // Brazilian format: comma = decimal separator, dots = thousand separators.
+  // Detect by presence of comma anywhere.
+  if (v.includes(',')) {
     v = v.replace(/\./g, '').replace(',', '.');
-  } else {
-    // Plain number or dot-as-decimal: remove any comma thousand-seps only
-    v = v.replace(/,/g, '');
   }
-
+  // No comma: dots are thousand separators if there are multiple, leave single dot as decimal.
   const parsed = parseFloat(v);
   return isNaN(parsed) ? 0 : parsed;
 }
-
 async function aposGetRealizedSavings() {
   const months = {};
   try {
@@ -14407,27 +14420,19 @@ async function aposCalc() {
     if (!savingsByYear[y] || m.slice(5,7) === '12') savingsByYear[y] = v;
   });
 
-  // avgSavings: most recent year's December MA12 lucro (already IPCA-corrected)
-  const pastYears = Object.keys(savingsByYear).map(Number).filter(y => y < curYear).sort((a,b)=>b-a);
-  const avgSavings = pastYears.length ? savingsByYear[pastYears[0]] : 0;
-
-  // ── PMT calculation ─────────────────────────────────────────────────
-  // Find the MINIMUM monthly saving needed so that, saving exactly that amount each month
-  // at rateReal, you reach metaPatrimonio exactly at retYear.
-  // Formula: PMT = (FV - PV*(1+r)^n) * r / ((1+r)^n - 1)
-  // where FV = metaPatrimonio, PV = patAtual, r = monthly real rate, n = months until retirement
-  const rM     = Math.pow(1 + rateReal, 1/12) - 1;
-  const n      = yearsTotal * 12;
-  const pvGrown = patAtual * Math.pow(1 + rateReal, yearsTotal);
-  const needPMT = pvGrown >= metaPatrimonio ? 0
-    : (metaPatrimonio - pvGrown) * rM / (Math.pow(1 + rM, n) - 1);
-  // FV of monthly PMT contributions over one year (monthly compounding)
-  // = PMT * ((1+rM)^12 - 1) / rM
-  const annuityPerYear = needPMT > 0 ? needPMT * (Math.pow(1 + rM, 12) - 1) / rM : 0;
+  // ── Aporte externo fixo (x) ──────────────────────────────────────────
+  // Fórmula: meta = patAtual*(1+r)^n + x*12*((1+r)^n - 1)/r
+  // → x_mensal = (meta - patAtual*(1+r)^n) / (12 * ((1+r)^n - 1) / r)
+  // x é constante todo mês. O rendimento do patrimônio cresce e cobre cada vez mais.
+  // A poupança total (rendimento + x) é crescente ao longo do tempo.
+  const fatorN      = Math.pow(1 + rateReal, yearsTotal);
+  const pvGrown     = patAtual * fatorN;
+  const xAnual      = pvGrown >= metaPatrimonio ? 0
+    : (metaPatrimonio - pvGrown) / ((fatorN - 1) / rateReal);
+  const needPMT     = xAnual / 12; // aporte externo mensal fixo
+  const annuityPerYear = xAnual;   // aporte externo anual fixo
 
   // ── Build table rows ─────────────────────────────────────────────────
-  // Historical: start from first year with patrimônio data
-  // Future: project forward from patAtual using needPMT (not avgSavings)
   const patHistYears = Object.keys(patByYear).map(Number).sort();
   const firstPatYear = patHistYears.length ? patHistYears[0] : curYear;
 
@@ -14439,72 +14444,71 @@ async function aposCalc() {
     const isPast     = year < curYear;
     const isCur      = year === curYear;
     const isFuture   = year > curYear;
-    const isRetired  = age >= ageRet;
+    const isRetired  = age > ageRet; // ano de aposentadoria ainda acumula PMT normalmente
+    const isRetYear  = age === ageRet; // apenas para exibição (emoji, highlight)
 
     // Patrimônio real: only from patByYear (excludes bank-only years)
     const patRealVal  = patByYear[year]?.val ?? null;
     const patReal     = (isPast && patRealVal != null) ? patRealVal
                       : isCur ? patAtual : null;
 
-    // Poupança realizada: December MA12 IPCA-corrected from Evolução
-    const savingReal  = (isPast || isCur) ? (savingsByYear[year] ?? null) : null;
+    // Poupança realizada: December MA12 IPCA-corrected from Evolução (apenas anos passados fechados)
+    const savingReal  = isPast ? (savingsByYear[year] ?? null) : null;
 
-    // Poupança necessária: needPMT for future pre-retirement years
+    // Aporte externo fixo (anos futuros pré-aposentadoria, incluindo ano corrente)
     const savingNeeded = (!isRetired && !isPast) ? needPMT : null;
 
-    // For the retirement year: projPat currently holds value BEFORE final accumulation
-    // The display value should be the final accumulated value
-    // We pre-compute it for the retirement year display
-    let projPatDisplay = projPat;
-    if (age === ageRet && !isPast) {
-      projPatDisplay = projPat * (1 + rateReal) + annuityPerYear;
-    }
+    // Rendimento mensal do patrimônio = saldo_início_ano × rateReal / 12
+    const yieldPatMonthly = (!isRetired && !isPast && projPat > 0)
+      ? projPat * rateReal / 12 : null;
+
+    // Poupança por outros meios = aporte externo fixo (needPMT)
+    // já é constante — exibimos separado do rendimento
+    const savingExternal = savingNeeded; // fixo, não depende do rendimento
+
+    // projPat já é o saldo acumulado até o início deste ano.
+    // Para todos os anos (incluindo aposentadoria) mostramos projPat diretamente.
+    const projPatDisplay = projPat;
 
     const displayPat = patReal ?? (isFuture || isCur ? projPatDisplay : null);
     const pctMeta = displayPat != null ? displayPat / metaPatrimonio : null;
 
     rows.push({
-      year, age, isPast, isCur, isFuture, isRetired,
+      year, age, isPast, isCur, isFuture, isRetired, isRetYear,
       patReal,
       projPat: (isFuture || (isCur && patReal == null)) ? projPatDisplay : null,
-      savingReal, savingNeeded, pctMeta,
+      savingReal, savingNeeded, yieldPat: yieldPatMonthly, savingExternal, pctMeta,
     });
 
-    // Advance projPat for next year
-    if (isPast) {
-      projPat = patRealVal != null ? patRealVal : projPat * (1 + rateReal) + annuityPerYear;
-    } else if (!isRetired) {
-      // Future pre-retirement: grow with monthly-compounded contributions
+    // Avança projPat para o próximo ano (juros anuais + aporte externo fixo)
+    // Anos passados: não alteramos — projeção parte sempre de patAtual no ano corrente.
+    if (!isPast && !isRetired) {
       projPat = projPat * (1 + rateReal) + annuityPerYear;
-    } else if (age === ageRet) {
-      // Retirement year: apply the final year of accumulation to land exactly on the goal
-      projPat = projPat * (1 + rateReal) + annuityPerYear;
-    } else {
-      // Post-retirement: sustain with withdrawals
+    } else if (isRetired) {
       projPat = projPat * (1 + rateReal) - metaPatrimonio * rateReal;
     }
   }
 
-  renderAposKPIs({ needPMT, metaPatrimonio, goalType, goalRaw, rateReal, yearsTotal, pvGrown, avgSavings });
+  renderAposKPIs({ needPMT, metaPatrimonio, goalType, goalRaw, rateReal, yearsTotal });
   if (_aposView === 'table') renderAposTable(rows);
   else renderAposCharts(rows, metaPatrimonio);
 }
 
 
-function renderAposKPIs({ needPMT, metaPatrimonio, goalType, goalRaw, rateReal, yearsTotal, pvGrown, avgSavings }) {
-  const reached = pvGrown >= metaPatrimonio;
+function renderAposKPIs({ needPMT, metaPatrimonio, goalType, goalRaw, rateReal, yearsTotal }) {
+  const reached = needPMT === 0;
   const kpis = [
     { icon:'🎯', label: goalType==='patrimonio' ? 'Meta de patrimônio' : 'Patrimônio necessário',
       value: fmtBRL(metaPatrimonio),
       sub: goalType==='renda' ? `para sustentar renda de ${fmtBRL(goalRaw)}/mês` : '' },
     { icon:'📅', label:'Anos até a aposentadoria', value:`${yearsTotal} anos`, sub:'' },
-    { icon:'💵', label:'Poupança mensal necessária',
+    { icon:'💵', label:'Poupança total necessária/mês',
       value: reached ? '🎉 Meta já alcançável!' : fmtBRL(needPMT)+'/mês',
-      sub: reached ? 'Patrimônio atual já projeta superar a meta' : `retorno real ${(rateReal*100).toFixed(1)}% a.a.`,
+      sub: reached ? 'Patrimônio atual já cobre a meta' : `fixo todo mês · a poupança total cresce com o rendimento`,
       accent: !reached && needPMT > 0 },
-    { icon:'💰', label:'Poupança média mensal (Evolução)',
-      value: fmtBRL(avgSavings)+'/mês',
-      sub: 'Média usada para projetar o futuro' },
+    { icon:'📈', label:'Retorno real esperado',
+      value: `${(rateReal*100).toFixed(1)}% a.a.`,
+      sub: 'parte da poupança virá do rendimento do próprio patrimônio' },
   ];
   G('apos-kpis').innerHTML = kpis.map(k => `
     <div style="background:${k.accent?'var(--accent-lt)':'var(--bg2)'};border:1px solid ${k.accent?'var(--accent)':'var(--border)'};border-radius:10px;padding:14px 16px">
@@ -14519,19 +14523,19 @@ function renderAposTable(rows) {
   const tbody = G('apos-table-body');
   if (!tbody) return;
 
-  // Update header — merged patrimônio column
   const thead = G('apos-table')?.querySelector('thead tr');
   if (thead) thead.innerHTML = `
     <th>Ano</th><th>Idade</th>
-    <th class="right">Poupança realizada/mês<br><span style="font-size:10px;font-weight:400;color:var(--text3)">Média 12m Lucro (dez)</span></th>
-    <th class="right">Poupança necessária/mês<br><span style="font-size:10px;font-weight:400;color:var(--text3)">anos futuros</span></th>
-    <th class="right">Patrimônio real / projetado<br><span style="font-size:10px;font-weight:400;color:var(--text3)">real = dados históricos · projetado = futuro</span></th>
+    <th class="right">Patrimônio<br><span style="font-size:10px;font-weight:400;color:var(--text3)">real · projetado</span></th>
+    <th class="right">Poupança realizada/mês<br><span style="font-size:10px;font-weight:400;color:var(--text3)">Média 12m Lucro (dez) — anos passados</span></th>
+    <th class="right">Rendimento do patrimônio/mês<br><span style="font-size:10px;font-weight:400;color:var(--text3)">retorno real sobre saldo projetado</span></th>
+    <th class="right">Aporte externo/mês<br><span style="font-size:10px;font-weight:400;color:var(--text3)">fixo · independe do rendimento do patrimônio</span></th>
     <th class="right">% da meta</th>`;
 
   tbody.innerHTML = rows.map(r => {
     let rowStyle = r.isCur ? 'background:var(--bg3);font-weight:700'
                  : r.isPast ? 'opacity:0.75' : '';
-    if (r.isRetired) rowStyle = 'background:rgba(37,99,235,0.06)';
+    if (r.isRetired || r.isRetYear) rowStyle = 'background:rgba(37,99,235,0.06)';
 
     const pct      = r.pctMeta;
     const pctColor = pct>=1?'color:var(--green)' : pct>=0.75?'color:var(--accent)' : pct>=0.5?'color:#f59e0b':'color:var(--red)';
@@ -14539,32 +14543,38 @@ function renderAposTable(rows) {
     const barClr   = pct>=1?'var(--green)':pct>=0.5?'var(--accent)':'var(--red)';
     const bar      = `<div style="display:inline-block;width:${barW}px;height:4px;background:${barClr};border-radius:2px;vertical-align:middle;margin-left:4px"></div>`;
 
-    const yearLabel = `${r.year}${r.isRetired?' 🏖️':r.isCur?' ◀':''}`;
+    const yearLabel = `${r.year}${r.isRetYear?' 🏖️':r.isCur?' ◀':''}`;
     const mono      = `font-family:'DM Mono',monospace`;
 
-    // Poupança realizada (passado = média 12m dez; futuro = blank)
-    const savReal = r.savingReal != null
-      ? `<span class="${r.savingReal>=0?'amt-inc':'amt-exp'}">${fmtBRL(r.savingReal)}</span>` : '—';
-
-    // Poupança necessária (futuro apenas)
-    const savNeed = r.savingNeeded != null ? fmtBRL(r.savingNeeded) : '—';
-
-    // Patrimônio: real (passado/corrente) ou projetado (futuro) in same column
+    // Patrimônio
     let patCell;
     if (r.patReal != null) {
-      patCell = fmtBRL(r.patReal); // historical real data
+      patCell = fmtBRL(r.patReal);
     } else if (r.projPat != null) {
-      patCell = `<span style="color:var(--accent)">${fmtBRL(r.projPat)}</span>`; // projected
+      patCell = `<span style="color:var(--accent)">${fmtBRL(r.projPat)}</span>`;
     } else {
       patCell = '—';
     }
 
+    // Poupança realizada (passado + corrente)
+    const savRealCell = r.savingReal != null
+      ? `<span class="${r.savingReal>=0?'amt-inc':'amt-exp'}">${fmtBRL(r.savingReal)}</span>` : '—';
+
+    // Rendimento mensal do patrimônio (futuro pré-aposentadoria)
+    const yieldCell = r.yieldPat != null
+      ? `<span style="color:var(--green)">${fmtBRL(r.yieldPat)}</span>` : '—';
+
+    // Poupança por outros meios (futuro pré-aposentadoria)
+    const extCell = r.savingExternal != null
+      ? `<span style="color:var(--accent);font-weight:600">${fmtBRL(r.savingExternal)}</span>` : '—';
+
     return `<tr style="${rowStyle}">
       <td style="font-size:12px;padding:5px 8px">${yearLabel}</td>
       <td style="font-size:12px;padding:5px 8px;text-align:center">${r.age}</td>
-      <td class="right" style="font-size:12px;padding:5px 8px;${mono}">${savReal}</td>
-      <td class="right" style="font-size:12px;padding:5px 8px;${mono}">${savNeed}</td>
       <td class="right" style="font-size:12px;padding:5px 8px;${mono}">${patCell}</td>
+      <td class="right" style="font-size:12px;padding:5px 8px;${mono}">${savRealCell}</td>
+      <td class="right" style="font-size:12px;padding:5px 8px;${mono}">${yieldCell}</td>
+      <td class="right" style="font-size:12px;padding:5px 8px;${mono}">${extCell}</td>
       <td class="right" style="font-size:12px;padding:5px 8px;${pctColor};font-weight:600">${(pct*100).toFixed(0)}%${bar}</td>
     </tr>`;
   }).join('');
@@ -14575,15 +14585,13 @@ function renderAposCharts(rows, metaPatrimonio) {
   const firstPatIdx = rows.findIndex(r => r.patReal != null);
   const patRows  = firstPatIdx >= 0 ? rows.slice(firstPatIdx) : rows;
 
-  // Chart 2 (savings): use all rows that have either savingReal or savingNeeded
-  const savRows  = rows.filter(r => r.savingReal != null || r.savingNeeded != null);
-
-  const labels   = patRows.map(r => r.year.toString());
-  const patReal  = patRows.map(r => r.patReal  != null ? Math.round(r.patReal)  : null);
-  const patProj  = patRows.map(r => r.projPat  != null ? Math.round(r.projPat)  : null);
-  const metaLine = patRows.map(() => Math.round(metaPatrimonio));
-  const poupNec  = patRows.map(r => r.savingNeeded != null ? Math.round(r.savingNeeded) : null);
-  const poupReal = patRows.map(r => r.savingReal   != null ? Math.round(r.savingReal)   : null);
+  const labels    = patRows.map(r => r.year.toString());
+  const patReal   = patRows.map(r => r.patReal  != null ? Math.round(r.patReal)  : null);
+  const patProj   = patRows.map(r => r.projPat  != null ? Math.round(r.projPat)  : null);
+  const metaLine  = patRows.map(() => Math.round(metaPatrimonio));
+  const yieldData = patRows.map(r => r.yieldPat       != null ? Math.round(r.yieldPat)       : null);
+  const extData   = patRows.map(r => r.savingExternal  != null ? Math.round(r.savingExternal)  : null);
+  const savReal   = patRows.map(r => r.savingReal      != null ? Math.round(r.savingReal)      : null);
 
   if (_aposChart1) { try{_aposChart1.destroy();}catch(e){} _aposChart1=null; }
   if (_aposChart2) { try{_aposChart2.destroy();}catch(e){} _aposChart2=null; }
@@ -14610,15 +14618,17 @@ function renderAposCharts(rows, metaPatrimonio) {
   if (ctx2) _aposChart2 = new Chart(ctx2, {
     type: 'bar',
     data: { labels, datasets: [
-      { label:'Necessária/mês', data:poupNec, backgroundColor:'rgba(37,99,235,.4)',
-        borderColor:'#2563eb', borderWidth:1 },
-      { label:'Realizada/mês (Média 12m)', data:poupReal, type:'line',
-        borderColor:'#16a34a', backgroundColor:'rgba(22,163,74,.15)',
-        tension:0.3, pointRadius:4, fill:false, borderWidth:2.5, spanGaps:false },
+      { label:'Rendimento do patrimônio/mês', data:yieldData, backgroundColor:'rgba(22,163,74,.5)',
+        borderColor:'#16a34a', borderWidth:1, stack:'future' },
+      { label:'Poupança por outros meios/mês', data:extData, backgroundColor:'rgba(37,99,235,.45)',
+        borderColor:'#2563eb', borderWidth:1, stack:'future' },
+      { label:'Poupança realizada/mês (Média 12m)', data:savReal, type:'line',
+        borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.15)',
+        tension:0.3, pointRadius:3, fill:false, borderWidth:2, spanGaps:false },
     ]},
     options: { responsive:true,
-      plugins:{ legend:{position:'top'}, title:{display:true,text:'Poupança mensal: necessária vs realizada'} },
-      scales:{ y:{ ticks:{ callback:v=>'R$'+(Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v) } } } }
+      plugins:{ legend:{position:'top'}, title:{display:true,text:'Poupança necessária (futura) e realizada (histórica)'} },
+      scales:{ x:{ stacked:true }, y:{ stacked:false, ticks:{ callback:v=>'R$'+(Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v) } } } }
   });
 }
 
