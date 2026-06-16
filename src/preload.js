@@ -19,6 +19,7 @@ const api = {
   budgetSave:         (d)  => ipcRenderer.invoke('budget:save', d),
   budgetDelete:       (d)  => ipcRenderer.invoke('budget:delete', d),
   budgetActuals:      (d)  => ipcRenderer.invoke('budget:actuals', d),
+  budgetAvg3m:        (d)  => ipcRenderer.invoke('budget:avg3m', d),
   goalList:           ()   => ipcRenderer.invoke('goal:list'),
   goalSave:           (d)  => ipcRenderer.invoke('goal:save', d),
   goalDelete:         (d)  => ipcRenderer.invoke('goal:delete', d),
@@ -41,7 +42,8 @@ const api = {
   officeIsEncrypted: (buf)            => ipcRenderer.invoke('office:is-encrypted', buf),
   officeDecrypt:     (buf, password)  => ipcRenderer.invoke('office:decrypt', { buffer: buf, password }),
   getBalance:        (id)    => ipcRenderer.invoke('accounts:balance', id),
-  getBalanceBefore:  (opts)  => ipcRenderer.invoke('accounts:balance-before', opts),
+  getBalanceBefore:        (opts) => ipcRenderer.invoke('accounts:balance-before', opts),
+  getBalanceIncludingFuture: (id)  => ipcRenderer.invoke('accounts:balance-including-future', id),
 
   // transactions
   listTx:         (opts)  => ipcRenderer.invoke('tx:list', opts),
@@ -200,6 +202,13 @@ const api = {
 
   // inline edit
   inlineUpdate:   (opts)  => ipcRenderer.invoke('tx:inline-update', opts),
+
+  // sync mobile (Supabase)
+  syncLogin:      (email, password) => ipcRenderer.invoke('sync:login',   { email, password }),
+  syncLogout:     ()                => ipcRenderer.invoke('sync:logout'),
+  syncStatus:     ()                => ipcRenderer.invoke('sync:status'),
+  syncRunNow:     ()                => ipcRenderer.invoke('sync:run-now'),
+  onSyncCompleted:(cb)              => ipcRenderer.on('sync:completed', (_, data) => cb(data)),
 };
 
 contextBridge.exposeInMainWorld('ff', api);

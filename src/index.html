@@ -69,15 +69,10 @@ body{font-family:'Segoe UI',system-ui,sans-serif;font-size:var(--font-base);colo
 .page.active{display:block;}
 
 /* ── STATS ── */
-.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;}
-.stats-grid.cols-5{grid-template-columns:repeat(5,1fr);gap:8px;}
-.stats-grid.cols-5 .stat-card{padding:10px 12px;}
-.stats-grid.cols-5 .stat-lbl{font-size:10px;margin-bottom:3px;}
-.stats-grid.cols-5 .stat-val{font-size:16px;}
-.stats-grid.cols-5 .stat-val[style*="22px"]{font-size:18px!important;}
-.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 16px;}
-.stat-lbl{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;font-weight:600;}
-.stat-val{font-size:19px;font-weight:700;font-family:'DM Mono',monospace;}
+.stats-grid{display:flex;flex-wrap:nowrap;gap:8px;margin-bottom:16px;}
+.stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 12px;flex:1;min-width:0;}
+.stat-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stat-val{font-size:16px;font-weight:700;font-family:'DM Mono',monospace;white-space:nowrap;}
 .stat-val.green{color:var(--green);}
 .stat-val.red{color:var(--red);}
 .stat-val.accent{color:var(--accent);}
@@ -1895,6 +1890,54 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
       </div>
     </div>
 
+    <!-- Sync Mobile -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header">
+        <h3>📱 App Mobile</h3>
+        <div style="display:flex;gap:8px;margin-left:auto;align-items:center">
+          <span id="sync-status-badge" style="font-size:12px;color:var(--text3)"></span>
+          <button class="btn sm primary" id="sync-run-btn" onclick="syncRunNow()" style="display:none">🔄 Sincronizar agora</button>
+        </div>
+      </div>
+      <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+
+        <!-- Logado -->
+        <div id="sync-logged-in" style="display:none">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span style="font-size:13px;color:var(--text2)">Conectado como</span>
+            <code id="sync-user-email" style="font-size:12px;background:var(--bg3);padding:4px 10px;border-radius:5px"></code>
+            <button class="btn sm" onclick="syncDoLogout()" style="color:var(--red)">Desconectar</button>
+          </div>
+          <div id="sync-last-result" style="font-size:12px;color:var(--text3);margin-top:8px"></div>
+        </div>
+
+        <!-- Não logado -->
+        <div id="sync-logged-out">
+          <div style="font-size:13px;color:var(--text2);margin-bottom:12px">
+            Conecte sua conta do <strong>cruzeiroapp.com.br</strong> para sincronizar dados com o app mobile.
+          </div>
+          <div style="display:flex;flex-direction:column;gap:10px;max-width:320px">
+            <div class="field" style="margin:0">
+              <label class="lbl">Email</label>
+              <input class="inp" type="email" id="sync-email" placeholder="seu@email.com">
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Senha</label>
+              <input class="inp" type="password" id="sync-password" placeholder="Senha do site"
+                onkeydown="if(event.key==='Enter') syncDoLogin()">
+            </div>
+            <div id="sync-login-error" style="font-size:12px;color:var(--red);min-height:16px"></div>
+            <button class="btn primary" onclick="syncDoLogin()" id="sync-login-btn">Entrar e sincronizar</button>
+          </div>
+        </div>
+
+        <div class="info-box" style="font-size:12px">
+          💡 Use o mesmo email e senha da sua conta em <strong>cruzeiroapp.com.br</strong>.
+          Os dados são sincronizados automaticamente ao abrir e fechar o app.
+        </div>
+      </div>
+    </div>
+
     <!-- Backups -->
     <div class="tbl-card" style="margin-bottom:14px">
       <div class="tbl-header">
@@ -2164,7 +2207,7 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
       <div class="field-row">
         <div class="field">
           <label class="lbl">Tipo</label>
-          <select class="inp" id="acc-type">
+          <select class="inp" id="acc-type" onchange="accTypeChanged()">
             <option value="bank">Conta bancária</option>
             <option value="credit">Cartão de crédito</option>
             <option value="cash">Caixa / dinheiro</option>
@@ -2179,6 +2222,10 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
             <option value="EUR">EUR — Euro</option>
           </select>
         </div>
+      </div>
+      <div class="field" id="acc-limit-field" style="display:none">
+        <label class="lbl">Limite do cartão</label>
+        <input type="text" class="inp currency-input" id="acc-credit-limit" placeholder="Ex: 10.000,00">
       </div>
     </div>
     <div class="modal-footer">

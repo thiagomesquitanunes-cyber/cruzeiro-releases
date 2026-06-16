@@ -6,5 +6,7 @@
     "cdi": {},
     "ibov": {},
     "lastUpdate": null
-  }
+  },
+  "supabaseEmail": "thiagomesquitanunes@gmail.com",
+  "supabaseRefreshToken": "fuhlcj34ni7z"
 }

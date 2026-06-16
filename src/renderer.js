@@ -477,6 +477,7 @@ async function goPage(name) {
   if (name === 'reports')   { await initReportFilters(); onReportTypeChange(); }
   if (name === 'backup') {
     refreshBackup();
+    refreshSyncStatus();
     // Update license badge in settings
     ff.licenseStatus().then(s => {
       const el = G('settings-lic-status');
@@ -1242,7 +1243,15 @@ async function refreshAccount() {
   const balBRL  = toBRL(bal, acc?.currency);
   const income  = all.filter(t=>t.amount>0 && t.date<=today2).reduce((s,t)=>s+t.amount,0);
   const expense = all.filter(t=>t.amount<0 && t.date<=today2).reduce((s,t)=>s+t.amount,0);
-  G('acct-stats').innerHTML = `
+  let limitCard = '';
+  if (acc?.type === 'credit' && acc?.credit_limit > 0) {
+    const balFuture = await ff.getBalanceIncludingFuture(currentAccountId);
+    const utilized  = -balFuture;
+    const utilPct   = Math.min(100, Math.max(0, (utilized / acc.credit_limit) * 100));
+    const utilClr   = utilPct >= 90 ? 'var(--red)' : utilPct >= 70 ? 'var(--warn)' : 'var(--green)';
+    limitCard = `<div class="stat-card"><div class="stat-lbl">💳 Limite utilizado</div><div class="stat-val" style="color:${utilClr}">${fmtBRL(utilized)}</div><div class="stat-sub" style="color:${utilClr}">${utilPct.toFixed(1)}% de ${fmtBRL(acc.credit_limit)}</div></div>`;
+  }
+  G('acct-stats').innerHTML = limitCard + `
     <div class="stat-card"><div class="stat-lbl">Saldo atual</div><div class="stat-val ${bal>=0?'green':'red'}">${fmtBRL(bal)}</div>${acc?.currency!=='BRL'?`<div class="stat-sub">${fmtBRL(balBRL)} BRL</div>`:''}</div>
     <div class="stat-card"><div class="stat-lbl">Lançamentos</div><div class="stat-val accent">${all.length}</div></div>
     <div class="stat-card"><div class="stat-lbl">Total entradas</div><div class="stat-val green">${fmtBRL(income)}</div></div>
@@ -1904,18 +1913,31 @@ async function saveTransfer() {
 }
 
 // ══ ACCOUNTS CRUD ══
+function accTypeChanged() {
+  const lf = G('acc-limit-field');
+  if (lf) lf.style.display = G('acc-type')?.value === 'credit' ? '' : 'none';
+}
 function openNewAccount() {
   editingAccId = null;
   G('modal-account-title').textContent = 'Nova conta';
-  G('acc-name').value=''; G('acc-type').value='bank'; G('acc-currency').value='BRL';
+  G('acc-name').value = ''; G('acc-type').value = 'bank'; G('acc-currency').value = 'BRL';
+  if (G('acc-credit-limit')) G('acc-credit-limit').value = '';
+  accTypeChanged();
   openModal('modal-account');
 }
 async function saveAccount() {
-  const name=G('acc-name').value.trim(), type=G('acc-type').value, currency=G('acc-currency').value;
+  const name = G('acc-name').value.trim(), type = G('acc-type').value, currency = G('acc-currency').value;
   if (!name) { toast('Informe o nome'); return; }
-  if (editingAccId) await ff.updateAccount({ id:editingAccId, name, type, currency, hidden:0 });
-  else await ff.createAccount({ name, type, currency });
-  toast(editingAccId?'Conta atualizada':'Conta criada');
+  let credit_limit = 0;
+  const rawL = G('acc-credit-limit')?.value || '';
+  if (rawL) {
+    let v = rawL.trim();
+    if (v.includes(',')) v = v.replace(/\./g,'').replace(',','.');
+    credit_limit = parseFloat(v) || 0;
+  }
+  if (editingAccId) await ff.updateAccount({ id: editingAccId, name, type, currency, hidden: 0, credit_limit });
+  else await ff.createAccount({ name, type, currency, credit_limit });
+  toast(editingAccId ? 'Conta atualizada' : 'Conta criada');
   closeModal('modal-account');
   await loadAccounts();
   openManageAccounts();
@@ -1990,6 +2012,8 @@ async function editAccount(id) {
   G('acc-name').value = a.name;
   G('acc-type').value = a.type;
   G('acc-currency').value = a.currency;
+  if (G('acc-credit-limit')) G('acc-credit-limit').value = (a.credit_limit > 0) ? a.credit_limit.toLocaleString('pt-BR',{minimumFractionDigits:2}) : '';
+  accTypeChanged();
   closeModal('modal-manage-accounts');
   openModal('modal-account');
 }
@@ -3628,11 +3652,10 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px">
         <!-- Header -->
-        <div style="display:grid;grid-template-columns:36px 1fr 1fr auto;background:var(--bg4);border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:0;grid-column:1/-1">
-          <div style="padding:8px;border-right:1px solid var(--border)"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr auto;background:var(--bg4);border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:0;grid-column:1/-1">
           <div style="padding:8px 10px;border-right:1px solid var(--border2);background:var(--bg4)">🆕 Registro novo (do arquivo)</div>
           <div style="padding:8px 10px;background:#fffbeb">⚠️ Já existe no banco</div>
-          <div style="padding:8px 10px;min-width:120px;text-align:center">Ação</div>
+          <div style="padding:8px 10px;min-width:140px;text-align:center">Ação</div>
         </div>
         <!-- Rows -->
         <div id="dup-rows-container" style="grid-column:1/-1">
@@ -3643,11 +3666,7 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
           const amtStr = fmtBRL(r.amount);
           const exStr  = exList?.map(e => `"${esc(e.memo)}"`).join(', ') || '';
           const rowBg  = isDup ? 'background:#fffbeb' : '';
-          return `<div style="display:grid;grid-template-columns:36px 1fr 1fr auto;border-bottom:1px solid var(--border);${rowBg}" data-idx="${i}">
-            <!-- Checkbox column -->
-            <div style="padding:8px 6px;display:flex;align-items:center;border-right:1px solid var(--border)">
-              <input type="checkbox" class="dup-select" data-idx="${i}" ${!isDup?'checked disabled style="opacity:0.3"':'checked'}>
-            </div>
+          return `<div style="display:grid;grid-template-columns:1fr 1fr auto;border-bottom:1px solid var(--border);${rowBg}" data-idx="${i}">
             <!-- New record -->
             <div style="padding:7px 10px;border-right:1px solid var(--border2);font-size:12px">
               <div style="color:var(--text3);font-size:10px">${r.dateISO}</div>
@@ -3662,15 +3681,14 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
                    <div style="color:#b45309;font-family:'DM Mono',monospace;font-size:12px">${amtStr}</div>`
                 : '<span style="font-size:11px">—</span>'}
             </div>
-            <!-- Action toggle -->
-            <div style="padding:6px 8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:120px">
-              ${isDup ? `
-                <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:#16a34a;font-weight:500">
-                  <input type="radio" name="dup-action-${i}" value="import" class="dup-action" data-idx="${i}"> ✅ Importar
-                </label>
-                <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:#dc2626;font-weight:500">
-                  <input type="radio" name="dup-action-${i}" value="skip" class="dup-action" data-idx="${i}" checked> 🚫 Pular
-                </label>` : ''}
+            <!-- Ação: sempre visível; padrão importar (não-dup) ou pular (dup) -->
+            <div style="padding:6px 8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:140px">
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:#16a34a;font-weight:500">
+                <input type="radio" name="dup-action-${i}" value="import" ${!isDup?'checked':''}> ✅ Importar
+              </label>
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:#dc2626;font-weight:500">
+                <input type="radio" name="dup-action-${i}" value="skip" ${isDup?'checked':''}> 🚫 Pular
+              </label>
             </div>
           </div>`;
         }).join('')}
@@ -3696,12 +3714,11 @@ async function confirmDupAndImport() {
   const { finalRows, parcelInstallments, accountId, checkDailySaldo, dupMap } = preview._dup || {};
   if (!finalRows) return;
 
-  // Build list of rows to keep: non-dups always included, dups only if "import" radio selected
+  // Respeita o radio em todas as linhas
   const selectedRows = finalRows.filter((r, i) => {
-    if (!dupMap[i]) return true; // not a dup — always keep
     const radios = preview.querySelectorAll(`input[name="dup-action-${i}"]`);
     const action = [...radios].find(rb => rb.checked)?.value;
-    return action === 'import';
+    return action !== 'skip';
   });
 
   // Update pending import with only the selected (non-discarded) rows
@@ -5782,6 +5799,32 @@ function renderWizardAutoResult(config, rows) {
       <input class="inp" id="wizard-parser-name" type="text" placeholder="Ex: Nubank, Inter, Santander…" style="max-width:300px">
     </div>`;
 
+  // Show sign-confirm banner inside preview, before the user saves
+  G('custom-parser-body').innerHTML += `
+    <div id="sign-confirm-banner" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+      background:#fffbeb;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin-top:12px">
+      <span style="flex:1;min-width:200px">⚠️ <strong>Confirme os sinais dos valores</strong> — despesas devem ser negativas e receitas positivas. Os valores acima estão corretos?</span>
+      <button class="btn sm primary" id="sign-ok-btn">✅ Sim, estão corretos</button>
+      <button class="btn sm" id="sign-invert-btn">🔄 Não, inverter sinais</button>
+    </div>`;
+
+  // Wire sign buttons — store choice in _wizardSignInverted flag
+  window._wizardSignInverted = false;
+  G('sign-ok-btn').onclick = () => {
+    window._wizardSignInverted = false;
+    G('sign-confirm-banner').style.background = '#f0fdf4';
+    G('sign-confirm-banner').style.borderColor = '#16a34a';
+    G('sign-ok-btn').style.outline = '2px solid #16a34a';
+    G('sign-invert-btn').style.outline = '';
+  };
+  G('sign-invert-btn').onclick = () => {
+    window._wizardSignInverted = true;
+    G('sign-confirm-banner').style.background = '#fff7ed';
+    G('sign-confirm-banner').style.borderColor = '#f59e0b';
+    G('sign-invert-btn').style.outline = '2px solid #f59e0b';
+    G('sign-ok-btn').style.outline = '';
+  };
+
   G('custom-parser-footer').innerHTML = `
     <button class="btn" onclick="renderWizardManualConfig('${config.fileType?.toLowerCase()||'xlsx'}')">⚙ Ajustar manualmente</button>
     <button class="btn" onclick="closeModal('modal-custom-parser')">Cancelar</button>
@@ -5917,9 +5960,12 @@ async function saveWizardParser(config) {
   if (_wizardParsed.length > 0) {
     _bankParsed = _wizardParsed;
     renderBankPreview(_wizardParsed);
-    // Show sign confirmation banner — first import from a new custom source
-    // often has inverted signs (all expenses showing as income or vice-versa).
-    _showSignConfirmBanner(id, _wizardType);
+    // Apply sign inversion if user chose it in the preview
+    if (window._wizardSignInverted) {
+      await ff.bankParserSave({ ...parser, config: { ...config, invertSign: !config.invertSign } });
+      toast('🔄 Sinais invertidos e salvos');
+    }
+    window._wizardSignInverted = false;
   }
 }
 
@@ -8165,7 +8211,6 @@ let _budgets   = [];  // [{id, category, monthly_limit, alert_pct}]
 let _budgetMonth = '';
 
 async function refreshBudget() {
-  // Set default month to current
   const el = G('budget-month');
   if (!el) return;
   const now = new Date();
@@ -8174,11 +8219,13 @@ async function refreshBudget() {
   _budgetMonth = el.value || curM;
 
   _budgets = await ff.budgetList().catch(() => []);
-  const actuals = await ff.budgetActuals({ month: _budgetMonth }).catch(() => []);
+  const actuals  = await ff.budgetActuals({ month: _budgetMonth }).catch(() => []);
+  const avg3mArr = await ff.budgetAvg3m({ beforeMonth: _budgetMonth }).catch(() => []);
 
-  // Build a map: category → {spent, received}
-  const actMap = {};
+  const actMap  = {};
   actuals.forEach(a => { actMap[a.category] = { spent: a.spent||0, received: a.received||0 }; });
+  const avg3mMap = {};
+  avg3mArr.forEach(a => { avg3mMap[a.category] = a.avg_spent || 0; });
 
   // Summary cards
   const totalBudgeted = _budgets.reduce((s,b) => s + b.monthly_limit, 0);
@@ -8200,7 +8247,6 @@ async function refreshBudget() {
       </div>`).join('');
   }
 
-  // Budget rows
   const listEl = G('budget-list');
   if (!listEl) return;
 
@@ -8211,35 +8257,75 @@ async function refreshBudget() {
       <div style="font-size:13px;color:var(--text3)">Clique em "+ Nova meta" para começar</div>
     </div>`;
   } else {
+    // Sort state persisted in localStorage; default: progress desc
+    if (!window._budgetSort) {
+      try { window._budgetSort = JSON.parse(localStorage.getItem('crz-budget-sort') || 'null'); } catch(e) {}
+      if (!window._budgetSort) window._budgetSort = { col: 'pct', dir: 'desc' };
+    }
+    const { col, dir } = window._budgetSort;
+
+    const enriched = _budgets.map(b => ({
+      ...b,
+      actual: actMap[b.category]?.spent || 0,
+      pct:    b.monthly_limit > 0 ? (actMap[b.category]?.spent||0) / b.monthly_limit * 100 : 0,
+      avg3m:  avg3mMap[b.category] || 0,
+    }));
+
+    const sorted = [...enriched].sort((a, b) => {
+      let va, vb;
+      if      (col === 'category') { va = a.category.toLowerCase(); vb = b.category.toLowerCase(); }
+      else if (col === 'spent')    { va = a.actual;           vb = b.actual; }
+      else if (col === 'avg3m')    { va = a.avg3m;            vb = b.avg3m; }
+      else if (col === 'limit')    { va = a.monthly_limit;    vb = b.monthly_limit; }
+      else if (col === 'rem')      { va = a.monthly_limit-a.actual; vb = b.monthly_limit-b.actual; }
+      else                         { va = a.pct;              vb = b.pct; }
+      if (va < vb) return dir === 'asc' ? -1 : 1;
+      if (va > vb) return dir === 'asc' ?  1 : -1;
+      return 0;
+    });
+
+    const thR = (label, key) => {
+      const active = col === key;
+      const arrow  = active ? (dir === 'asc' ? ' ▼' : ' ▲') : '';
+      return `<th style="text-align:right;cursor:pointer;user-select:none${active?';color:var(--accent)':''}" onclick="budgetSortBy('${key}')">${label}${arrow}</th>`;
+    };
+    const thL = (label, key) => {
+      const active = col === key;
+      const arrow  = active ? (dir === 'asc' ? ' ▼' : ' ▲') : '';
+      return `<th style="cursor:pointer;user-select:none${active?';color:var(--accent)':''}" onclick="budgetSortBy('${key}')">${label}${arrow}</th>`;
+    };
+
     listEl.innerHTML = `<div class="tbl-card"><div class="tbl-outer">
       <table class="ledger"><thead><tr>
-        <th>Categoria</th>
-        <th class="right">Gasto</th>
-        <th class="right">Limite</th>
-        <th class="right">Saldo</th>
-        <th>Progresso</th>
+        ${thL('Categoria','category')}
+        ${thR('Gasto','spent')}
+        ${thR('Média 3m','avg3m')}
+        ${thR('Limite','limit')}
+        ${thR('Saldo','rem')}
+        ${thL('Progresso','pct')}
         <th class="center">Alerta</th>
         <th></th>
       </tr></thead><tbody>` +
-      _budgets.map((b, i) => {
-        const actual  = actMap[b.category]?.spent || 0;
-        const pct     = b.monthly_limit > 0 ? Math.min((actual / b.monthly_limit) * 100, 100) : 0;
-        const over    = actual > b.monthly_limit;
-        const warn    = pct >= (b.alert_pct || 80) && !over;
-        const rem     = b.monthly_limit - actual;
+      sorted.map((b, i) => {
+        const pct     = Math.min(b.pct, 100);
+        const over    = b.actual > b.monthly_limit;
+        const warn    = b.pct >= (b.alert_pct || 80) && !over;
+        const rem     = b.monthly_limit - b.actual;
         const barClr  = over ? 'var(--red)' : warn ? 'var(--warn)' : 'var(--green)';
         const remClr  = over ? 'var(--red)' : rem < b.monthly_limit * 0.2 ? 'var(--warn)' : 'var(--green)';
+        const avg3mClr = b.avg3m > b.monthly_limit ? 'var(--red)' : b.avg3m > b.monthly_limit * 0.8 ? 'var(--warn)' : 'var(--text3)';
         const stripe  = i % 2 === 1 ? 'background:var(--bg3)' : '';
         return `<tr style="${stripe}">
           <td style="font-size:13px;padding:10px 14px;font-weight:500">${esc(b.category)}</td>
-          <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:${over?'var(--red)':'var(--text)'}">${fmtBRL(actual)}</td>
+          <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:${over?'var(--red)':'var(--text)'}">${fmtBRL(b.actual)}</td>
+          <td class="right" style="font-family:'DM Mono',monospace;font-size:12px;padding:10px 14px;color:${avg3mClr}" title="Média dos últimos 3 meses">${b.avg3m > 0 ? fmtBRL(b.avg3m) : '—'}</td>
           <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:var(--text3)">${fmtBRL(b.monthly_limit)}</td>
           <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:${remClr}">${rem >= 0 ? fmtBRL(rem) : '−'+fmtBRL(-rem)}</td>
           <td style="padding:10px 14px;min-width:140px">
             <div style="background:var(--bg4);border-radius:99px;height:8px;overflow:hidden">
               <div style="height:100%;width:${pct.toFixed(1)}%;background:${barClr};border-radius:99px;transition:width .4s"></div>
             </div>
-            <div style="font-size:10px;color:var(--text3);margin-top:3px">${pct.toFixed(0)}%${over?' ⚠️ Acima do limite':''}</div>
+            <div style="font-size:10px;color:var(--text3);margin-top:3px">${b.pct.toFixed(0)}%${over?' ⚠️ Acima do limite':''}</div>
           </td>
           <td class="center" style="font-size:12px;color:var(--text3);padding:10px 8px">${b.alert_pct||80}%</td>
           <td class="center" style="padding:10px 8px;white-space:nowrap">
@@ -8251,7 +8337,7 @@ async function refreshBudget() {
       '</tbody></table></div></div>';
   }
 
-  // Show categories with spending but no budget (suggestion area)
+  // Show categories with spending but no budget
   const budgetedCats = new Set(_budgets.map(b => b.category));
   const unbudgeted = actuals
     .filter(a => !budgetedCats.has(a.category) && a.spent > 0 && a.category &&
@@ -8276,6 +8362,17 @@ async function refreshBudget() {
       uncatEl.innerHTML = '';
     }
   }
+}
+
+function budgetSortBy(col) {
+  if (!window._budgetSort) window._budgetSort = { col: 'pct', dir: 'desc' };
+  if (window._budgetSort.col === col) {
+    window._budgetSort.dir = window._budgetSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    window._budgetSort = { col, dir: col === 'category' ? 'asc' : 'desc' };
+  }
+  try { localStorage.setItem('crz-budget-sort', JSON.stringify(window._budgetSort)); } catch(e) {}
+  refreshBudget();
 }
 
 function openBudgetModal(id, prefillCat) {
@@ -8793,6 +8890,95 @@ async function commitInlineEdit(txId, field, value) {
 }
 
 // ══ BACKUP ══
+// ══════════════════════════════════════════════════════════════
+// SYNC MOBILE — funções de UI
+// ══════════════════════════════════════════════════════════════
+
+async function refreshSyncStatus() {
+  const status = await ff.syncStatus().catch(() => null);
+  if (!status) return;
+
+  const loggedIn  = G('sync-logged-in');
+  const loggedOut = G('sync-logged-out');
+  const badge     = G('sync-status-badge');
+  const runBtn    = G('sync-run-btn');
+  const emailEl   = G('sync-user-email');
+
+  if (status.loggedIn) {
+    if (loggedIn)  loggedIn.style.display  = '';
+    if (loggedOut) loggedOut.style.display = 'none';
+    if (badge)     { badge.textContent = '🟢 Conectado'; badge.style.color = 'var(--green)'; }
+    if (runBtn)    runBtn.style.display = '';
+    if (emailEl)   emailEl.textContent = status.email || '';
+  } else {
+    if (loggedIn)  loggedIn.style.display  = 'none';
+    if (loggedOut) loggedOut.style.display = '';
+    if (badge)     { badge.textContent = '⚪ Desconectado'; badge.style.color = 'var(--text3)'; }
+    if (runBtn)    runBtn.style.display = 'none';
+  }
+}
+
+async function syncDoLogin() {
+  const email    = G('sync-email')?.value?.trim();
+  const password = G('sync-password')?.value;
+  const errEl    = G('sync-login-error');
+  const btn      = G('sync-login-btn');
+
+  if (!email || !password) {
+    if (errEl) errEl.textContent = 'Preencha email e senha';
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Entrando…'; }
+  if (errEl) errEl.textContent = '';
+
+  const result = await ff.syncLogin(email, password).catch(e => ({ ok: false, error: e.message }));
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Entrar e sincronizar'; }
+
+  if (!result.ok) {
+    if (errEl) errEl.textContent = '❌ ' + (result.error || 'Erro ao conectar');
+    return;
+  }
+
+  if (G('sync-password')) G('sync-password').value = '';
+  toast('✅ Conectado! Sincronizando dados…');
+  refreshSyncStatus();
+
+  // Escuta o resultado do sync que foi disparado automaticamente após login
+  ff.onSyncCompleted(r => {
+    const el = G('sync-last-result');
+    if (el) el.textContent = r.ok
+      ? `Último sync: ${new Date(r.at).toLocaleString('pt-BR')} ✅`
+      : `Erro no sync: ${r.error}`;
+  });
+}
+
+async function syncDoLogout() {
+  await ff.syncLogout().catch(() => {});
+  toast('Desconectado do app mobile');
+  refreshSyncStatus();
+}
+
+async function syncRunNow() {
+  const btn = G('sync-run-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '🔄 Sincronizando…'; }
+
+  const result = await ff.syncRunNow().catch(e => ({ ok: false, error: e.message }));
+
+  if (btn) { btn.disabled = false; btn.textContent = '🔄 Sincronizar agora'; }
+
+  if (result.ok) {
+    toast('✅ Sincronização concluída');
+    const el = G('sync-last-result');
+    if (el) el.textContent = `Último sync: ${new Date(result.at).toLocaleString('pt-BR')} ✅`;
+  } else if (result.skipped) {
+    toast('⚠️ Faça login para sincronizar');
+  } else {
+    toast('❌ Erro na sincronização: ' + result.error);
+  }
+}
+
 async function refreshBackup() {
   // Load settings state
   const settings = await ff.settingsGet().catch(()=>({}));

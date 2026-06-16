@@ -3,6 +3,14 @@ const path = require('path');
 const fs   = require('fs');
 const crypto = require('crypto');
 
+// ── SYNC MOBILE (Supabase) ──
+const sb       = require('./sync/supabase-client');
+const syncPush = require('./sync/sync-push');
+const syncPull = require('./sync/sync-pull');
+
+// Estado do sync (em memória)
+let _syncRunning = false;
+
 // Settings always stored in original userData (not redirected)
 function getSettingsPath() {
   const base = app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..');
@@ -449,6 +457,8 @@ async function initDB() {
     asset_id INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
     month TEXT NOT NULL, installment REAL NOT NULL, paid INTEGER NOT NULL DEFAULT 0,
     UNIQUE(asset_id, month))`); } catch(e) {}
+  // v4.5.9: credit limit
+  try { db.run('ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0'); } catch(e) {}
   save();
 }
 
@@ -503,15 +513,14 @@ function run(sql, params=[]) {
 
 // Accounts
 ipcMain.handle('accounts:list', () => all('SELECT * FROM accounts ORDER BY sort_order, name'));
-ipcMain.handle('accounts:create', (_, { name, type, currency }) => {
-  // Assign sort_order = max + 1 within same type group
+ipcMain.handle('accounts:create', (_, { name, type, currency, credit_limit }) => {
   const maxOrder = first('SELECT MAX(sort_order) as m FROM accounts WHERE type=?', [type])?.m || 0;
-  const id = run('INSERT INTO accounts (name,type,currency,sort_order) VALUES (?,?,?,?)', [name, type, currency||'BRL', maxOrder+1]);
+  const id = run('INSERT INTO accounts (name,type,currency,sort_order,credit_limit) VALUES (?,?,?,?,?)', [name, type, currency||'BRL', maxOrder+1, credit_limit||0]);
   save();
   return first('SELECT * FROM accounts WHERE id=?', [id]);
 });
-ipcMain.handle('accounts:update', (_, { id, name, type, currency, hidden }) => {
-  run('UPDATE accounts SET name=?,type=?,currency=?,hidden=? WHERE id=?', [name, type, currency, hidden?1:0, id]);
+ipcMain.handle('accounts:update', (_, { id, name, type, currency, hidden, credit_limit }) => {
+  run('UPDATE accounts SET name=?,type=?,currency=?,hidden=?,credit_limit=? WHERE id=?', [name, type, currency, hidden?1:0, credit_limit||0, id]);
   save();
   return first('SELECT * FROM accounts WHERE id=?', [id]);
 });
@@ -529,6 +538,10 @@ ipcMain.handle('accounts:reorder', (_, orderedIds) => {
 ipcMain.handle('accounts:balance', (_, id) => {
   const today = new Date().toISOString().slice(0,10);
   return (first('SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND date <= ?', [id, today])?.bal || 0);
+});
+ipcMain.handle('accounts:balance-including-future', (_, id) => {
+  const row = first('SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=?', [id]);
+  return row?.bal ?? 0;
 });
 ipcMain.handle('accounts:balance-before', (_, { accountId, beforeDate }) => {
   return (first('SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND date < ?', [accountId, beforeDate])?.bal || 0);
@@ -882,6 +895,19 @@ ipcMain.handle('budget:actuals', (_, { month }) => {
     FROM transactions
     WHERE date>=? AND date<=? AND transfer_id IS NULL
     GROUP BY category`, [from, to]);
+});
+
+// Budget: 3-month average spending per category
+ipcMain.handle('budget:avg3m', (_, { beforeMonth }) => {
+  const d = new Date(beforeMonth + '-01');
+  const months = [];
+  for (let i = 1; i <= 3; i++) {
+    const m = new Date(d.getFullYear(), d.getMonth() - i, 1);
+    months.push(`${m.getFullYear()}-${String(m.getMonth()+1).padStart(2,'0')}`);
+  }
+  return all(`SELECT category, SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END)/3.0 as avg_spent
+    FROM transactions WHERE substr(date,1,7) IN (${months.map(()=>'?').join(',')})
+    AND transfer_id IS NULL AND amount<0 GROUP BY category`, months);
 });
 
 // Budget: monthly budgeted vs actual by category
@@ -1922,6 +1948,22 @@ app.whenReady().then(async () => {
     setImmediate(() => {
       try { const recs = all('SELECT * FROM recurring WHERE active=1'); recs.forEach(rec => syncRecurringTxns(rec)); save(); } catch(e) { console.error('syncRecurring startup:', e); }
     });
+    // Restaura sessão Supabase salva (refresh token) antes de rodar o sync
+    setImmediate(async () => {
+      const s = loadSettings();
+      if (s.supabaseRefreshToken) {
+        try {
+          await sb.refreshSession(s.supabaseRefreshToken);
+          console.log('[sync] sessão restaurada para', s.supabaseEmail);
+        } catch(e) {
+          console.log('[sync] sessão expirada, login necessário:', e.message);
+          const s2 = loadSettings();
+          delete s2.supabaseRefreshToken;
+          saveSettings(s2);
+        }
+      }
+      runMobileSync('startup').catch(() => {});
+    });
   }
 
   const settings = loadSettings();
@@ -1934,6 +1976,14 @@ app.whenReady().then(async () => {
     setupAutoUpdater();
   }
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length===0) createWindow(); });
+});
+
+// Sync final ao fechar o app (garante que últimas alterações cheguem ao mobile)
+app.on('before-quit', async (e) => {
+  if (!sb.isLoggedIn() || _syncRunning) return;
+  e.preventDefault();
+  try { await runMobileSync('quit'); } catch (err) { console.error('[sync] before-quit:', err); }
+  app.quit();
 });
 app.on('window-all-closed', () => { console.log('[window-all-closed] platform=', process.platform, '_loggingIn=', _loggingIn); if (process.platform!=='darwin' && !_loggingIn) app.quit(); });
 
@@ -4879,3 +4929,88 @@ ipcMain.handle('inv:bulk-import-history', (_, { assets }) => {
   save();
   return { createdAssets, updatedAssets, createdTx, autoPurchases };
 });
+
+// ══════════════════════════════════════════════════════════════
+// SYNC MOBILE (Supabase)
+// ══════════════════════════════════════════════════════════════
+
+// Função central de sync — pull primeiro (importa entradas do mobile),
+// depois push (publica snapshot atualizado com as novas transações)
+async function runMobileSync(trigger = 'manual') {
+  if (!sb.isLoggedIn()) {
+    console.log(`[sync] pulado (trigger: ${trigger}) — sem sessão Supabase`);
+    return { skipped: 'not_logged_in' };
+  }
+  if (_syncRunning)     return { skipped: 'already_running' };
+
+  _syncRunning = true;
+  console.log(`[sync] iniciando (trigger: ${trigger})`);
+
+  try {
+    const userId = sb.getUserId();
+    const pull   = await syncPull.pullAll(all, run, first, save, userId);
+    const push   = await syncPush.pushAll(all, userId);
+    const result = { ok: true, trigger, pull, push, at: new Date().toISOString() };
+    console.log('[sync] concluído:', result);
+
+    // Notifica o renderer para recarregar dados (se janela aberta)
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('sync:completed', result);
+    }
+
+    return result;
+  } catch (e) {
+    console.error('[sync] erro geral:', e.message);
+    return { ok: false, error: e.message };
+  } finally {
+    _syncRunning = false;
+  }
+}
+
+// ── IPC: Login Supabase ──────────────────────────────────────
+ipcMain.handle('sync:login', async (_, { email, password }) => {
+  try {
+    const result = await sb.login(email, password);
+    // Persiste email e refresh token para restaurar sessão na próxima abertura
+    const s = loadSettings();
+    s.supabaseEmail        = result.user.email;
+    s.supabaseRefreshToken = result.refresh_token;
+    saveSettings(s);
+    // Dispara sync imediato após login
+    runMobileSync('login').catch(() => {});
+    return { ok: true, email: result.user.email };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// ── IPC: Logout Supabase ─────────────────────────────────────
+ipcMain.handle('sync:logout', async () => {
+  try {
+    await sb.logout();
+    const s = loadSettings();
+    delete s.supabaseEmail;
+    delete s.supabaseRefreshToken;
+    saveSettings(s);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// ── IPC: Status da sessão e último sync ──────────────────────
+ipcMain.handle('sync:status', () => {
+  const s = loadSettings();
+  return {
+    loggedIn:     sb.isLoggedIn(),
+    email:        s.supabaseEmail || null,
+    syncRunning:  _syncRunning,
+  };
+});
+
+// ── IPC: Disparar sync manual (botão na UI) ──────────────────
+ipcMain.handle('sync:run-now', async () => {
+  if (!sb.isLoggedIn()) return { ok: false, error: 'Faça login para sincronizar' };
+  return runMobileSync('manual');
+});
+
