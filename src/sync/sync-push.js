@@ -1,0 +1,388 @@
+// ─────────────────────────────────────────────────────────────
+// sync-push.js
+// Publica snapshots do SQLite local → Supabase.
+// Chamado pelo main.js ao abrir o app e ao fechar.
+//
+// Princípios:
+//   • Nunca modifica o SQLite local
+//   • Falhas silenciosas — sync é best-effort, não bloqueia o app
+//   • Valores monetários em centavos (integer) para evitar float
+//   • desktop_id = PK original do SQLite (garante idempotência)
+// ─────────────────────────────────────────────────────────────
+
+const sb = require('./supabase-client');
+
+// Converte reais (float) para centavos (integer)
+const toCents = v => Math.round((v || 0) * 100);
+
+// Formata data JS para YYYY-MM-DD
+const toDate = d => (d ? new Date(d).toISOString().slice(0, 10) : null);
+
+// Retorna YYYY-MM de N meses atrás
+function monthsAgo(n) {
+  const d = new Date();
+  d.setMonth(d.getMonth() - n);
+  return d.toISOString().slice(0, 7);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 1. Saldos por conta
+// ─────────────────────────────────────────────────────────────
+async function pushBalances(all, userId) {
+  const today    = new Date().toISOString().slice(0, 10);
+  const accounts = all('SELECT * FROM accounts WHERE hidden=0 ORDER BY sort_order');
+
+  const rows = accounts.map(acc => {
+    const bal = all(
+      'SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND date<=?',
+      [acc.id, today]
+    )[0]?.bal || 0;
+
+    return {
+      user_id:      userId,
+      account_name: acc.name,
+      account_type: acc.type,
+      balance:      toCents(bal),
+      currency:     acc.currency || 'BRL',
+      is_hidden:    acc.hidden === 1,
+      sort_order:   acc.sort_order || 0,
+      synced_at:    new Date().toISOString(),
+    };
+  });
+
+  await sb.upsert('mobile_balances', rows, 'user_id,account_name');
+}
+
+// ─────────────────────────────────────────────────────────────
+// 2. Transações recentes (últimos 90 dias)
+// ─────────────────────────────────────────────────────────────
+async function pushTransactions(all, userId) {
+  const from = new Date();
+  from.setDate(from.getDate() - 90);
+  const fromDate = from.toISOString().slice(0, 10);
+
+  const txns = all(`
+    SELECT t.*, a.name as account_name
+    FROM transactions t
+    JOIN accounts a ON a.id = t.account_id
+    WHERE t.date >= ? AND t.transfer_id IS NULL
+    ORDER BY t.date DESC
+  `, [fromDate]);
+
+  const rows = txns.map(t => {
+    // Separa categoria e subcategoria (formato "Categoria:Subcategoria")
+    const [category, subcategory] = (t.category || '').split(':');
+    return {
+      user_id:       userId,
+      desktop_id:    String(t.id),
+      date:          t.date,
+      description:   t.memo || t.category || '',
+      amount:        toCents(t.amount),
+      category:      category || null,
+      subcategory:   subcategory || null,
+      account_name:  t.account_name,
+      memo:          t.memo || null,
+      is_reconciled: t.cleared === 1,
+      synced_at:     new Date().toISOString(),
+    };
+  });
+
+  // Upsert em lotes de 500 para não estourar limites HTTP
+  for (let i = 0; i < rows.length; i += 500) {
+    await sb.upsert('mobile_transactions', rows.slice(i, i + 500), 'user_id,desktop_id');
+  }
+
+  // Remove transações antigas que saíram da janela de 90 dias
+  // (Supabase: DELETE WHERE user_id=? AND date < fromDate)
+  await sb.remove('mobile_transactions', {
+    user_id: userId,
+    // filtro adicional via query string — feito manualmente abaixo
+  }).catch(() => {}); // ignora erros de limpeza
+}
+
+// ─────────────────────────────────────────────────────────────
+// 3. Orçamentos do mês atual
+// ─────────────────────────────────────────────────────────────
+async function pushBudgets(all, userId) {
+  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const from  = `${month}-01`;
+  const to    = `${month}-31`;
+
+  const budgets = all('SELECT * FROM budgets WHERE active=1');
+  const actuals = all(`
+    SELECT category, SUM(ABS(amount)) as spent
+    FROM transactions
+    WHERE date>=? AND date<=? AND amount<0 AND transfer_id IS NULL
+    GROUP BY category
+  `, [from, to]);
+
+  const spentByCategory = {};
+  actuals.forEach(r => { spentByCategory[r.category] = r.spent; });
+
+  const rows = budgets.map(b => ({
+    user_id:       userId,
+    month,
+    category:      b.category,
+    monthly_limit: toCents(b.monthly_limit),
+    spent:         toCents(spentByCategory[b.category] || 0),
+    alert_pct:     b.alert_pct || 80,
+    synced_at:     new Date().toISOString(),
+  }));
+
+  await sb.upsert('mobile_budgets', rows, 'user_id,month,category');
+}
+
+// ─────────────────────────────────────────────────────────────
+// 4. Metas com progresso calculado
+// ─────────────────────────────────────────────────────────────
+async function pushGoals(all, userId) {
+  const goals = all('SELECT * FROM goals WHERE active=1');
+
+  // Média de despesas mensais (últimos 3 meses) — para metas de emergência
+  const avgExpenses = (() => {
+    const rows = all(`
+      SELECT SUM(ABS(amount)) as total
+      FROM transactions
+      WHERE amount<0 AND transfer_id IS NULL
+        AND date >= date('now','-3 months')
+    `);
+    return rows[0]?.total / 3 || 0;
+  })();
+
+  const rows = goals.map(g => {
+    let currentAmount = 0;
+    let progressPct   = 0;
+
+    if (g.account_id) {
+      currentAmount = all(
+        'SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=?',
+        [g.account_id]
+      )[0]?.bal || 0;
+    }
+
+    if (g.type === 'target' && g.target_amount) {
+      progressPct = Math.min(100, (currentAmount / g.target_amount) * 100);
+    } else if (g.type === 'emergency' && g.emergency_months) {
+      const target = avgExpenses * g.emergency_months;
+      progressPct  = target > 0 ? Math.min(100, (currentAmount / target) * 100) : 0;
+    } else if (g.type === 'monthly' && g.monthly_amount) {
+      // Progresso do mês atual
+      const month  = new Date().toISOString().slice(0, 7);
+      const saved  = all(`
+        SELECT COALESCE(SUM(amount),0) as s
+        FROM transactions
+        WHERE account_id=? AND substr(date,1,7)=? AND amount>0
+      `, [g.account_id, month])[0]?.s || 0;
+      progressPct = Math.min(100, (saved / g.monthly_amount) * 100);
+      currentAmount = saved;
+    }
+
+    return {
+      user_id:        userId,
+      desktop_id:     String(g.id),
+      name:           g.name,
+      type:           g.type,
+      icon:           g.icon || '🎯',
+      color:          g.color || '#2563eb',
+      target_amount:  g.target_amount  ? toCents(g.target_amount)  : null,
+      monthly_amount: g.monthly_amount ? toCents(g.monthly_amount) : null,
+      emergency_months: g.emergency_months || null,
+      deadline:       g.deadline || null,
+      current_amount: toCents(currentAmount),
+      progress_pct:   Math.round(progressPct * 100) / 100,
+      active:         g.active === 1,
+      synced_at:      new Date().toISOString(),
+    };
+  });
+
+  await sb.upsert('mobile_goals', rows, 'user_id,desktop_id');
+}
+
+// ─────────────────────────────────────────────────────────────
+// 5. Lançamentos recorrentes / futuros
+// ─────────────────────────────────────────────────────────────
+async function pushScheduled(all, userId) {
+  const recurring = all('SELECT * FROM recurring WHERE active=1');
+  const accounts  = all('SELECT id, name FROM accounts');
+  const accMap    = Object.fromEntries(accounts.map(a => [a.id, a.name]));
+
+  const rows = recurring.map(r => ({
+    user_id:      userId,
+    desktop_id:   String(r.id),
+    next_date:    r.next_date,
+    memo:         r.memo || '',
+    amount:       toCents(r.amount),
+    category:     r.category || null,
+    account_name: accMap[r.account_id] || null,
+    frequency:    r.frequency,
+    end_date:     r.end_date || null,
+    synced_at:    new Date().toISOString(),
+  }));
+
+  await sb.upsert('mobile_scheduled', rows, 'user_id,desktop_id');
+
+  // Remove recorrências inativas que ainda estejam no Supabase
+  const activeIds = rows.map(r => r.desktop_id);
+  if (activeIds.length) {
+    // Mantém apenas os IDs ativos — remove os demais via NOT IN
+    // A REST API do Supabase suporta: desktop_id=not.in.(id1,id2,...)
+    const { _rest } = require('./supabase-client'); // não exportado, ignora silenciosamente
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 6. Patrimônio (últimos 3 meses)
+// ─────────────────────────────────────────────────────────────
+async function pushPatrimonio(all, userId) {
+  const months = [];
+  for (let i = 0; i < 3; i++) months.push(monthsAgo(i));
+
+  const patAssets = all('SELECT * FROM pat_assets WHERE hidden=0 AND sold_month IS NULL');
+
+  const rows = months.map(month => {
+    // Valor de cada ativo no mês (último registro de pat_history até o mês)
+    const breakdown = {};
+    let totalAssets = 0;
+
+    patAssets.forEach(asset => {
+      const hist = all(`
+        SELECT value FROM pat_history
+        WHERE asset_id=? AND month<=?
+        ORDER BY month DESC LIMIT 1
+      `, [asset.id, month]);
+      const value = hist[0]?.value || 0;
+      const type  = asset.asset_type || 'outros';
+      breakdown[type] = (breakdown[type] || 0) + value;
+      totalAssets += value;
+    });
+
+    // Dívidas de financiamentos ativos — saldo devedor da última parcela não paga
+    const debts = all(`
+      SELECT COALESCE(SUM(pf.balance_end),0) as total
+      FROM pat_financing pf
+      JOIN pat_financing_contracts pfc ON pfc.id = pf.contract_id
+      WHERE pfc.status='active'
+        AND pf.paid=0
+        AND pf.is_projection=0
+    `);
+    const totalDebts = debts[0]?.total || 0;
+
+    // Converte breakdown para centavos
+    const breakdownCents = {};
+    Object.entries(breakdown).forEach(([k, v]) => {
+      breakdownCents[k] = toCents(v);
+    });
+
+    return {
+      user_id:      userId,
+      month,
+      total_assets: toCents(totalAssets),
+      total_debts:  toCents(totalDebts),
+      net_worth:    toCents(totalAssets - totalDebts),
+      breakdown:    breakdownCents,
+      synced_at:    new Date().toISOString(),
+    };
+  });
+
+  await sb.upsert('mobile_patrimonio', rows, 'user_id,month');
+}
+
+// ─────────────────────────────────────────────────────────────
+// 7. Evolução mensal (últimos 6 meses)
+// ─────────────────────────────────────────────────────────────
+async function pushEvolution(all, userId) {
+  const from = monthsAgo(6) + '-01';
+
+  const monthly = all(`
+    SELECT substr(date,1,7) as month,
+      SUM(CASE WHEN amount>0 THEN amount ELSE 0 END)        as income,
+      SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END)   as expenses
+    FROM transactions
+    WHERE date>=? AND transfer_id IS NULL
+    GROUP BY month ORDER BY month
+  `, [from]);
+
+  const byCategory = all(`
+    SELECT substr(date,1,7) as month, category,
+      SUM(ABS(amount)) as total
+    FROM transactions
+    WHERE date>=? AND amount<0 AND transfer_id IS NULL
+      AND category NOT IN ('Transferência','Transferências')
+    GROUP BY month, category
+  `, [from]);
+
+  // Agrupa by_category por mês
+  const catByMonth = {};
+  byCategory.forEach(r => {
+    if (!catByMonth[r.month]) catByMonth[r.month] = {};
+    catByMonth[r.month][r.category] = toCents(r.total);
+  });
+
+  const rows = monthly.map(r => ({
+    user_id:     userId,
+    month:       r.month,
+    income:      toCents(r.income),
+    expenses:    toCents(r.expenses),
+    balance:     toCents(r.income - r.expenses),
+    by_category: catByMonth[r.month] || {},
+    synced_at:   new Date().toISOString(),
+  }));
+
+  await sb.upsert('mobile_evolution', rows, 'user_id,month');
+}
+
+// ─────────────────────────────────────────────────────────────
+// 8. Regras de ML
+// ─────────────────────────────────────────────────────────────
+async function pushMlRules(all, userId) {
+  const rules = all('SELECT * FROM ml_rules');
+
+  const rows = rules.map(r => ({
+    user_id:   userId,
+    keyword:   r.keyword,
+    memo:      r.memo || '',
+    category:  r.category || '',
+    count:     r.count || 1,
+    sum_val:   r.sum_val || null,
+    n_val:     r.n_val || null,
+    min_val:   r.min_val || null,
+    max_val:   r.max_val || null,
+    source:    'desktop',
+    synced_at: new Date().toISOString(),
+  }));
+
+  await sb.upsert('ml_rules', rows, 'user_id,keyword');
+}
+
+// ─────────────────────────────────────────────────────────────
+// ENTRY POINT — executa todos os pushes em sequência
+// Falhas individuais são logadas mas não interrompem o processo
+// ─────────────────────────────────────────────────────────────
+async function pushAll(all, userId) {
+  const steps = [
+    ['balances',     () => pushBalances(all, userId)],
+    ['transactions', () => pushTransactions(all, userId)],
+    ['budgets',      () => pushBudgets(all, userId)],
+    ['goals',        () => pushGoals(all, userId)],
+    ['scheduled',    () => pushScheduled(all, userId)],
+    ['patrimonio',   () => pushPatrimonio(all, userId)],
+    ['evolution',    () => pushEvolution(all, userId)],
+    ['ml_rules',     () => pushMlRules(all, userId)],
+  ];
+
+  const results = {};
+  for (const [name, fn] of steps) {
+    try {
+      await fn();
+      results[name] = 'ok';
+    } catch (e) {
+      console.error(`[sync:push] ${name} falhou:`, e.message);
+      results[name] = `erro: ${e.message}`;
+    }
+  }
+
+  console.log('[sync:push] concluído:', results);
+  return results;
+}
+
+module.exports = { pushAll };

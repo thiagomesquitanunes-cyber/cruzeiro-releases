@@ -1,0 +1,99 @@
+{
+  "name": "cruzeiro",
+  "version": "4.9.4",
+  "description": "Gest\u00e3o financeira pessoal",
+  "author": "Cruzeiro",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "node build.js",
+    "publish": "node publish.js",
+    "clean-data": "node limpar_dados.js",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:all": "electron-builder --win --mac",
+    "publish:win": "electron-builder --win --publish always",
+    "publish:mac": "electron-builder --mac --publish always"
+  },
+  "devDependencies": {
+    "electron": "^36.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "electron-updater": "^6.1.7",
+    "officecrypto-tool": "^0.0.19",
+    "sql.js": "^1.10.3"
+  },
+  "build": {
+    "appId": "com.cruzeiro.app",
+    "productName": "Cruzeiro",
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Cruzeiro-Setup-${version}.exe"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "thiagomesquitanunes-cyber",
+      "repo": "cruzeiro-releases",
+      "releaseType": "release"
+    },
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/",
+        "to": "assets/",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/sql.js/**/*"
+    ],
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Cruzeiro",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "deleteAppDataOnUninstall": false
+    },
+    "icon": "assets/icon.ico",
+    "mac": {
+      "icon": "assets/icon.icns",
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.finance",
+      "artifactName": "Cruzeiro-${version}-${arch}-mac.zip"
+    }
+  }
+}
