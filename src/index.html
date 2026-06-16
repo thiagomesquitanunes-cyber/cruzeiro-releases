@@ -360,6 +360,7 @@ select.inp option{background:var(--bg2);}
       <input type="text" id="search-input" placeholder="Pesquisar nesta conta…" oninput="onSearch(this.value)">
     </div>
     <button class="btn sm" id="undo-btn" onclick="doUndo()" title="Desfazer (Ctrl+Z)" style="display:none">↩ Desfazer</button>
+    <button class="btn sm" onclick="openAiEntry()" title="Lançar por texto ou voz" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;border:none">✨ Lançar com IA</button>
     <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
     <button class="btn sm" onclick="openTransferModal()">⇄ Transferência</button>
     <button class="btn sm primary" onclick="goPage('import')">📥 Importar</button>
@@ -388,6 +389,18 @@ select.inp option{background:var(--bg2);}
     </div>
 
     <div class="stats-grid" id="overview-stats"></div>
+
+    <!-- AI Insights -->
+    <div class="tbl-card" id="ai-insights-card" style="margin-bottom:14px;display:none">
+      <div class="tbl-header">
+        <h3>💡 Insights</h3>
+        <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+          <span id="ai-insights-status" style="font-size:11px;color:var(--text3)"></span>
+          <button class="btn xs" id="ai-insights-refresh" onclick="generateInsights(true)" title="Gerar insights com IA">✨ Gerar</button>
+        </div>
+      </div>
+      <div id="ai-insights-body" style="padding:12px 16px"></div>
+    </div>
 
     <!-- Category filter panel -->
     <div class="tbl-card" style="padding:14px 18px;margin-bottom:14px">
@@ -450,6 +463,33 @@ select.inp option{background:var(--bg2);}
     </div>
   </div>
 
+  <!-- PROJEÇÃO DE FLUXO DE CAIXA -->
+  <div id="page-projecao" class="page">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
+      <label class="lbl" style="margin:0">Horizonte:</label>
+      <select class="inp" id="proj-horizon" onchange="refreshProjecao()" style="width:auto">
+        <option value="3">3 meses</option>
+        <option value="6" selected>6 meses</option>
+        <option value="12">12 meses</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+        <input type="checkbox" id="proj-include-credit" onchange="refreshProjecao()"> Incluir cartões de crédito
+      </label>
+      <span style="flex:1"></span>
+      <span id="proj-updated" style="font-size:11px;color:var(--text3)"></span>
+    </div>
+
+    <div id="proj-alert"></div>
+    <div class="stats-grid" id="proj-summary-cards" style="margin-bottom:16px"></div>
+
+    <div class="tbl-card" style="margin-bottom:16px">
+      <div style="padding:14px 16px 4px"><strong style="font-size:14px">Saldo projetado</strong></div>
+      <div style="padding:8px 16px 16px"><canvas id="proj-chart" height="90"></canvas></div>
+    </div>
+
+    <div id="proj-monthly"></div>
+  </div>
+
   <!-- ACCOUNT -->
   <div id="page-account" class="page">
     <div class="stats-grid" id="acct-stats"></div>
@@ -480,7 +520,8 @@ select.inp option{background:var(--bg2);}
             <option value="category">Por categoria</option>
             <option value="amount">Por valor</option>
           </select>
-          <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
+          <button class="btn sm" onclick="openAiEntry()" title="Lançar por texto ou voz" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;border:none">✨ Lançar com IA</button>
+    <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
         </div>
       </div>
       <!-- Table view -->
@@ -1073,6 +1114,36 @@ select.inp option{background:var(--bg2);}
   </div>
 
   <!-- Modal: novo orçamento -->
+  <!-- AI Entry modal -->
+  <div class="overlay" id="modal-ai-entry" style="z-index:8200">
+    <div class="modal" style="max-width:560px">
+      <div class="modal-header">
+        <h3>✨ Lançar com IA</h3>
+        <button class="btn-icon" onclick="closeModal('modal-ai-entry')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:10px">
+          Descreva em linguagem natural, por texto ou voz. Ex.: <em>"almoço 45 reais ontem no cartão Nubank e Uber 22 hoje"</em>
+        </div>
+        <div style="position:relative">
+          <textarea class="inp" id="ai-entry-text" rows="3" placeholder="Digite ou use o microfone..." style="width:100%;resize:vertical;padding-right:48px"></textarea>
+          <button id="ai-mic-btn" onclick="toggleAiMic()" title="Ditar por voz"
+            style="position:absolute;right:8px;top:8px;width:36px;height:36px;border-radius:50%;border:1px solid var(--border2);background:var(--bg3);cursor:pointer;font-size:16px">🎤</button>
+        </div>
+        <div id="ai-mic-status" style="font-size:12px;color:var(--text3);min-height:16px;margin-top:4px"></div>
+        <div style="margin-top:10px">
+          <button class="btn primary" id="ai-parse-btn" onclick="runAiParse()">Interpretar</button>
+          <span id="ai-entry-msg" style="font-size:12px;margin-left:10px"></span>
+        </div>
+        <div id="ai-entry-preview" style="margin-top:14px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-ai-entry')">Cancelar</button>
+        <button class="btn primary" id="ai-confirm-btn" onclick="confirmAiEntries()" style="display:none">✓ Salvar lançamentos</button>
+      </div>
+    </div>
+  </div>
+
   <div class="overlay" id="modal-budget" style="z-index:8000">
     <div class="modal" style="max-width:420px;width:96%">
       <div class="modal-hdr">
@@ -1098,6 +1169,13 @@ select.inp option{background:var(--bg2);}
           <label class="lbl">Alerta ao atingir (%)</label>
           <input class="inp" id="budget-alert" type="number" value="80" min="1" max="100">
           <div style="font-size:11px;color:var(--text3);margin-top:3px">Você será notificado por cor quando atingir este % do limite</div>
+        </div>
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="budget-rollover">
+            <span>Acumular saldo (rollover)</span>
+          </label>
+          <div style="font-size:11px;color:var(--text3);margin-top:3px">O que sobrar (ou faltar) de um mês soma ao limite do mês seguinte, estilo envelope</div>
         </div>
       </div>
       <div class="modal-footer">
@@ -1856,6 +1934,25 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
           <button class="btn primary" onclick="savePassword()">Salvar senha</button>
           <button class="btn" id="settings-remove-pw-btn" onclick="removePassword()" style="display:none;margin-left:8px;color:var(--red)">Remover senha</button>
         </div>
+      </div>
+    </div>
+
+    <!-- AI / Assistente -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header">
+        <h3>🤖 Assistente IA</h3>
+        <span id="settings-ai-status" style="font-size:12px;color:var(--text3);margin-left:auto;align-self:center"></span>
+      </div>
+      <div style="padding:12px 16px">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:10px">
+          Cole sua própria chave da API Anthropic para ativar a entrada de lançamentos por linguagem natural (texto ou voz). A chave fica salva apenas neste computador e nunca é enviada a terceiros além da própria Anthropic. Obtenha em <strong>console.anthropic.com</strong>.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input class="inp" id="settings-ai-key" type="password" placeholder="sk-ant-..." style="flex:1;min-width:240px;font-family:'DM Mono',monospace">
+          <button class="btn primary" onclick="saveAiKey()">Salvar chave</button>
+          <button class="btn" id="settings-ai-clear-btn" onclick="clearAiKey()" style="display:none;color:var(--red)">Remover</button>
+        </div>
+        <div id="settings-ai-msg" style="font-size:12px;min-height:16px;margin-top:6px"></div>
       </div>
     </div>
 

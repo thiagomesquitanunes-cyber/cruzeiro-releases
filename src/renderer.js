@@ -371,6 +371,7 @@ async function renderSidebar() {
   // Nav
   const navItems = [
     { page:'overview',   icon:'🏠', label:t('nav_overview') },
+    { page:'projecao',   icon:'📅', label:'Projeção' },
     { page:'reports',    icon:'📊', label:t('nav_reports') },
     { page:'import',     icon:'📥', label:t('nav_import') },
     { page:'search',     icon:'🔍', label:t('nav_search') },
@@ -457,6 +458,7 @@ async function goPage(name) {
     backup:     t('page_backup'),
     aposentadoria: '🏖️ Aposentadoria',
     reports:    'Relatórios',
+    projecao:   '📅 Projeção de Fluxo de Caixa',
   };
   G('page-title').textContent = titles[name] || name;
   G('search-wrap').style.display = name === 'account' ? 'flex' : 'none';
@@ -475,6 +477,7 @@ async function goPage(name) {
   if (name === 'budget') refreshBudget();
   if (name === 'import')    populateAccountSelects();
   if (name === 'reports')   { await initReportFilters(); onReportTypeChange(); }
+  if (name === 'projecao')  refreshProjecao();
   if (name === 'backup') {
     refreshBackup();
     refreshSyncStatus();
@@ -486,8 +489,366 @@ async function goPage(name) {
       el.textContent = map[s.status] || s.status;
       el.style.color = s.status === 'payment_required' ? 'var(--red)' : s.status === 'licensed' ? 'var(--green)' : 'var(--text3)';
     }).catch(()=>{});
+    refreshAiKeyStatus();
   }
   if (name === 'aposentadoria') aposInit();
+}
+
+// ── AI key management (settings) ──
+async function refreshAiKeyStatus() {
+  try {
+    const st = await ff.aiGetKeyStatus();
+    const statusEl = G('settings-ai-status');
+    const clearBtn = G('settings-ai-clear-btn');
+    const input    = G('settings-ai-key');
+    if (st.hasKey) {
+      if (statusEl) { statusEl.textContent = '✅ Chave ativa (' + st.masked + ')'; statusEl.style.color = 'var(--green)'; }
+      if (clearBtn) clearBtn.style.display = '';
+      if (input) input.placeholder = '•••• chave salva ••••';
+    } else {
+      if (statusEl) { statusEl.textContent = '⚪ Nenhuma chave configurada'; statusEl.style.color = 'var(--text3)'; }
+      if (clearBtn) clearBtn.style.display = 'none';
+      if (input) input.placeholder = 'sk-ant-...';
+    }
+  } catch(e) {}
+}
+async function saveAiKey() {
+  const input = G('settings-ai-key');
+  const key = input?.value?.trim();
+  const msg = G('settings-ai-msg');
+  if (!key) { if (msg) { msg.textContent = 'Cole a chave antes de salvar.'; msg.style.color = 'var(--red)'; } return; }
+  if (!key.startsWith('sk-ant-')) {
+    if (msg) { msg.textContent = '⚠️ A chave da Anthropic normalmente começa com "sk-ant-". Salvando mesmo assim.'; msg.style.color = 'var(--warn)'; }
+  }
+  await ff.aiSetKey(key);
+  if (input) input.value = '';
+  if (msg && key.startsWith('sk-ant-')) { msg.textContent = '✅ Chave salva.'; msg.style.color = 'var(--green)'; }
+  toast('Chave salva');
+  refreshAiKeyStatus();
+}
+async function clearAiKey() {
+  if (!await showConfirmDialog('Remover a chave de API?', 'A entrada por linguagem natural ficará indisponível até você inserir uma nova chave.', 'Remover', true)) return;
+  await ff.aiClearKey();
+  const msg = G('settings-ai-msg');
+  if (msg) { msg.textContent = 'Chave removida.'; msg.style.color = 'var(--text3)'; }
+  toast('Chave removida');
+  refreshAiKeyStatus();
+}
+
+// ══ AI NATURAL-LANGUAGE ENTRY ══
+let _aiRecognition = null;
+let _aiMicActive = false;
+let _aiParsedTxs = [];
+
+async function openAiEntry() {
+  const st = await ff.aiGetKeyStatus().catch(() => ({ hasKey: false }));
+  if (!st.hasKey) {
+    if (!await showConfirmDialog('Configure sua chave de IA', 'A entrada por linguagem natural usa a API da Anthropic com sua própria chave. Deseja abrir as configurações para inseri-la agora?', 'Abrir configurações')) return;
+    goPage('backup');
+    setTimeout(() => G('settings-ai-key')?.focus(), 300);
+    return;
+  }
+  G('ai-entry-text').value = '';
+  G('ai-entry-msg').textContent = '';
+  G('ai-entry-preview').innerHTML = '';
+  G('ai-mic-status').textContent = '';
+  G('ai-confirm-btn').style.display = 'none';
+  _aiParsedTxs = [];
+  openModal('modal-ai-entry');
+  setTimeout(() => G('ai-entry-text')?.focus(), 80);
+}
+
+function toggleAiMic() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) {
+    G('ai-mic-status').textContent = '⚠️ Reconhecimento de voz não disponível neste ambiente. Use texto.';
+    G('ai-mic-status').style.color = 'var(--warn)';
+    return;
+  }
+  if (_aiMicActive) { stopAiMic(); return; }
+
+  _aiRecognition = new SpeechRec();
+  _aiRecognition.lang = 'pt-BR';
+  _aiRecognition.continuous = true;
+  _aiRecognition.interimResults = true;
+
+  let finalText = G('ai-entry-text').value;
+  _aiRecognition.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const tr = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalText += (finalText && !finalText.endsWith(' ') ? ' ' : '') + tr;
+      else interim += tr;
+    }
+    G('ai-entry-text').value = (finalText + ' ' + interim).trim();
+  };
+  _aiRecognition.onerror = (e) => {
+    G('ai-mic-status').textContent = '⚠️ Erro no microfone: ' + (e.error || 'desconhecido');
+    G('ai-mic-status').style.color = 'var(--red)';
+    stopAiMic();
+  };
+  _aiRecognition.onend = () => { if (_aiMicActive) stopAiMic(); };
+
+  try {
+    _aiRecognition.start();
+    _aiMicActive = true; window._aiMicActiveFlag = true;
+    const btn = G('ai-mic-btn');
+    if (btn) { btn.textContent = '⏹'; btn.style.background = 'var(--red)'; btn.style.color = '#fff'; }
+    G('ai-mic-status').textContent = '🔴 Ouvindo... fale o lançamento e clique no botão para parar.';
+    G('ai-mic-status').style.color = 'var(--accent)';
+  } catch(e) {
+    G('ai-mic-status').textContent = '⚠️ Não foi possível iniciar o microfone.';
+    G('ai-mic-status').style.color = 'var(--red)';
+  }
+}
+
+function stopAiMic() {
+  _aiMicActive = false; window._aiMicActiveFlag = false;
+  try { _aiRecognition?.stop(); } catch(e) {}
+  _aiRecognition = null;
+  const btn = G('ai-mic-btn');
+  if (btn) { btn.textContent = '🎤'; btn.style.background = 'var(--bg3)'; btn.style.color = ''; }
+  const st = G('ai-mic-status');
+  if (st && st.textContent.startsWith('🔴')) st.textContent = '';
+}
+
+async function runAiParse() {
+  if (_aiMicActive) stopAiMic();
+  const text = G('ai-entry-text')?.value?.trim();
+  const msg = G('ai-entry-msg');
+  if (!text) { if (msg) { msg.textContent = 'Digite ou dite algo primeiro.'; msg.style.color = 'var(--red)'; } return; }
+
+  const btn = G('ai-parse-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Interpretando...'; }
+  if (msg) { msg.textContent = ''; }
+
+  const payload = {
+    text,
+    accounts: accounts.map(a => ({ id: a.id, name: a.name, type: a.type })),
+    categories: [...CATS_RAW].sort(),
+    today: todayStr(),
+  };
+
+  let res;
+  try { res = await ff.aiParseTransaction(payload); }
+  catch(e) { res = { ok: false, error: 'NETWORK' }; }
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Interpretar'; }
+
+  if (!res.ok) {
+    const errMap = {
+      NO_KEY: 'Nenhuma chave de IA configurada. Vá em Configurações.',
+      BAD_KEY: 'Chave de API inválida ou sem permissão. Verifique em Configurações.',
+      EMPTY: 'Texto vazio.',
+      PARSE_FAIL: 'A IA respondeu em formato inesperado. Tente reformular.',
+      API_ERROR: 'Erro na API: ' + (res.detail || ''),
+      NETWORK: 'Falha de conexão. Verifique sua internet.',
+    };
+    if (msg) { msg.textContent = '⚠️ ' + (errMap[res.error] || res.error); msg.style.color = 'var(--red)'; }
+    return;
+  }
+
+  const txs = (res.result?.transactions || []).filter(t => t && typeof t.amount === 'number' && t.amount !== 0);
+  if (!txs.length) {
+    if (msg) { msg.textContent = 'Não identifiquei nenhum lançamento. Tente ser mais específico (valor e descrição).'; msg.style.color = 'var(--warn)'; }
+    return;
+  }
+
+  _aiParsedTxs = txs;
+  renderAiPreview(txs, res.result?.confidence, res.result?.note);
+  G('ai-confirm-btn').style.display = '';
+}
+
+function renderAiPreview(txs, confidence, note) {
+  const accName = id => accounts.find(a => a.id === id)?.name || '(conta?)';
+  const confBadge = { high:'🟢 alta', medium:'🟡 média', low:'🔴 baixa' }[confidence] || '';
+  const rows = txs.map((t, i) => `
+    <tr>
+      <td style="padding:7px 10px;font-size:12px">${fmtDate(t.date)}</td>
+      <td style="padding:7px 10px;font-size:12px">${esc(t.memo||'')}</td>
+      <td style="padding:7px 10px;font-size:12px;color:var(--text3)">${esc(t.category||'—')}</td>
+      <td style="padding:7px 10px;font-size:12px">${esc(accName(t.account_id))}</td>
+      <td class="right" style="padding:7px 10px;font-family:'DM Mono',monospace;font-size:12px;color:${t.amount<0?'var(--red)':'var(--green)'}">${fmtBRL(t.amount)}</td>
+    </tr>`).join('');
+  G('ai-entry-preview').innerHTML = `
+    <div style="font-size:12px;color:var(--text3);margin-bottom:6px">
+      ${txs.length} lançamento(s) identificado(s) ${confBadge ? '· confiança ' + confBadge : ''}
+      ${note ? '<br><em>' + esc(note) + '</em>' : ''}
+    </div>
+    <div class="tbl-outer" style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      <table class="ledger" style="width:100%">
+        <thead><tr>
+          <th style="text-align:left">Data</th><th style="text-align:left">Descrição</th>
+          <th style="text-align:left">Categoria</th><th style="text-align:left">Conta</th>
+          <th class="right">Valor</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-top:6px">Revise antes de salvar. Itens com conta ou categoria incorretas podem ser editados depois no extrato.</div>`;
+}
+
+async function confirmAiEntries() {
+  if (!_aiParsedTxs.length) return;
+  let saved = 0;
+  for (const t of _aiParsedTxs) {
+    const accId = accounts.find(a => a.id === t.account_id) ? t.account_id : (accounts[0]?.id);
+    if (!accId) continue;
+    await ff.createTx({
+      account_id: accId,
+      date: t.date || todayStr(),
+      amount: t.amount,
+      memo: t.memo || '',
+      category: t.category || '',
+    });
+    saved++;
+  }
+  _aiParsedTxs = [];
+  closeModal('modal-ai-entry');
+  toast(`✨ ${saved} lançamento(s) adicionado(s)`);
+  await loadAccounts();
+  if (currentPage === 'account') refreshAccount();
+  if (currentPage === 'overview') await refreshOverview();
+}
+
+// ══ AI PROACTIVE INSIGHTS ══
+let _insightsCache = { month: null, data: null };
+
+async function maybeShowInsightsCard() {
+  // Only show the card if the user has configured an API key
+  const card = G('ai-insights-card');
+  if (!card) return;
+  const st = await ff.aiGetKeyStatus().catch(() => ({ hasKey: false }));
+  if (!st.hasKey) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  // Auto-render cached insights for this month if present; otherwise show prompt
+  const body = G('ai-insights-body');
+  const curM = overviewMonthStr();
+  if (_insightsCache.month === curM && _insightsCache.data) {
+    renderInsights(_insightsCache.data);
+  } else if (body) {
+    body.innerHTML = '<div style="font-size:13px;color:var(--text3)">Clique em <strong>✨ Gerar</strong> para receber uma análise dos seus gastos deste período.</div>';
+  }
+}
+
+async function buildInsightsSummary() {
+  // Last 6 months of expenses by category + current-month budgets
+  const monthly = await ff.reportMonthlyByCategory({ excludeTransfers: true }).catch(() => []);
+  // Keep only the last 6 distinct months
+  const months = [...new Set(monthly.map(r => r.month))].sort().slice(-6);
+  const monthsSet = new Set(months);
+
+  // Aggregate: { category: { 'YYYY-MM': total } }
+  const byCat = {};
+  monthly.forEach(r => {
+    if (!monthsSet.has(r.month)) return;
+    if (!byCat[r.category]) byCat[r.category] = {};
+    byCat[r.category][r.month] = (byCat[r.category][r.month] || 0) + r.total;
+  });
+
+  const curM = months[months.length - 1];
+  const prevMonths = months.slice(0, -1);
+
+  // Build per-category summary: current, avg of prior months, % change
+  const categories = Object.entries(byCat).map(([cat, m]) => {
+    const cur = m[curM] || 0;
+    const priorVals = prevMonths.map(mm => m[mm] || 0).filter(v => v > 0);
+    const avgPrior = priorVals.length ? priorVals.reduce((s,v)=>s+v,0) / priorVals.length : 0;
+    const pctChange = avgPrior > 0 ? ((cur - avgPrior) / avgPrior) * 100 : null;
+    return { category: cat, current: Math.round(cur), avgPrior: Math.round(avgPrior),
+             pctChange: pctChange === null ? null : Math.round(pctChange) };
+  }).filter(c => c.current > 0 || c.avgPrior > 0)
+    .sort((a,b) => b.current - a.current)
+    .slice(0, 15);
+
+  // Budgets
+  let budgets = [];
+  try {
+    const bl = await ff.budgetList();
+    const actuals = await ff.budgetActuals({ month: curM });
+    const actMap = {};
+    actuals.forEach(a => { actMap[a.category] = a.spent || 0; });
+    budgets = bl.map(b => ({ category: b.category, limit: b.monthly_limit,
+      spent: Math.round(actMap[b.category] || 0) }));
+  } catch(e) {}
+
+  const totalCur  = categories.reduce((s,c) => s + c.current, 0);
+  const totalPrev = categories.reduce((s,c) => s + c.avgPrior, 0);
+
+  return { currentMonth: curM, monthsAnalyzed: months.length,
+           totalSpentCurrent: totalCur, avgMonthlySpent: Math.round(totalPrev),
+           categories, budgets };
+}
+
+async function generateInsights(force) {
+  const body = G('ai-insights-body');
+  const status = G('ai-insights-status');
+  const btn = G('ai-insights-refresh');
+  if (!body) return;
+
+  const st = await ff.aiGetKeyStatus().catch(() => ({ hasKey: false }));
+  if (!st.hasKey) {
+    body.innerHTML = '<div style="font-size:13px;color:var(--text2)">Configure sua chave de IA em ⚙️ Configurações para ativar os insights.</div>';
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Analisando...'; }
+  if (status) status.textContent = '';
+
+  const summary = await buildInsightsSummary();
+  if (!summary.categories.length) {
+    body.innerHTML = '<div style="font-size:13px;color:var(--text3)">Ainda não há dados suficientes neste período para gerar insights.</div>';
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Gerar'; }
+    return;
+  }
+
+  let res;
+  try { res = await ff.aiGenerateInsights({ summary }); }
+  catch(e) { res = { ok: false, error: 'NETWORK' }; }
+
+  if (btn) { btn.disabled = false; btn.textContent = '✨ Gerar'; }
+
+  if (!res.ok) {
+    const errMap = { NO_KEY:'Configure a chave de IA em Configurações.',
+      BAD_KEY:'Chave de API inválida.', PARSE_FAIL:'Resposta inesperada da IA.',
+      API_ERROR:'Erro na API.', NETWORK:'Falha de conexão.' };
+    body.innerHTML = `<div style="font-size:13px;color:var(--red)">⚠️ ${errMap[res.error] || res.error}</div>`;
+    return;
+  }
+
+  const insights = res.result?.insights || [];
+  if (!insights.length) {
+    body.innerHTML = '<div style="font-size:13px;color:var(--text3)">Nenhum insight relevante neste período.</div>';
+    return;
+  }
+
+  _insightsCache = { month: overviewMonthStr(), data: insights };
+  renderInsights(insights);
+  if (status) status.textContent = 'Gerado agora';
+}
+
+function renderInsights(insights) {
+  const body = G('ai-insights-body');
+  if (!body) return;
+  const typeStyle = {
+    alert:    { bg:'#fef2f2', border:'#fecaca', clr:'var(--red)' },
+    positive: { bg:'#f0fdf4', border:'#bbf7d0', clr:'var(--green)' },
+    tip:      { bg:'#eff6ff', border:'#bfdbfe', clr:'var(--accent)' },
+    trend:    { bg:'#fffbeb', border:'#fde68a', clr:'#b45309' },
+  };
+  body.innerHTML = `<div style="display:flex;flex-direction:column;gap:8px">` +
+    insights.map(ins => {
+      const ts = typeStyle[ins.type] || typeStyle.tip;
+      return `<div style="background:${ts.bg};border:1px solid ${ts.border};border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:flex-start">
+        <span style="font-size:18px;line-height:1.2">${ins.icon || '💡'}</span>
+        <div>
+          <div style="font-weight:600;font-size:13px;color:${ts.clr}">${esc(ins.title || '')}</div>
+          <div style="font-size:13px;color:var(--text2);margin-top:2px">${esc(ins.detail || '')}</div>
+        </div>
+      </div>`;
+    }).join('') +
+    `</div>
+    <div style="font-size:11px;color:var(--text3);margin-top:8px">Gerado por IA com base nos seus dados. Pode conter imprecisões — confira os números no app.</div>`;
 }
 
 async function openAccount(id) {
@@ -626,6 +987,9 @@ async function refreshOverview() {
   // Trend charts data
   _monthlyByCat = await ff.reportMonthlyByCategory({ excludeTransfers: true });
   renderTrendCharts();
+
+  // AI insights card (shown only if API key configured)
+  maybeShowInsightsCard();
 }
 
 function drawPie(canvasId, legendId, data, fromDate, toDate) {
@@ -3760,10 +4124,11 @@ function pVal(v) {
   // Parentheses = negative: (1.234,56) → -1234.56
   const isNeg = s.startsWith('(') && s.endsWith(')');
   s = s.replace(/[()]/g,'').trim();
-  // Handle Brazilian format: 1.234,56
+  // Handle Brazilian format: se há vírgula, ela é o separador decimal e os pontos são milhares
   let n;
-  if (/^-?[\d.]+,[\d]{2}$/.test(s)) n = parseFloat(s.replace(/\./g,'').replace(',','.'));
-  else n = parseFloat(s.replace(',','.')) || 0;
+  if (s.includes(',')) n = parseFloat(s.replace(/\./g,'').replace(',','.')) || 0;
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) n = parseFloat(s.replace(/\./g,'')) || 0; // só milhares: 1.234.567
+  else n = parseFloat(s) || 0;
   return isNeg ? -Math.abs(n) : n;
 }
 function pDateBTG(v) {
@@ -5808,10 +6173,21 @@ function renderWizardAutoResult(config, rows) {
       <button class="btn sm" id="sign-invert-btn">🔄 Não, inverter sinais</button>
     </div>`;
 
-  // Wire sign buttons — store choice in _wizardSignInverted flag
+  // Wire sign buttons — store choice and re-render preview with inverted amounts
   window._wizardSignInverted = false;
+  window._wizardPreviewRows  = rows.slice(0, 8);
+
+  function _updateWizardPreview(inverted) {
+    const displayRows = window._wizardPreviewRows.map(r => ({ ...r, amount: inverted ? -r.amount : r.amount }));
+    const tbody = document.querySelector('#custom-parser-body .tbl-outer table tbody');
+    if (tbody) tbody.innerHTML = displayRows.map(r =>
+      `<tr><td>${r.date}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
+    ).join('');
+  }
+
   G('sign-ok-btn').onclick = () => {
     window._wizardSignInverted = false;
+    _updateWizardPreview(false);
     G('sign-confirm-banner').style.background = '#f0fdf4';
     G('sign-confirm-banner').style.borderColor = '#16a34a';
     G('sign-ok-btn').style.outline = '2px solid #16a34a';
@@ -5819,6 +6195,7 @@ function renderWizardAutoResult(config, rows) {
   };
   G('sign-invert-btn').onclick = () => {
     window._wizardSignInverted = true;
+    _updateWizardPreview(true);
     G('sign-confirm-banner').style.background = '#fff7ed';
     G('sign-confirm-banner').style.borderColor = '#f59e0b';
     G('sign-invert-btn').style.outline = '2px solid #f59e0b';
@@ -5947,8 +6324,12 @@ async function saveWizardParser(config) {
   const name = nameEl?.value?.trim();
   if (!name) { toast('Dê um nome a este banco/cartão'); nameEl?.focus(); return; }
 
+  // Bake the sign-inversion choice into the saved config so future imports match the preview
+  const inverted = !!window._wizardSignInverted;
+  const finalConfig = inverted ? { ...config, invertSign: !config.invertSign } : config;
+
   const id = `custom_${Date.now()}`;
-  const parser = { id, name, type: _wizardType, config };
+  const parser = { id, name, type: _wizardType, config: finalConfig };
   await ff.bankParserSave(parser);
   _customBankParsers = await ff.bankParsersList();
   renderImportDropdowns();
@@ -5958,15 +6339,14 @@ async function saveWizardParser(config) {
   // Auto-select and show file trigger
   pickImport(id, _wizardType);
   if (_wizardParsed.length > 0) {
-    _bankParsed = _wizardParsed;
-    renderBankPreview(_wizardParsed);
-    // Apply sign inversion if user chose it in the preview
-    if (window._wizardSignInverted) {
-      await ff.bankParserSave({ ...parser, config: { ...config, invertSign: !config.invertSign } });
-      toast('🔄 Sinais invertidos e salvos');
-    }
-    window._wizardSignInverted = false;
+    // Apply the same inversion to the already-parsed rows shown in the import preview
+    _bankParsed = inverted
+      ? _wizardParsed.map(r => ({ ...r, amount: -r.amount }))
+      : _wizardParsed;
+    renderBankPreview(_bankParsed);
+    if (inverted) toast('🔄 Sinais invertidos');
   }
+  window._wizardSignInverted = false;
 }
 
 
@@ -6636,6 +7016,8 @@ function openModal(id){ G(id)?.classList.add('open'); }
 function closeModal(id){
   const el = G(id);
   if (!el) return;
+  // Stop voice recognition if the AI entry modal is being closed
+  if (id === 'modal-ai-entry' && typeof stopAiMic === 'function' && window._aiMicActiveFlag) stopAiMic();
   // Blur only elements strictly inside this modal
   const focused = el.querySelector(':focus');
   if (focused) focused.blur();
@@ -7482,7 +7864,8 @@ async function tourBack() {
 
 async function tourSkip() {
   const msg = { pt:'Tem certeza que deseja pular o tour? Você pode acessá-lo novamente em Configurações.', en:'Are you sure you want to skip the tour? You can restart it in Settings.', es:'¿Seguro que deseas omitir el tour? Puedes reiniciarlo en Configuración.' };
-  if (confirm(msg[_lang] || msg.pt)) {
+  const okLbl = { pt:'Pular tour', en:'Skip tour', es:'Omitir tour' };
+  if (await showConfirmDialog(msg[_lang] || msg.pt, '', okLbl[_lang] || okLbl.pt)) {
     await tourFinish();
   }
 }
@@ -8208,6 +8591,339 @@ async function deleteGoal(id) {
 
 // ══ BUDGET / ORÇAMENTO (Etapa 4) ══
 let _budgets   = [];  // [{id, category, monthly_limit, alert_pct}]
+let _projChart = null;
+
+// Meses entre dois 'YYYY-MM' (inclusivo do intervalo)
+function monthsBetween(fromYM, toYM) {
+  const [fy, fm] = fromYM.split('-').map(Number);
+  const [ty, tm] = toYM.split('-').map(Number);
+  return (ty - fy) * 12 + (tm - fm);
+}
+
+// ── IR regressivo de renda fixa (sobre o rendimento) ──
+function irRateForDays(days) {
+  if (days <= 180) return 0.225;
+  if (days <= 360) return 0.20;
+  if (days <= 720) return 0.175;
+  return 0.15;
+}
+
+// Categorias/tipos de renda fixa SUJEITOS a IR regressivo
+function assetIsTaxable(asset) {
+  const cat = asset.category;
+  const typ = (asset.inv_type || '').toLowerCase();
+  // Isentos: LCI, LCA, Poupança, renda variável, previdência (regra própria)
+  if (typ.includes('lci') || typ.includes('lca') || typ.includes('poupan')) return false;
+  if (cat === 'renda_variavel' || cat === 'previdencia') return false;
+  if (cat === 'caixa' || cat === 'valor_em_caixa') return false;
+  // Tributáveis: CDB, CRA, CRI, Debênture, LF, Tesouro, Fundos de RF/Multi/Cambial
+  if (cat === 'renda_fixa' || cat === 'tesouro') return true;
+  if (cat === 'fundos') {
+    // Fundos de ações têm regra de 15%; aproximamos os demais como regressivo de RF
+    if (typ.includes('ações') || typ.includes('acoes') || typ.includes('fii') || typ.includes('etf')) return false;
+    return true;
+  }
+  return false;
+}
+
+// Avalia se um ativo pode ser resgatado a tempo da data de necessidade
+// e retorna o valor LÍQUIDO disponível (após IR estimado).
+function assetLiquidationInfo(asset, currentValue, totalInvested, firstMonth, needDate) {
+  const today = todayStr();
+  const todayD = new Date(today + 'T00:00:00');
+  const needD  = new Date(needDate + 'T00:00:00');
+
+  // Data em que o dinheiro estaria disponível
+  let availableDate = null;
+  let liqLabel = '';
+  if (asset.liquidity === 'dias') {
+    const dN = asset.liquidity_days || 0;
+    const avail = new Date(todayD); avail.setDate(avail.getDate() + dN);
+    availableDate = avail;
+    liqLabel = `D+${dN}`;
+  } else {
+    // Vencimento: disponível no mês de maturidade
+    if (asset.maturity_month) {
+      const [my, mm] = asset.maturity_month.split('-').map(Number);
+      availableDate = new Date(my, mm - 1, 1);
+      liqLabel = `Vencimento ${fmtMonth(asset.maturity_month)}`;
+    } else {
+      // Sem vencimento definido — assume resgate no vencimento desconhecido → não sugere
+      return { eligible: false };
+    }
+  }
+
+  const eligible = availableDate <= needD && currentValue > 0;
+  if (!eligible) return { eligible: false, liqLabel, availableDate };
+
+  // Estima IR sobre o rendimento (ganho), com alíquota regressiva pelo prazo do 1º aporte
+  let irAmount = 0, irRate = 0, gain = Math.max(0, currentValue - totalInvested);
+  if (assetIsTaxable(asset) && gain > 0) {
+    let heldDays = 360; // fallback
+    if (firstMonth) {
+      const [fy, fm] = firstMonth.split('-').map(Number);
+      const firstD = new Date(fy, fm - 1, 15); // meio do mês como aproximação
+      heldDays = Math.max(1, Math.round((todayD - firstD) / 86400000));
+    }
+    irRate = irRateForDays(heldDays);
+    irAmount = gain * irRate;
+  }
+
+  const netValue = currentValue - irAmount; // valor líquido disponível após IR
+  // Data-limite para iniciar o resgate (para liquidez por dias)
+  let deadlineDate = needDate;
+  if (asset.liquidity === 'dias') {
+    const dl = new Date(needD); dl.setDate(dl.getDate() - (asset.liquidity_days || 0) - 1);
+    deadlineDate = dl.toISOString().slice(0,10);
+    if (deadlineDate < today) deadlineDate = today; // já no limite — resgatar hoje
+  }
+
+  return { eligible: true, liqLabel, availableDate, netValue, grossValue: currentValue,
+           irAmount, irRate, gain, deadlineDate };
+}
+
+// Gera até 3 sugestões de liquidação para cobrir um déficit
+function suggestLiquidations(deficit, needDate, invAssetsEnriched) {
+  const needWithMargin = Math.abs(deficit) * 1.10; // +10% de margem
+
+  // Filtra elegíveis (resgatáveis a tempo), anota liquidez/rentabilidade/IR
+  const candidates = invAssetsEnriched
+    .map(a => {
+      const info = assetLiquidationInfo(a, a.currentValue, a.totalInvested, a.firstMonth, needDate);
+      if (!info.eligible || info.netValue <= 0) return null;
+      // "liquidez suficiente" = consegue cobrir a necessidade sozinho
+      const coversSolo = info.netValue >= needWithMargin;
+      return { asset: a, ...info, coversSolo };
+    })
+    .filter(Boolean);
+
+  if (!candidates.length) return { options: [], needWithMargin };
+
+  // Ordenação: combinação liquidez suficiente + menor rentabilidade.
+  // 1º os que cobrem sozinho; dentro de cada grupo, menor rentabilidade anual primeiro.
+  candidates.sort((a, b) => {
+    if (a.coversSolo !== b.coversSolo) return a.coversSolo ? -1 : 1;
+    return (a.asset.annRet ?? 0) - (b.asset.annRet ?? 0);
+  });
+
+  // Monta até 3 opções distintas
+  const options = candidates.slice(0, 3).map(c => {
+    const resgateBruto = c.coversSolo
+      ? needWithMargin + (c.gain > 0 && assetIsTaxable(c.asset) ? (needWithMargin * c.irRate) : 0) // bruto a resgatar p/ líquido cobrir
+      : c.grossValue; // resgata tudo se não cobre sozinho
+    const resgateLiquido = Math.min(c.netValue, needWithMargin);
+    return {
+      asset: c.asset,
+      liqLabel: c.liqLabel,
+      annRet: c.asset.annRet ?? 0,
+      grossValue: c.grossValue,
+      netValue: c.netValue,
+      irRate: c.irRate,
+      irAmount: c.irAmount,
+      deadlineDate: c.deadlineDate,
+      suggestGross: Math.min(resgateBruto, c.grossValue),
+      suggestNet: resgateLiquido,
+      coversSolo: c.coversSolo,
+    };
+  });
+
+  return { options, needWithMargin };
+}
+
+async function refreshProjecao() {
+  const horizon = parseInt(G('proj-horizon')?.value || '6');
+  const includeCredit = G('proj-include-credit')?.checked || false;
+
+  let data;
+  try {
+    data = await ff.reportCashflowProjection({ horizonMonths: horizon, includeCredit });
+  } catch(e) {
+    if (G('proj-monthly')) G('proj-monthly').innerHTML = '<div class="info-box">Erro ao calcular projeção.</div>';
+    return;
+  }
+
+  const { accounts, events, startTotal, today, endDate } = data;
+
+  if (!accounts.length) {
+    G('proj-summary-cards').innerHTML = '';
+    G('proj-alert').innerHTML = '';
+    if (_projChart) { try { _projChart.destroy(); } catch(e){} _projChart = null; }
+    G('proj-monthly').innerHTML = '<div class="info-box" style="text-align:center;padding:32px"><div style="font-size:32px;margin-bottom:8px">📅</div><div style="font-weight:600">Sem contas para projetar</div></div>';
+    return;
+  }
+
+  // Build daily running balance from startTotal across all events
+  let running = startTotal;
+  const dayPoints = [];        // {date, balance}
+  let firstNegative = null;    // {date, balance}
+  let minBalance = { date: today, balance: startTotal };
+
+  // Group events by date to get end-of-day balance
+  const byDate = {};
+  events.forEach(ev => { (byDate[ev.date] = byDate[ev.date] || []).push(ev); });
+  const sortedDates = Object.keys(byDate).sort();
+
+  // Seed with today
+  dayPoints.push({ date: today, balance: running });
+
+  sortedDates.forEach(date => {
+    byDate[date].forEach(ev => { running += ev.amount; });
+    dayPoints.push({ date, balance: running });
+    if (firstNegative === null && running < 0) firstNegative = { date, balance: running };
+    if (running < minBalance.balance) minBalance = { date, balance: running };
+  });
+
+  const endBalance = running;
+
+  // ── Alert: first negative point + liquidation suggestions ──
+  if (firstNegative) {
+    let suggestHtml = '';
+    // Load investment data and build enriched asset list (value, return, liquidity)
+    try {
+      const invAssets = await ff.invAssetsList().catch(() => []);
+      const invTxAll  = await ff.invTxAll().catch(() => []);
+      const curM = todayStr().slice(0,7);
+      const enriched = invAssets.filter(a => !a.hidden && !a.closed_month).map(a => {
+        const txs = invTxAll.filter(t => t.asset_id === a.id);
+        const latestAtu = txs.filter(t => t.tx_type === 'atualizacao' && t.month <= curM)
+                             .sort((x,y) => x.month < y.month ? 1 : -1)[0];
+        const currentValue = latestAtu?.total_value ?? 0;
+        const totalInvested = txs.filter(t => t.tx_type === 'aporte')
+                                 .reduce((s,t) => s + Math.abs(t.total_value), 0);
+        const firstMonth = txs.map(t => t.month).sort()[0] || curM;
+        const monthsHeld = Math.max(1, monthsBetween(firstMonth, curM) + 1);
+        const totalRet = totalInvested > 0 ? (currentValue - totalInvested) / totalInvested : 0;
+        const annRet = monthsHeld > 0 ? Math.pow(1 + totalRet, 12 / monthsHeld) - 1 : 0;
+        return { ...a, currentValue, totalInvested, firstMonth, annRet };
+      }).filter(a => a.currentValue > 0);
+
+      const { options, needWithMargin } = suggestLiquidations(firstNegative.balance, firstNegative.date, enriched);
+
+      if (options.length) {
+        suggestHtml = `
+          <div style="margin-top:12px;padding-top:12px;border-top:1px dashed var(--red)">
+            <div style="font-weight:600;font-size:13px;margin-bottom:8px">💡 Sugestões para cobrir o déficit (necessário ~${fmtBRL(needWithMargin)} com margem de 10%):</div>
+            <div style="display:flex;flex-direction:column;gap:8px">` +
+          options.map((o, i) => `
+            <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+                <div style="font-weight:600;font-size:13px">${i+1}. ${esc(o.asset.name)}${o.asset.broker?` <span style="color:var(--text3);font-weight:400">(${esc(o.asset.broker)})</span>`:''}</div>
+                <div style="font-size:11px;color:var(--text3)">${o.coversSolo ? '✅ cobre sozinho' : '⚠️ resgate parcial — combine com outro'}</div>
+              </div>
+              <div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;margin-top:6px;color:var(--text2)">
+                <span>🔓 ${o.liqLabel}</span>
+                <span>📈 ${(o.annRet*100).toFixed(1)}% a.a.</span>
+                <span>💰 Disponível líq.: <strong>${fmtBRL(o.netValue)}</strong></span>
+                ${o.irRate > 0 ? `<span>🧾 IR ${(o.irRate*100).toFixed(1)}% (~${fmtBRL(o.irAmount)})</span>` : '<span>🧾 Isento de IR</span>'}
+              </div>
+              <div style="font-size:12px;margin-top:6px;color:var(--accent);font-weight:500">
+                → Resgate ${fmtBRL(o.suggestGross)} até ${fmtDate(o.deadlineDate)}
+              </div>
+            </div>`).join('') +
+          `</div></div>`;
+      } else {
+        suggestHtml = `<div style="margin-top:10px;font-size:12px;color:var(--text3)">Nenhum investimento com liquidez compatível para cobrir esse déficit a tempo.</div>`;
+      }
+    } catch(e) { /* sem dados de investimento — apenas o alerta básico */ }
+
+    G('proj-alert').innerHTML = `
+      <div style="background:#fef2f2;border:1px solid var(--red);border-radius:8px;padding:12px 16px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-size:22px">⚠️</span>
+          <div>
+            <div style="font-weight:600;color:var(--red)">Saldo fica negativo em ${fmtDate(firstNegative.date)}</div>
+            <div style="font-size:13px;color:var(--text2)">Saldo projetado nesse dia: <strong>${fmtBRL(firstNegative.balance)}</strong>.</div>
+          </div>
+        </div>
+        ${suggestHtml}
+      </div>`;
+  } else {
+    G('proj-alert').innerHTML = `
+      <div style="background:#f0fdf4;border:1px solid var(--green);border-radius:8px;padding:10px 16px;margin-bottom:14px;display:flex;align-items:center;gap:10px">
+        <span style="font-size:20px">✅</span>
+        <div style="font-size:13px;color:var(--text2)">Saldo permanece positivo durante todo o horizonte. Menor saldo projetado: <strong>${fmtBRL(minBalance.balance)}</strong> em ${fmtDate(minBalance.date)}.</div>
+      </div>`;
+  }
+
+  // ── Summary cards ──
+  const totalIn  = events.filter(e => e.amount > 0).reduce((s,e) => s + e.amount, 0);
+  const totalOut = events.filter(e => e.amount < 0).reduce((s,e) => s + e.amount, 0);
+  G('proj-summary-cards').innerHTML = [
+    { lbl:'Saldo hoje', val: fmtBRL(startTotal), clr:'' },
+    { lbl:'Entradas previstas', val: fmtBRL(totalIn), clr:'green' },
+    { lbl:'Saídas previstas', val: fmtBRL(totalOut), clr:'red' },
+    { lbl:`Saldo projetado (${horizon}m)`, val: fmtBRL(endBalance), clr: endBalance < 0 ? 'red' : 'green' },
+  ].map(c => `<div class="stat-card"><div class="stat-lbl">${c.lbl}</div><div class="stat-val ${c.clr}">${c.val}</div></div>`).join('');
+
+  // ── Chart: daily balance ──
+  const labels = dayPoints.map(p => p.date);
+  const vals   = dayPoints.map(p => Math.round(p.balance * 100) / 100);
+  if (_projChart) { try { _projChart.destroy(); } catch(e){} _projChart = null; }
+  const ctx = G('proj-chart')?.getContext('2d');
+  if (ctx && typeof Chart === 'undefined') {
+    // Chart.js still loading from CDN — retry shortly
+    setTimeout(refreshProjecao, 400);
+  } else if (ctx) {
+    _projChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets: [{
+        label: 'Saldo projetado', data: vals,
+        borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)',
+        fill: true, tension: 0.2, borderWidth: 2, pointRadius: 0,
+        segment: { borderColor: c => (c.p1.parsed.y < 0 ? '#dc2626' : '#2563eb') },
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: true,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { title: items => fmtDate(items[0].label),
+            label: item => 'Saldo: ' + fmtBRL(item.parsed.y) } } },
+        scales: {
+          x: { ticks: { maxTicksLimit: 12, callback: function(v){ const d=this.getLabelForValue(v); return d ? d.slice(8,10)+'/'+d.slice(5,7) : ''; } } },
+          y: { ticks: { callback: v => 'R$'+(Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v) },
+               grid: { color: c => c.tick.value === 0 ? 'rgba(220,38,38,.4)' : 'rgba(0,0,0,.05)' } }
+        }
+      }
+    });
+  }
+
+  // ── Monthly breakdown table ──
+  const monthAgg = {};
+  events.forEach(ev => {
+    const m = ev.date.slice(0,7);
+    if (!monthAgg[m]) monthAgg[m] = { in: 0, out: 0 };
+    if (ev.amount > 0) monthAgg[m].in += ev.amount; else monthAgg[m].out += ev.amount;
+  });
+  // Compute end-of-month projected balance
+  let rb = startTotal;
+  const monthRows = [];
+  const allMonths = Object.keys(monthAgg).sort();
+  allMonths.forEach(m => {
+    rb += monthAgg[m].in + monthAgg[m].out;
+    monthRows.push({ month: m, in: monthAgg[m].in, out: monthAgg[m].out,
+      net: monthAgg[m].in + monthAgg[m].out, endBal: rb });
+  });
+
+  G('proj-monthly').innerHTML = monthRows.length ? `
+    <div class="tbl-card"><div class="tbl-outer">
+    <table class="ledger"><thead><tr>
+      <th>Mês</th>
+      <th class="right">Entradas</th>
+      <th class="right">Saídas</th>
+      <th class="right">Resultado</th>
+      <th class="right">Saldo projetado (fim do mês)</th>
+    </tr></thead><tbody>` +
+    monthRows.map((r, i) => `<tr style="${i%2?'background:var(--bg3)':''}">
+      <td style="padding:9px 14px;font-size:13px;font-weight:500">${fmtMonth(r.month)}</td>
+      <td class="right" style="padding:9px 14px;font-family:'DM Mono',monospace;font-size:12px;color:var(--green)">${fmtBRL(r.in)}</td>
+      <td class="right" style="padding:9px 14px;font-family:'DM Mono',monospace;font-size:12px;color:var(--red)">${fmtBRL(r.out)}</td>
+      <td class="right" style="padding:9px 14px;font-family:'DM Mono',monospace;font-size:12px;color:${r.net>=0?'var(--green)':'var(--red)'}">${fmtBRL(r.net)}</td>
+      <td class="right" style="padding:9px 14px;font-family:'DM Mono',monospace;font-size:13px;font-weight:600;color:${r.endBal<0?'var(--red)':'var(--text)'}">${fmtBRL(r.endBal)}</td>
+    </tr>`).join('') +
+    '</tbody></table></div></div>' : '';
+
+  if (G('proj-updated')) G('proj-updated').textContent = `Projeção de ${fmtDate(today)} a ${fmtDate(endDate)}`;
+}
+
 let _budgetMonth = '';
 
 async function refreshBudget() {
@@ -8221,17 +8937,19 @@ async function refreshBudget() {
   _budgets = await ff.budgetList().catch(() => []);
   const actuals  = await ff.budgetActuals({ month: _budgetMonth }).catch(() => []);
   const avg3mArr = await ff.budgetAvg3m({ beforeMonth: _budgetMonth }).catch(() => []);
+  const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: _budgetMonth }).catch(() => ({}));
 
   const actMap  = {};
   actuals.forEach(a => { actMap[a.category] = { spent: a.spent||0, received: a.received||0 }; });
   const avg3mMap = {};
   avg3mArr.forEach(a => { avg3mMap[a.category] = a.avg_spent || 0; });
 
-  // Summary cards
-  const totalBudgeted = _budgets.reduce((s,b) => s + b.monthly_limit, 0);
+  // Summary cards (com limite efetivo p/ rollover)
+  const effLimitOf = b => b.monthly_limit + ((b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0);
+  const totalBudgeted = _budgets.reduce((s,b) => s + effLimitOf(b), 0);
   const totalSpent    = _budgets.reduce((s,b) => s + (actMap[b.category]?.spent||0), 0);
   const remaining     = totalBudgeted - totalSpent;
-  const overBudget    = _budgets.filter(b => (actMap[b.category]?.spent||0) > b.monthly_limit).length;
+  const overBudget    = _budgets.filter(b => (actMap[b.category]?.spent||0) > effLimitOf(b)).length;
 
   const summaryEl = G('budget-summary-cards');
   if (summaryEl) {
@@ -8264,20 +8982,27 @@ async function refreshBudget() {
     }
     const { col, dir } = window._budgetSort;
 
-    const enriched = _budgets.map(b => ({
-      ...b,
-      actual: actMap[b.category]?.spent || 0,
-      pct:    b.monthly_limit > 0 ? (actMap[b.category]?.spent||0) / b.monthly_limit * 100 : 0,
-      avg3m:  avg3mMap[b.category] || 0,
-    }));
+    const enriched = _budgets.map(b => {
+      const actual = actMap[b.category]?.spent || 0;
+      const rollAcc = (b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0;
+      const effLimit = b.monthly_limit + rollAcc; // limite efetivo c/ saldo acumulado
+      return {
+        ...b,
+        actual,
+        rollAcc,
+        effLimit,
+        pct: effLimit > 0 ? (actual / effLimit) * 100 : 0,
+        avg3m: avg3mMap[b.category] || 0,
+      };
+    });
 
     const sorted = [...enriched].sort((a, b) => {
       let va, vb;
       if      (col === 'category') { va = a.category.toLowerCase(); vb = b.category.toLowerCase(); }
       else if (col === 'spent')    { va = a.actual;           vb = b.actual; }
       else if (col === 'avg3m')    { va = a.avg3m;            vb = b.avg3m; }
-      else if (col === 'limit')    { va = a.monthly_limit;    vb = b.monthly_limit; }
-      else if (col === 'rem')      { va = a.monthly_limit-a.actual; vb = b.monthly_limit-b.actual; }
+      else if (col === 'limit')    { va = a.effLimit;        vb = b.effLimit; }
+      else if (col === 'rem')      { va = a.effLimit-a.actual; vb = b.effLimit-b.actual; }
       else                         { va = a.pct;              vb = b.pct; }
       if (va < vb) return dir === 'asc' ? -1 : 1;
       if (va > vb) return dir === 'asc' ?  1 : -1;
@@ -8307,19 +9032,25 @@ async function refreshBudget() {
         <th></th>
       </tr></thead><tbody>` +
       sorted.map((b, i) => {
+        const effLimit = b.effLimit;
         const pct     = Math.min(b.pct, 100);
-        const over    = b.actual > b.monthly_limit;
+        const over    = b.actual > effLimit;
         const warn    = b.pct >= (b.alert_pct || 80) && !over;
-        const rem     = b.monthly_limit - b.actual;
+        const rem     = effLimit - b.actual;
         const barClr  = over ? 'var(--red)' : warn ? 'var(--warn)' : 'var(--green)';
-        const remClr  = over ? 'var(--red)' : rem < b.monthly_limit * 0.2 ? 'var(--warn)' : 'var(--green)';
-        const avg3mClr = b.avg3m > b.monthly_limit ? 'var(--red)' : b.avg3m > b.monthly_limit * 0.8 ? 'var(--warn)' : 'var(--text3)';
+        const remClr  = over ? 'var(--red)' : rem < effLimit * 0.2 ? 'var(--warn)' : 'var(--green)';
+        const avg3mClr = b.avg3m > effLimit ? 'var(--red)' : b.avg3m > effLimit * 0.8 ? 'var(--warn)' : 'var(--text3)';
         const stripe  = i % 2 === 1 ? 'background:var(--bg3)' : '';
+        // Limite efetivo c/ rollover: mostra base + acumulado
+        const rollTag = (b.rollover && Math.abs(b.rollAcc) >= 0.01)
+          ? `<div style="font-size:10px;color:${b.rollAcc>=0?'var(--green)':'var(--red)'};margin-top:2px">${b.rollAcc>=0?'+':'−'}${fmtBRL(Math.abs(b.rollAcc))} acum.</div>`
+          : '';
+        const catTag = b.rollover ? ' <span title="Rollover ativo" style="font-size:10px">🔄</span>' : '';
         return `<tr style="${stripe}">
-          <td style="font-size:13px;padding:10px 14px;font-weight:500">${esc(b.category)}</td>
+          <td style="font-size:13px;padding:10px 14px;font-weight:500">${esc(b.category)}${catTag}</td>
           <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:${over?'var(--red)':'var(--text)'}">${fmtBRL(b.actual)}</td>
           <td class="right" style="font-family:'DM Mono',monospace;font-size:12px;padding:10px 14px;color:${avg3mClr}" title="Média dos últimos 3 meses">${b.avg3m > 0 ? fmtBRL(b.avg3m) : '—'}</td>
-          <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:var(--text3)">${fmtBRL(b.monthly_limit)}</td>
+          <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:var(--text3)">${fmtBRL(effLimit)}${rollTag}</td>
           <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:${remClr}">${rem >= 0 ? fmtBRL(rem) : '−'+fmtBRL(-rem)}</td>
           <td style="padding:10px 14px;min-width:140px">
             <div style="background:var(--bg4);border-radius:99px;height:8px;overflow:hidden">
@@ -8387,11 +9118,13 @@ function openBudgetModal(id, prefillCat) {
       G('budget-cat').value   = b.category;
       G('budget-limit').setValue?.(b.monthly_limit);
       G('budget-alert').value = b.alert_pct || 80;
+      if (G('budget-rollover')) G('budget-rollover').checked = !!b.rollover;
     }
   } else {
     G('budget-modal-title').textContent = 'Nova meta de orçamento';
     G('budget-cat').value = prefillCat || '';
     G('budget-limit').setValue?.(null);
+    if (G('budget-rollover')) G('budget-rollover').checked = false;
   }
   openModal('modal-budget');
   setTimeout(() => {
@@ -8410,7 +9143,8 @@ async function saveBudget() {
   if (!category) { toast('Informe a categoria'); return; }
   if (!limit || limit <= 0) { toast('Informe um limite maior que zero'); return; }
 
-  await ff.budgetSave({ id, category, monthly_limit: limit, alert_pct: alertPct });
+  const rollover = G('budget-rollover')?.checked || false;
+  await ff.budgetSave({ id, category, monthly_limit: limit, alert_pct: alertPct, rollover });
   closeModal('modal-budget');
   toast(`✅ Meta "${category}" salva`);
   await refreshBudget();
@@ -10417,8 +11151,8 @@ function refreshPatrimonioChart() {
       const adjEnd = vCurKnown + totalOutflow + totalIncome - totalInflow;
       const segReturn = vPrevKnown > 0 ? adjEnd / vPrevKnown - 1 : 0;
 
-      // Monthly compound rate for the segment
-      const monthlyRate = n > 0 ? Math.pow(1 + segReturn, 1/n) - 1 : 0;
+      // Monthly compound rate for the segment (guard against base <= 0 → NaN)
+      const monthlyRate = (n > 0 && (1 + segReturn) > 0) ? Math.pow(1 + segReturn, 1/n) - 1 : 0;
 
       // Generate interpolated values and compute per-month factors
       let runVal = vPrevKnown;
@@ -10733,8 +11467,8 @@ function patRenderAssetChart() {
         const totOut = gapMonths.slice(1).reduce((s, m) => s + (assetOutflow2[m] || 0), 0);
         const totInc = gapMonths.slice(1).reduce((s, m) => s + (assetIncome2[m]  || 0), 0);
         const adjEnd = vc + totOut + totInc - totIn;
-        const segRet = adjEnd / vp - 1;
-        const mr = Math.pow(1 + segRet, 1/n) - 1;
+        const segRet = vp > 0 ? adjEnd / vp - 1 : 0;
+        const mr = (n > 0 && (1 + segRet) > 0) ? Math.pow(1 + segRet, 1/n) - 1 : 0;
         let runVal = vp;
         for (let j = 1; j <= n; j++) {
           const gc = gapMonths[j], gp = gapMonths[j-1];
@@ -14613,8 +15347,17 @@ async function aposCalc() {
   // A poupança total (rendimento + x) é crescente ao longo do tempo.
   const fatorN      = Math.pow(1 + rateReal, yearsTotal);
   const pvGrown     = patAtual * fatorN;
-  const xAnual      = pvGrown >= metaPatrimonio ? 0
-    : (metaPatrimonio - pvGrown) / ((fatorN - 1) / rateReal);
+  let xAnual = 0;
+  if (yearsTotal <= 0) {
+    xAnual = 0; // já é (ou passou) o ano de aposentadoria
+  } else if (pvGrown >= metaPatrimonio) {
+    xAnual = 0; // patrimônio atual já alcança a meta
+  } else if (Math.abs(rateReal) < 1e-9) {
+    // Limite r→0: sem juros, aporte linear puro
+    xAnual = (metaPatrimonio - patAtual) / yearsTotal;
+  } else {
+    xAnual = (metaPatrimonio - pvGrown) / ((fatorN - 1) / rateReal);
+  }
   const needPMT     = xAnual / 12; // aporte externo mensal fixo
   const annuityPerYear = xAnual;   // aporte externo anual fixo
 

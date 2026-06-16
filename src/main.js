@@ -457,9 +457,20 @@ async function initDB() {
     asset_id INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
     month TEXT NOT NULL, installment REAL NOT NULL, paid INTEGER NOT NULL DEFAULT 0,
     UNIQUE(asset_id, month))`); } catch(e) {}
-  // v4.5.9: credit limit
-  try { db.run('ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0'); } catch(e) {}
+  // v4.5.9 / v4.7.2: late feature columns (also re-applied after DB decryption)
+  ensureLateColumns();
   save();
+}
+
+// Idempotent column migrations for features added after initial schema.
+// Safe to call multiple times and after DB decryption (encrypted DBs miss
+// migrations that ran against the still-locked placeholder DB at startup).
+function ensureLateColumns() {
+  const alters = [
+    'ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0',
+    'ALTER TABLE budgets ADD COLUMN rollover INTEGER NOT NULL DEFAULT 0',
+  ];
+  alters.forEach(sql => { try { db.run(sql); } catch(e) {} });
 }
 
 // ── DB HELPERS ──
@@ -514,13 +525,26 @@ function run(sql, params=[]) {
 // Accounts
 ipcMain.handle('accounts:list', () => all('SELECT * FROM accounts ORDER BY sort_order, name'));
 ipcMain.handle('accounts:create', (_, { name, type, currency, credit_limit }) => {
+  // Ensure the column exists (covers DBs where the migration didn't run)
+  try { db.run('ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0'); } catch(e) {}
   const maxOrder = first('SELECT MAX(sort_order) as m FROM accounts WHERE type=?', [type])?.m || 0;
-  const id = run('INSERT INTO accounts (name,type,currency,sort_order,credit_limit) VALUES (?,?,?,?,?)', [name, type, currency||'BRL', maxOrder+1, credit_limit||0]);
+  let id;
+  try {
+    id = run('INSERT INTO accounts (name,type,currency,sort_order,credit_limit) VALUES (?,?,?,?,?)', [name, type, currency||'BRL', maxOrder+1, credit_limit||0]);
+  } catch(e) {
+    // Fallback for legacy schema without credit_limit
+    id = run('INSERT INTO accounts (name,type,currency,sort_order) VALUES (?,?,?,?)', [name, type, currency||'BRL', maxOrder+1]);
+  }
   save();
   return first('SELECT * FROM accounts WHERE id=?', [id]);
 });
 ipcMain.handle('accounts:update', (_, { id, name, type, currency, hidden, credit_limit }) => {
-  run('UPDATE accounts SET name=?,type=?,currency=?,hidden=?,credit_limit=? WHERE id=?', [name, type, currency, hidden?1:0, credit_limit||0, id]);
+  try { db.run('ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0'); } catch(e) {}
+  try {
+    run('UPDATE accounts SET name=?,type=?,currency=?,hidden=?,credit_limit=? WHERE id=?', [name, type, currency, hidden?1:0, credit_limit||0, id]);
+  } catch(e) {
+    run('UPDATE accounts SET name=?,type=?,currency=?,hidden=? WHERE id=?', [name, type, currency, hidden?1:0, id]);
+  }
   save();
   return first('SELECT * FROM accounts WHERE id=?', [id]);
 });
@@ -597,10 +621,10 @@ ipcMain.handle('tx:update', (_, { id, date, category, memo, amount, cleared, pat
   if (old) pushUndo(`Editar "${old.memo||old.category}"`, [
     { sql: 'UPDATE transactions SET date=?,category=?,memo=?,amount=?,cleared=? WHERE id=?',
       params: [old.date, old.category, old.memo, old.amount, old.cleared, id] },
-    // Also restore paired leg if transfer
+    // Also restore paired leg if transfer — the paired leg's original amount is -old.amount
     ...(old.transfer_id ? [{
       sql: 'UPDATE transactions SET date=?,memo=?,amount=? WHERE transfer_id=? AND id!=?',
-      params: [old.date, old.memo, old.amount, old.transfer_id, id]   // old.amount is original paired amount (inverted)
+      params: [old.date, old.memo, -old.amount, old.transfer_id, id]   // paired leg = inverse of edited leg
     }] : [])
   ]);
   save();
@@ -608,7 +632,12 @@ ipcMain.handle('tx:update', (_, { id, date, category, memo, amount, cleared, pat
 });
 ipcMain.handle('tx:delete', (_, id) => {
   const tx = first('SELECT * FROM transactions WHERE id=?', [id]);
-  if (tx?.transfer_id) run('DELETE FROM transactions WHERE transfer_id=? AND id!=?', [tx.transfer_id, id]);
+  // Capture the paired transfer leg BEFORE deleting, so undo can restore both legs
+  let pairedLeg = null;
+  if (tx?.transfer_id) {
+    pairedLeg = first('SELECT * FROM transactions WHERE transfer_id=? AND id!=?', [tx.transfer_id, id]);
+    run('DELETE FROM transactions WHERE transfer_id=? AND id!=?', [tx.transfer_id, id]);
+  }
   // If this is a future uncleared recurring tx, remember the exclusion so sync won't recreate it
   if (tx?.recurring_id && tx.cleared === 0 && tx.date >= new Date().toISOString().slice(0,10)) {
     try {
@@ -625,6 +654,11 @@ ipcMain.handle('tx:delete', (_, id) => {
   if (tx) pushUndo(`Excluir "${tx.memo||tx.category}"`, [
     { sql: 'INSERT INTO transactions (id,account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,?,?,?)',
       params: [tx.id, tx.account_id, tx.date, tx.category, tx.memo, tx.amount, tx.cleared, tx.transfer_id||null] },
+    // Restore the paired transfer leg too
+    ...(pairedLeg ? [{
+      sql: 'INSERT INTO transactions (id,account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,?,?,?)',
+      params: [pairedLeg.id, pairedLeg.account_id, pairedLeg.date, pairedLeg.category, pairedLeg.memo, pairedLeg.amount, pairedLeg.cleared, pairedLeg.transfer_id]
+    }] : []),
     // Also remove the exclusion so undo restores correctly
     { sql: 'DELETE FROM recurring_excludes WHERE recurring_id=? AND date=?',
       params: [tx.recurring_id||0, tx.date] }
@@ -783,6 +817,50 @@ ipcMain.handle('report:future-pending', () => {
     AND t.transfer_id IS NULL
     ORDER BY t.date ASC, (CASE WHEN t.amount < 0 THEN 1 ELSE 0 END) ASC`, [today]);
 });
+// ── Cash-flow projection: starting balances + all future-dated transactions ──
+// Returns: { accounts:[{id,name,type,currency,startBal}], events:[{date,account_id,memo,category,amount,cleared,isTransfer}] }
+// Future transactions already include recurring instances and financing sync legs,
+// so we just union starting balances with everything dated after today.
+ipcMain.handle('report:cashflow-projection', (_, opts) => {
+  const today    = new Date().toISOString().slice(0,10);
+  const horizon  = opts?.horizonMonths || 6;
+  const accIds   = (opts?.accountIds && opts.accountIds.length) ? opts.accountIds : null;
+  const includeCredit = opts?.includeCredit ?? false;
+
+  // End date = today + horizon months
+  const d = new Date(today + 'T00:00:00');
+  d.setMonth(d.getMonth() + horizon);
+  const endDate = d.toISOString().slice(0,10);
+
+  // Eligible accounts
+  let accWhere = 'hidden=0';
+  if (!includeCredit) accWhere += " AND type != 'credit'";
+  if (accIds) accWhere += ` AND id IN (${accIds.map(()=>'?').join(',')})`;
+  const accounts = all(`SELECT id,name,type,currency FROM accounts WHERE ${accWhere} ORDER BY type, sort_order`,
+    accIds ? accIds : []);
+  const eligibleIds = accounts.map(a => a.id);
+  if (!eligibleIds.length) return { accounts: [], events: [], startTotal: 0 };
+
+  const idList = eligibleIds.map(()=>'?').join(',');
+
+  // Starting balance per account (everything up to and including today)
+  accounts.forEach(a => {
+    const row = first('SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND date<=?', [a.id, today]);
+    a.startBal = row?.bal || 0;
+  });
+  const startTotal = accounts.reduce((s,a) => s + a.startBal, 0);
+
+  // Future-dated events within horizon (include cleared + uncleared; they all affect the balance)
+  const events = all(`SELECT t.date, t.account_id, t.memo, t.category, t.amount, t.cleared,
+      (CASE WHEN t.transfer_id IS NOT NULL THEN 1 ELSE 0 END) as isTransfer
+    FROM transactions t
+    WHERE t.account_id IN (${idList}) AND t.date > ? AND t.date <= ?
+    ORDER BY t.date ASC, (CASE WHEN t.amount < 0 THEN 1 ELSE 0 END) ASC`,
+    [...eligibleIds, today, endDate]);
+
+  return { accounts, events, startTotal, today, endDate, horizonMonths: horizon };
+});
+
 ipcMain.handle('report:net-worth', (_, { date }) => {
   const d = date || new Date().toISOString().slice(0,10);
   return all(`SELECT a.id,a.name,a.type,a.currency,COALESCE(SUM(t.amount),0) as balance
@@ -869,17 +947,56 @@ ipcMain.handle('goal:avg-monthly-savings', () => {
 
 // Budget CRUD
 ipcMain.handle('budget:list', () => all('SELECT * FROM budgets WHERE active=1 ORDER BY category'));
-ipcMain.handle('budget:save', (_, { id, category, monthly_limit, alert_pct }) => {
+ipcMain.handle('budget:save', (_, { id, category, monthly_limit, alert_pct, rollover }) => {
+  const rv = rollover ? 1 : 0;
   if (id) {
-    run('UPDATE budgets SET category=?,monthly_limit=?,alert_pct=? WHERE id=?',
-      [category, monthly_limit, alert_pct||80, id]);
+    run('UPDATE budgets SET category=?,monthly_limit=?,alert_pct=?,rollover=? WHERE id=?',
+      [category, monthly_limit, alert_pct||80, rv, id]);
   } else {
-    run('INSERT OR REPLACE INTO budgets (category,monthly_limit,alert_pct,active) VALUES (?,?,?,1)',
-      [category, monthly_limit, alert_pct||80]);
+    run('INSERT OR REPLACE INTO budgets (category,monthly_limit,alert_pct,rollover,active) VALUES (?,?,?,?,1)',
+      [category, monthly_limit, alert_pct||80, rv]);
   }
   save();
   return { ok: true };
 });
+// Rollover: accumulated leftover (limit - spent) from all prior months since the budget existed,
+// only for categories with rollover enabled. Positive = surplus carried forward; negative = overspend carried.
+ipcMain.handle('budget:rollover-balance', (_, { beforeMonth }) => {
+  const rolloverCats = all('SELECT category, monthly_limit FROM budgets WHERE active=1 AND rollover=1');
+  if (!rolloverCats.length) return {};
+
+  // Find the first month with any transaction (to bound the accumulation window)
+  const firstTxRow = first("SELECT MIN(substr(date,1,7)) as m FROM transactions");
+  const firstMonth = firstTxRow?.m;
+  if (!firstMonth || firstMonth >= beforeMonth) return {};
+
+  // Build list of months from firstMonth up to (but excluding) beforeMonth
+  const months = [];
+  let [y, mo] = firstMonth.split('-').map(Number);
+  while (true) {
+    const ym = `${y}-${String(mo).padStart(2,'0')}`;
+    if (ym >= beforeMonth) break;
+    months.push(ym);
+    mo++; if (mo > 12) { mo = 1; y++; }
+  }
+  if (!months.length) return {};
+
+  const result = {};
+  rolloverCats.forEach(({ category, monthly_limit }) => {
+    let acc = 0;
+    months.forEach(ym => {
+      const from = ym + '-01', to = ym + '-31';
+      const row = first(`SELECT SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as spent
+        FROM transactions WHERE category=? AND date>=? AND date<=? AND transfer_id IS NULL`,
+        [category, from, to]);
+      const spent = row?.spent || 0;
+      acc += (monthly_limit - spent); // leftover for the month (can be negative)
+    });
+    result[category] = acc;
+  });
+  return result;
+});
+
 ipcMain.handle('budget:delete', (_, { id }) => {
   run('DELETE FROM budgets WHERE id=?', [id]);
   save();
@@ -4327,6 +4444,129 @@ ipcMain.handle('settings:save-data', (_, data) => {
   return { ok: true };
 });
 
+// ── AI: Anthropic API key (stored locally in settings) ──
+ipcMain.handle('ai:get-key-status', () => {
+  const s = loadSettings();
+  const key = s.anthropicApiKey || '';
+  return { hasKey: !!key, masked: key ? key.slice(0,7) + '...' + key.slice(-4) : null };
+});
+ipcMain.handle('ai:set-key', (_, key) => {
+  const s = loadSettings();
+  s.anthropicApiKey = (key || '').trim();
+  saveSettings(s);
+  return { ok: true, hasKey: !!s.anthropicApiKey };
+});
+ipcMain.handle('ai:clear-key', () => {
+  const s = loadSettings();
+  delete s.anthropicApiKey;
+  saveSettings(s);
+  return { ok: true };
+});
+
+// ── AI: natural-language transaction parsing relay ──
+// Sends the user's text + context to Claude and returns structured transaction(s).
+// The API key never leaves the main process / local machine.
+ipcMain.handle('ai:parse-transaction', async (_, { text, accounts, categories, today }) => {
+  const s = loadSettings();
+  const apiKey = s.anthropicApiKey;
+  if (!apiKey) return { ok: false, error: 'NO_KEY' };
+  if (!text || !text.trim()) return { ok: false, error: 'EMPTY' };
+
+  const accList = (accounts || []).map(a => `- id:${a.id} | ${a.name} (${a.type})`).join('\n');
+  const catList = (categories || []).join(', ');
+
+  const sys = `Você é um assistente que converte descrições em linguagem natural (português do Brasil) em lançamentos financeiros estruturados.
+Hoje é ${today}.
+Contas disponíveis:
+${accList}
+Categorias disponíveis: ${catList}
+
+Regras:
+- Despesas têm amount NEGATIVO; receitas têm amount POSITIVO.
+- Escolha a conta mais provável pelo texto; se não houver pista, use a primeira conta da lista.
+- Escolha a categoria mais próxima da lista; se nenhuma encaixar, use "".
+- Datas relativas (ontem, hoje, semana passada, dia 5) devem virar data absoluta YYYY-MM-DD baseada em hoje.
+- Pode haver mais de um lançamento numa única frase.
+- Responda SOMENTE com JSON válido, sem markdown, sem texto extra, no formato:
+{"transactions":[{"date":"YYYY-MM-DD","account_id":<int>,"category":"<str>","memo":"<str>","amount":<number>}],"confidence":"high|medium|low","note":"<curta explicação opcional>"}`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: sys,
+        messages: [{ role: 'user', content: text.trim() }],
+      }),
+    });
+    if (!res.ok) {
+      const errTxt = await res.text().catch(()=> '');
+      if (res.status === 401) return { ok: false, error: 'BAD_KEY' };
+      return { ok: false, error: 'API_ERROR', detail: `${res.status} ${errTxt.slice(0,200)}` };
+    }
+    const data = await res.json();
+    let raw = (data.content || []).map(b => b.type === 'text' ? b.text : '').join('').trim();
+    raw = raw.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch(e) { return { ok: false, error: 'PARSE_FAIL', detail: raw.slice(0,300) }; }
+    return { ok: true, result: parsed };
+  } catch(e) {
+    return { ok: false, error: 'NETWORK', detail: String(e).slice(0,200) };
+  }
+});
+
+// ── AI: proactive financial insights ──
+// Receives a compact financial summary and returns short, actionable insights.
+ipcMain.handle('ai:generate-insights', async (_, { summary }) => {
+  const s = loadSettings();
+  const apiKey = s.anthropicApiKey;
+  if (!apiKey) return { ok: false, error: 'NO_KEY' };
+  if (!summary) return { ok: false, error: 'EMPTY' };
+
+  const sys = `Você é um consultor financeiro pessoal analisando os dados de um usuário brasileiro.
+Receberá um resumo em JSON com gastos/receitas por categoria nos últimos meses, médias e orçamentos.
+Gere de 3 a 5 insights CURTOS, ESPECÍFICOS e ACIONÁVEIS em português do Brasil.
+Cada insight deve citar números concretos do resumo (ex: "Mercado subiu 32% vs média").
+Foque em: variações relevantes de gasto, categorias acima do orçamento, tendências, oportunidades de economia, e elogios quando o usuário está indo bem.
+NÃO invente dados que não estão no resumo. NÃO dê conselhos genéricos ("economize mais").
+Responda SOMENTE com JSON válido, sem markdown:
+{"insights":[{"icon":"<1 emoji>","type":"alert|positive|tip|trend","title":"<curto>","detail":"<1-2 frases com números>"}]}`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1024,
+        system: sys,
+        messages: [{ role: 'user', content: JSON.stringify(summary) }],
+      }),
+    });
+    if (!res.ok) {
+      if (res.status === 401) return { ok: false, error: 'BAD_KEY' };
+      const t = await res.text().catch(()=> '');
+      return { ok: false, error: 'API_ERROR', detail: `${res.status} ${t.slice(0,200)}` };
+    }
+    const data = await res.json();
+    let raw = (data.content || []).map(b => b.type === 'text' ? b.text : '').join('').trim();
+    raw = raw.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/```$/, '').trim();
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch(e) { return { ok: false, error: 'PARSE_FAIL', detail: raw.slice(0,300) }; }
+    return { ok: true, result: parsed };
+  } catch(e) {
+    return { ok: false, error: 'NETWORK', detail: String(e).slice(0,200) };
+  }
+});
+
 ipcMain.handle('settings:set-tour-done', () => {
   const s = loadSettings();
   s.tourDone = true;
@@ -4565,6 +4805,7 @@ ipcMain.handle('settings:reset-password', async (_, { code, newPassword }) => {
   db = new SQL.Database(plainDB);
   db.run('PRAGMA foreign_keys = ON;');
   _dbPendingDecrypt = false;
+  try { ensureLateColumns(); } catch(e) {}
 
   // Save re-encrypted DB
   save();
@@ -4603,6 +4844,7 @@ ipcMain.handle('settings:check-password', (_, pw) => {
       _encryptedDBBuf  = null;
       _dbPendingDecrypt = false;
       // Run deferred startup tasks that were skipped during pending decrypt
+      try { ensureLateColumns(); save(); } catch(e) {}
       try { migrateRecurring(); } catch(e) {}
       setImmediate(() => {
         try { const recs = all('SELECT * FROM recurring WHERE active=1'); recs.forEach(rec => syncRecurringTxns(rec)); save(); } catch(e) {}
@@ -4697,6 +4939,7 @@ ipcMain.handle('login:check', (_, pw) => {
       _encryptedDBBuf  = null;
       _dbPendingDecrypt = false;
       // Run deferred startup tasks
+      try { ensureLateColumns(); save(); } catch(e) {}
       try { migrateRecurring(); } catch(e) {}
       setImmediate(() => {
         try {

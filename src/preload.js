@@ -20,6 +20,13 @@ const api = {
   budgetDelete:       (d)  => ipcRenderer.invoke('budget:delete', d),
   budgetActuals:      (d)  => ipcRenderer.invoke('budget:actuals', d),
   budgetAvg3m:        (d)  => ipcRenderer.invoke('budget:avg3m', d),
+  budgetRolloverBalance: (d) => ipcRenderer.invoke('budget:rollover-balance', d),
+  // AI
+  aiGetKeyStatus:  ()    => ipcRenderer.invoke('ai:get-key-status'),
+  aiSetKey:        (k)   => ipcRenderer.invoke('ai:set-key', k),
+  aiClearKey:      ()    => ipcRenderer.invoke('ai:clear-key'),
+  aiParseTransaction: (d) => ipcRenderer.invoke('ai:parse-transaction', d),
+  aiGenerateInsights: (d) => ipcRenderer.invoke('ai:generate-insights', d),
   goalList:           ()   => ipcRenderer.invoke('goal:list'),
   goalSave:           (d)  => ipcRenderer.invoke('goal:save', d),
   goalDelete:         (d)  => ipcRenderer.invoke('goal:delete', d),
@@ -163,6 +170,7 @@ const api = {
   reportNetWorthHistory: () => ipcRenderer.invoke('report:net-worth-history'),
   reportBudget:   (opts)  => ipcRenderer.invoke('report:budget', opts),
   reportFuturePending: ()  => ipcRenderer.invoke('report:future-pending'),
+  reportCashflowProjection: (opts) => ipcRenderer.invoke('report:cashflow-projection', opts),
 
   // ML
   mlPredict:      (data)  => ipcRenderer.invoke('ml:predict', data),
