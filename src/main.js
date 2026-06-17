@@ -475,10 +475,52 @@ async function initDB() {
 // Safe to call multiple times and after DB decryption (encrypted DBs miss
 // migrations that ran against the still-locked placeholder DB at startup).
 function ensureLateColumns() {
+  // Garante que as tabelas existem antes de tentar alterar suas colunas — necessário
+  // porque, em bancos criptografados, o CREATE TABLE original (em initDB) pode ter
+  // rodado contra o banco ainda bloqueado e nunca chegado a criar a tabela de fato.
+  const createIfMissing = [
+    `CREATE TABLE IF NOT EXISTS pat_financing_contracts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      asset_id INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
+      label TEXT, status TEXT NOT NULL DEFAULT 'active', closed_month TEXT,
+      system TEXT NOT NULL DEFAULT 'SAC', index_type TEXT NOT NULL DEFAULT 'none',
+      annual_rate REAL NOT NULL DEFAULT 0, principal REAL NOT NULL DEFAULT 0,
+      n_installments INTEGER NOT NULL DEFAULT 0, first_month TEXT NOT NULL,
+      balloon_at_keys REAL, extra_annual_month INTEGER, extra_annual_value REAL,
+      notes TEXT, created_at TEXT DEFAULT (datetime('now')))`,
+    `CREATE TABLE IF NOT EXISTS pat_financing (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      asset_id INTEGER NOT NULL REFERENCES pat_assets(id) ON DELETE CASCADE,
+      month TEXT NOT NULL, installment REAL NOT NULL, paid INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(asset_id, month))`,
+  ];
+  createIfMissing.forEach(sql => { try { db.run(sql); } catch(e) {} });
+
   const alters = [
     'ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0',
     'ALTER TABLE budgets ADD COLUMN rollover INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE budgets ADD COLUMN rollover_months INTEGER NOT NULL DEFAULT 3',
+    'ALTER TABLE pat_assets ADD COLUMN ownership_pct REAL',
+    // Colunas de financiamento — também precisam existir mesmo se o banco
+    // estava criptografado no startup (ver comentário em ensureLateColumns).
+    'ALTER TABLE pat_assets ADD COLUMN financed INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE pat_assets ADD COLUMN financing_total REAL',
+    'ALTER TABLE pat_assets ADD COLUMN total_value REAL',
+    'ALTER TABLE pat_financing ADD COLUMN principal REAL',
+    'ALTER TABLE pat_financing ADD COLUMN interest REAL',
+    'ALTER TABLE pat_financing ADD COLUMN correction REAL',
+    'ALTER TABLE pat_financing ADD COLUMN balance_end REAL',
+    'ALTER TABLE pat_financing ADD COLUMN is_projection INTEGER NOT NULL DEFAULT 1',
+    'ALTER TABLE pat_financing ADD COLUMN linked_tx_id INTEGER',
+    'ALTER TABLE pat_financing_contracts ADD COLUMN sync_account_id INTEGER',
+    'ALTER TABLE pat_financing_contracts ADD COLUMN sync_day INTEGER',
+    'ALTER TABLE pat_financing_contracts ADD COLUMN sync_category TEXT',
+    'ALTER TABLE pat_financing_contracts ADD COLUMN label TEXT',
+    "ALTER TABLE pat_financing_contracts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+    'ALTER TABLE pat_financing_contracts ADD COLUMN closed_month TEXT',
+    'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance REAL',
+    'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance_month TEXT',
+    'ALTER TABLE pat_financing ADD COLUMN contract_id INTEGER REFERENCES pat_financing_contracts(id) ON DELETE CASCADE',
   ];
   alters.forEach(sql => { try { db.run(sql); } catch(e) {} });
 }
@@ -677,6 +719,12 @@ ipcMain.handle('tx:delete', (_, id) => {
 });
 
 // Transfer
+ipcMain.handle('tx:get-transfer-pair', (_, { txId }) => {
+  const tx = first('SELECT * FROM transactions WHERE id=?', [txId]);
+  if (!tx?.transfer_id) return null;
+  const paired = first('SELECT * FROM transactions WHERE transfer_id=? AND id!=?', [tx.transfer_id, txId]);
+  return paired ? { account_id: paired.account_id, amount: paired.amount } : null;
+});
 ipcMain.handle('tx:transfer', (_, { fromAccountId, toAccountId, date, amount, memo }) => {
   const maxRow = first('SELECT COALESCE(MAX(transfer_id),0) as m FROM transactions');
   const tid = (maxRow?.m || 0) + 1;
@@ -2590,18 +2638,19 @@ ipcMain.handle('pat:assets-list', () =>
   all('SELECT * FROM pat_assets ORDER BY sort_order, id')
 );
 
-ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, sold_month, sold_value, hidden, financed, financing_total }) => {
+ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, sold_month, sold_value, hidden, financed, financing_total, ownership_pct }) => {
+  const ownPct = (asset_type === 'societario' && ownership_pct != null && ownership_pct !== '') ? parseFloat(ownership_pct) : null;
   if (id) {
-    run('UPDATE pat_assets SET name=?,asset_type=?,trend=?,sort_order=?,sold_month=?,sold_value=?,hidden=?,financed=?,financing_total=? WHERE id=?',
-      [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, id]);
+    run('UPDATE pat_assets SET name=?,asset_type=?,trend=?,sort_order=?,sold_month=?,sold_value=?,hidden=?,financed=?,financing_total=?,ownership_pct=? WHERE id=?',
+      [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, ownPct, id]);
     if (sold_month) {
       db.run('DELETE FROM pat_history WHERE asset_id=? AND month>? AND manual=0', [id, sold_month]);
       save();
     }
     return { id };
   } else {
-    const newId = run('INSERT INTO pat_assets (name,asset_type,trend,sort_order,sold_month,sold_value,hidden,financed,financing_total) VALUES (?,?,?,?,?,?,?,?,?)',
-      [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null]);
+    const newId = run('INSERT INTO pat_assets (name,asset_type,trend,sort_order,sold_month,sold_value,hidden,financed,financing_total,ownership_pct) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, ownPct]);
     const resolvedId = newId || first('SELECT id FROM pat_assets WHERE name=? ORDER BY id DESC LIMIT 1', [name])?.id;
     return { id: resolvedId };
   }
@@ -3012,11 +3061,13 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
 
   // PLANTA: equal installments with no interest (amortization only, correction applied at payment)
   if (system === 'PLANTA') {
-    const monthlyInstall = remainingPrincipal / n_installments;
     let balance = remainingPrincipal;
     let cur = first_month;
-    for (let i = 0; i < n_installments && balance > 0.01; i++) {
-      let amort = monthlyInstall;
+    for (let i = 0; i < n_installments; i++) {
+      const monthsRemaining = n_installments - i;
+      // Recalculado a cada mês (saldo/meses restantes) — extras anuais não
+      // encurtam o prazo; a amortização regular se ajusta para fechar em N.
+      const amort = balance / monthsRemaining;
       const extra = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month) ? extra_annual_value : 0;
       balance = Math.max(0, balance - amort - extra);
       schedule.push({
@@ -3026,38 +3077,43 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
       });
       const [y, m] = cur.split('-').map(Number);
       cur = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
-      if (balance <= 0.01) break;
     }
     return schedule;
   }
 
-  // Compute PRICE fixed installment once
-  let priceInstallment = 0;
-  if (system === 'PRICE' || system === 'SAM') {
-    if (r > 0) {
-      priceInstallment = remainingPrincipal * r * Math.pow(1+r, n_installments) / (Math.pow(1+r, n_installments) - 1);
-    } else {
-      priceInstallment = remainingPrincipal / n_installments;
-    }
+  // Parcela PRICE recalculada a cada mês com base no saldo e meses restantes —
+  // necessário para que pagamentos extras (parcela anual) acelerem a quitação
+  // sem nunca encurtar o número de parcelas mensais previstas.
+  function priceInstallmentFor(bal, rate, monthsLeft) {
+    if (monthsLeft <= 0) return 0;
+    return rate > 0
+      ? bal * rate * Math.pow(1+rate, monthsLeft) / (Math.pow(1+rate, monthsLeft) - 1)
+      : bal / monthsLeft;
   }
 
   let balance = remainingPrincipal;
   let cur = first_month;
 
   for (let i = 0; i < n_installments; i++) {
+    const monthsRemaining = n_installments - i;
     const interest = balance * r;
     let amortization, installment;
 
     if (system === 'SAC') {
-      amortization = remainingPrincipal / n_installments;
+      // Recalculado a cada mês com base no saldo e nos meses restantes — garante
+      // que pagamentos extras (parcela anual) NÃO encurtem o número de parcelas:
+      // eles aceleram a quitação do saldo, e a amortização regular se ajusta
+      // para que as N parcelas sempre fechem o saldo exatamente na última.
+      amortization = balance / monthsRemaining;
       installment  = amortization + interest;
     } else if (system === 'PRICE') {
-      installment  = priceInstallment;
+      installment  = priceInstallmentFor(balance, r, monthsRemaining);
       amortization = installment - interest;
     } else { // SAM
-      const sacAm   = remainingPrincipal / n_installments;
+      const sacAm   = balance / monthsRemaining;
       const sacInst = sacAm + interest;
-      installment   = (sacInst + priceInstallment) / 2;
+      const priceInst = priceInstallmentFor(balance, r, monthsRemaining);
+      installment   = (sacInst + priceInst) / 2;
       amortization  = installment - interest;
     }
 
@@ -3083,7 +3139,9 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
     // Advance month
     const [y, m] = cur.split('-').map(Number);
     cur = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
-    if (balance <= 0.01) break;
+    // Sem break antecipado: as N parcelas são sempre geradas por completo.
+    // Com a amortização recalculada a cada mês (saldo/meses restantes), o
+    // saldo zera exatamente na última parcela, nunca antes.
   }
   return schedule;
 }
@@ -3094,6 +3152,34 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
 // every FUTURE (today or later) projected installment that doesn't already have
 // a linked transaction. Idempotent: re-running won't create duplicates, since it
 // checks `pat_installment_month` for an existing link before inserting.
+// Lança a transação futura única do "saldo nas chaves" (pagamento à vista do
+// restante do imóvel na entrega das chaves, comum em compras na planta) na
+// conta sincronizada, na data prevista. Pagamento único — não é recorrente.
+function _syncKeysBalanceToBank({ assetId, contractId, accountId, syncDay, category, keysBalance, keysBalanceMonth, memoPrefix }) {
+  if (!accountId || !keysBalance || !keysBalanceMonth) return { created: 0 };
+  const today = new Date().toISOString().slice(0,10);
+  const month = keysBalanceMonth.slice(0,7);
+  const [y, mo] = month.split('-').map(Number);
+  const lastDay = new Date(y, mo, 0).getDate();
+  const day = Math.min(syncDay || 1, lastDay);
+  const dueDate = `${month}-${String(day).padStart(2,'0')}`;
+
+  if (dueDate < today) return { created: 0 }; // não cria retroativo
+
+  // Usa um marcador de mês exclusivo para o saldo nas chaves, distinto das
+  // parcelas mensais regulares, para nunca colidir/duplicar com elas.
+  const keysMarker = `keys:${month}`;
+  const existing = first('SELECT id FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, keysMarker]);
+  if (existing) return { created: 0 };
+
+  run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_installment_month)
+       VALUES (?,?,?,?,?,0,?,?)`,
+    [accountId, dueDate, category || 'Financiamento', `${memoPrefix} — Saldo nas chaves`, -Math.abs(keysBalance),
+     assetId, keysMarker]);
+  save();
+  return { created: 1 };
+}
+
 function _syncInstallmentsToBank({ schedule, accountId, syncDay, category, assetId, contractId, debtId, memoPrefix }) {
   if (!accountId || !syncDay) return { created: 0 };
   const today = new Date().toISOString().slice(0,10);
@@ -3198,7 +3284,7 @@ ipcMain.handle('pat:financing-contract-close', (_, { contractId, closedMonth }) 
 ipcMain.handle('pat:financing-contract-save', (_, { assetId, contractId, contract }) => {
   const { label, system, index_type, annual_rate, principal, n_installments, first_month,
           balloon_at_keys, extra_annual_month, extra_annual_value, notes,
-          sync_account_id, sync_day, sync_category } = contract;
+          sync_account_id, sync_day, sync_category, keys_balance, keys_balance_month } = contract;
 
   let cId = contractId;
   if (cId) {
@@ -3206,19 +3292,20 @@ ipcMain.handle('pat:financing-contract-save', (_, { assetId, contractId, contrac
     run(`UPDATE pat_financing_contracts SET
         label=COALESCE(?, label), system=?, index_type=?, annual_rate=?, principal=?, n_installments=?, first_month=?,
         balloon_at_keys=?, extra_annual_month=?, extra_annual_value=?, notes=?,
-        sync_account_id=COALESCE(?, sync_account_id), sync_day=COALESCE(?, sync_day), sync_category=COALESCE(?, sync_category)
+        sync_account_id=COALESCE(?, sync_account_id), sync_day=COALESCE(?, sync_day), sync_category=COALESCE(?, sync_category),
+        keys_balance=?, keys_balance_month=?
       WHERE id=?`,
       [label||null, system, index_type||'none', annual_rate, principal, n_installments, first_month,
        balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null,
-       sync_account_id||null, sync_day||null, sync_category||null, cId]);
+       sync_account_id||null, sync_day||null, sync_category||null, keys_balance||null, keys_balance_month||null, cId]);
   } else {
     // New contract — insert as the active one
     cId = run(`INSERT INTO pat_financing_contracts
-      (asset_id,label,status,system,index_type,annual_rate,principal,n_installments,first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes,sync_account_id,sync_day,sync_category)
-      VALUES (?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      (asset_id,label,status,system,index_type,annual_rate,principal,n_installments,first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes,sync_account_id,sync_day,sync_category,keys_balance,keys_balance_month)
+      VALUES (?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [assetId, label||null, system, index_type||'none', annual_rate, principal, n_installments, first_month,
        balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null,
-       sync_account_id||null, sync_day||null, sync_category||null]);
+       sync_account_id||null, sync_day||null, sync_category||null, keys_balance||null, keys_balance_month||null]);
   }
 
   // Generate and save schedule (only projected rows — don't overwrite paid rows)
@@ -3245,6 +3332,14 @@ ipcMain.handle('pat:financing-contract-save', (_, { assetId, contractId, contrac
     schedule, assetId, contractId: cId,
     accountId: sync_account_id, syncDay: sync_day, category: sync_category,
     memoPrefix: `Parcela financiamento — ${label ? label+' — ' : ''}${asset?.name || 'ativo'}`,
+  });
+
+  // Auto-sync the one-time "saldo nas chaves" payment, if a date was provided
+  _syncKeysBalanceToBank({
+    assetId, contractId: cId,
+    accountId: sync_account_id, syncDay: sync_day, category: sync_category,
+    keysBalance: keys_balance, keysBalanceMonth: keys_balance_month,
+    memoPrefix: `${label ? label+' — ' : ''}${asset?.name || 'ativo'}`,
   });
 
   save();
@@ -4680,13 +4775,47 @@ Outras regras:
 ipcMain.handle('ai:generate-insights', async (_, { summary }) => {
   if (!summary) return { ok: false, error: 'EMPTY' };
   const sys = `Você é um consultor financeiro pessoal analisando os dados de um usuário brasileiro.
-Receberá um resumo em JSON com gastos/receitas por categoria nos últimos meses, médias e orçamentos.
+Receberá um resumo em JSON com gastos/receitas por categoria nos últimos meses, médias, orçamentos,
+dívidas pessoais cadastradas (com taxa de juros real), juros de rotativo/cheque especial detectados
+recentemente em importações, e o saldo líquido disponível hoje (contas bancárias + dinheiro).
 Gere de 3 a 5 insights CURTOS, ESPECÍFICOS e ACIONÁVEIS em português do Brasil.
 Cada insight deve citar números concretos do resumo (ex: "Mercado subiu 32% vs média").
 Foque em: variações relevantes de gasto, categorias acima do orçamento, tendências, oportunidades de economia, e elogios quando o usuário está indo bem.
-NÃO invente dados que não estão no resumo. NÃO dê conselhos genéricos.
-Responda SOMENTE com JSON válido, sem markdown:
-{"insights":[{"icon":"<1 emoji>","type":"alert|positive|tip|trend","title":"<curto>","detail":"<1-2 frases com números>"}]}`;
+
+REGRA ESPECIAL — DÍVIDA CARA (gatilhos independentes, qualquer um já é suficiente):
+(a) há itens em recentDebtInterest (juros de rotativo de cartão ou cheque especial detectados
+    recentemente), OU
+(b) há itens em personalDebts cuja annualRate seja claramente alta (acima de ~40% a.a., faixa
+    típica de cheque especial/rotativo no Brasil).
+Se (a) ou (b) ocorrer, gere SEMPRE um insight do tipo "alert" com sugestão de alternativa mais
+barata, baseada nos dados REAIS do usuário:
+- Se liquidBalanceToday for suficiente para cobrir o valor do encargo ou abater a dívida cara,
+  sugira quitar com o saldo disponível em vez de manter o rotativo/dívida cara (cite o valor
+  exato do saldo).
+- Se houver outra entrada em personalDebts com annualRate MENOR que a dívida cara em questão,
+  sugira consolidar nela, citando as duas taxas reais do resumo.
+- Caso nenhuma das duas opções acima seja possível com os dados disponíveis, cite a ORDEM TÍPICA
+  de custo das modalidades de crédito no Brasil, da mais barata para a mais cara — consignado,
+  empréstimo pessoal com garantia, empréstimo pessoal sem garantia, parcelamento direto da fatura
+  com o banco, cheque especial, rotativo do cartão — e recomende que o usuário pesquise as taxas
+  reais oferecidas a ele nessas modalidades mais baratas antes de continuar pagando a atual.
+  NUNCA cite um número de taxa (%) para essas modalidades alternativas — apenas a ordem relativa
+  de custo. Números de taxa só podem vir do que já está no resumo (personalDebts, recentDebtInterest).
+NÃO sugira alternativas genéricas como "negocie com o banco" sem conectar a um dado concreto do resumo.
+NÃO invente dados que não estão no resumo. NÃO dê conselhos genéricos fora dessa regra especial.
+
+FORMATO DE RESPOSTA — siga EXATAMENTE este exemplo de estrutura (mas com seu próprio conteúdo,
+nunca copie os valores de exemplo abaixo, eles são só para mostrar o formato):
+{"insights":[
+  {"icon":"📈","type":"trend","title":"Mercado subiu 24%","detail":"Texto com números reais aqui."},
+  {"icon":"🛒","type":"alert","title":"Gasto alto em mercado","detail":"Texto com números reais aqui."}
+]}
+Regras OBRIGATÓRIAS do formato:
+- "icon": exatamente UM caractere emoji (ex: 📈 ou 🛒 ou 💰 ou ⚠️ ou ✅), nunca texto, nunca a palavra "emoji".
+- "type": escolha UMA destas quatro palavras exatas, em minúsculas, sem aspas extras dentro do valor:
+  alert (para alertas/problemas), positive (para elogios/boas notícias), tip (para dicas/sugestões),
+  trend (para tendências/variações). NUNCA escreva as quatro opções juntas — escolha apenas uma.
+- Responda SOMENTE com o JSON, sem texto antes ou depois, sem markdown, sem comentários.`;
 
   const r = await callLLM(sys, JSON.stringify(summary));
   if (!r.ok) return r;

@@ -63,6 +63,7 @@ const api = {
   deleteTx:       (id)    => ipcRenderer.invoke('tx:delete', id),
   bankCheckMemoDups: (d)  => ipcRenderer.invoke('bank:check-memo-dups', d),
   transfer:       (data)  => ipcRenderer.invoke('tx:transfer', data),
+  getTransferPair: (txId) => ipcRenderer.invoke('tx:get-transfer-pair', { txId }),
   importBatch:    (data)  => ipcRenderer.invoke('tx:import-batch', data),
 
   // QIF

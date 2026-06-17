@@ -557,8 +557,6 @@ async function clearAiKey() {
 }
 
 // ══ AI NATURAL-LANGUAGE ENTRY ══
-let _aiRecognition = null;
-let _aiMicActive = false;
 let _aiParsedTxs = [];
 
 async function openAiEntry() {
@@ -572,71 +570,22 @@ async function openAiEntry() {
   G('ai-entry-text').value = '';
   G('ai-entry-msg').textContent = '';
   G('ai-entry-preview').innerHTML = '';
-  G('ai-mic-status').textContent = '';
   _aiParsedTxs = [];
   openModal('modal-ai-entry');
   setTimeout(() => G('ai-entry-text')?.focus(), 80);
 }
 
-function toggleAiMic() {
-  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRec) {
-    G('ai-mic-status').textContent = '⚠️ Reconhecimento de voz não disponível neste ambiente. Use texto.';
-    G('ai-mic-status').style.color = 'var(--warn)';
-    return;
-  }
-  if (_aiMicActive) { stopAiMic(); return; }
-
-  _aiRecognition = new SpeechRec();
-  _aiRecognition.lang = 'pt-BR';
-  _aiRecognition.continuous = true;
-  _aiRecognition.interimResults = true;
-
-  let finalText = G('ai-entry-text').value;
-  _aiRecognition.onresult = (e) => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const tr = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalText += (finalText && !finalText.endsWith(' ') ? ' ' : '') + tr;
-      else interim += tr;
-    }
-    G('ai-entry-text').value = (finalText + ' ' + interim).trim();
-  };
-  _aiRecognition.onerror = (e) => {
-    G('ai-mic-status').textContent = '⚠️ Erro no microfone: ' + (e.error || 'desconhecido');
-    G('ai-mic-status').style.color = 'var(--red)';
-    stopAiMic();
-  };
-  _aiRecognition.onend = () => { if (_aiMicActive) stopAiMic(); };
-
-  try {
-    _aiRecognition.start();
-    _aiMicActive = true; window._aiMicActiveFlag = true;
-    const btn = G('ai-mic-btn');
-    if (btn) { btn.textContent = '⏹'; btn.style.background = 'var(--red)'; btn.style.color = '#fff'; }
-    G('ai-mic-status').textContent = '🔴 Ouvindo... fale o lançamento e clique no botão para parar.';
-    G('ai-mic-status').style.color = 'var(--accent)';
-  } catch(e) {
-    G('ai-mic-status').textContent = '⚠️ Não foi possível iniciar o microfone.';
-    G('ai-mic-status').style.color = 'var(--red)';
-  }
-}
-
-function stopAiMic() {
-  _aiMicActive = false; window._aiMicActiveFlag = false;
-  try { _aiRecognition?.stop(); } catch(e) {}
-  _aiRecognition = null;
-  const btn = G('ai-mic-btn');
-  if (btn) { btn.textContent = '🎤'; btn.style.background = 'var(--bg3)'; btn.style.color = ''; }
-  const st = G('ai-mic-status');
-  if (st && st.textContent.startsWith('🔴')) st.textContent = '';
-}
+// Nota: a entrada por voz (ditado) não está disponível no desktop. A Web Speech
+// API do Chromium depende de um serviço de transcrição fechado do Google que só
+// funciona no Chrome oficial — ela sempre retorna "network error" dentro do
+// Electron, é uma limitação conhecida e sem solução do lado da aplicação. A
+// entrada por voz é um recurso do app móvel (usando a transcrição nativa do
+// teclado ou a Speech API do próprio sistema iOS/Android).
 
 async function runAiParse() {
-  if (_aiMicActive) stopAiMic();
   const text = G('ai-entry-text')?.value?.trim();
   const msg = G('ai-entry-msg');
-  if (!text) { if (msg) { msg.textContent = 'Digite ou dite algo primeiro.'; msg.style.color = 'var(--red)'; } return; }
+  if (!text) { if (msg) { msg.textContent = 'Digite algo primeiro.'; msg.style.color = 'var(--red)'; } return; }
 
   const btn = G('ai-parse-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Interpretando...'; }
@@ -739,7 +688,13 @@ async function maybeShowInsightsCard() {
 // targetMonth: 'YYYY-MM' do mês a ser analisado (o mês aberto na Visão Geral).
 // Sempre um mês JÁ ENCERRADO — nunca o mês corrente, que ainda está incompleto.
 async function buildInsightsSummary(targetMonth) {
-  const monthly = await ff.reportMonthlyByCategory({ excludeTransfers: true }).catch(() => []);
+  const monthlyRaw = await ff.reportMonthlyByCategory({ excludeTransfers: true }).catch(() => []);
+  // Aplica o MESMO filtro de categorias excluídas usado nos cards e gráficos da
+  // Visão Geral (_excludedCats) — sem isso, os insights somavam categorias que
+  // o próprio usuário já marcou como duplicadas/irrelevantes (ex.: contas de
+  // cartão de crédito cuja fatura já aparece como pagamento na conta corrente),
+  // gerando totais muito maiores que o "Saídas no mês" exibido na tela.
+  const monthly = monthlyRaw.filter(r => !_excludedCats.has(r.category));
 
   // Todos os meses com dados, até e incluindo o mês alvo (ignora meses futuros/posteriores)
   const allMonths = [...new Set(monthly.map(r => r.month))].sort().filter(m => m <= targetMonth);
@@ -794,10 +749,43 @@ async function buildInsightsSummary(targetMonth) {
       spent: Math.round(actMap[b.category] || 0) }));
   } catch(e) {}
 
+  // Dívidas pessoais cadastradas, com taxa de juros real (para a IA comparar
+  // contra os encargos de rotativo/cheque especial detectados na importação)
+  let personalDebts = [];
+  try {
+    const debts = await ff.debtList().catch(() => []);
+    for (const d of debts) {
+      if (d.hidden) continue;
+      const contract = await ff.debtContractGet({ debtId: d.id }).catch(() => null);
+      if (contract) {
+        personalDebts.push({ name: d.name, annualRate: contract.annual_rate,
+          principal: contract.principal, system: contract.system });
+      }
+    }
+  } catch(e) {}
+
+  // Juros de dívida pessoal detectados em importações recentes (rotativo, cheque especial)
+  let recentDebtInterest = [];
+  try {
+    const log = JSON.parse(localStorage.getItem('crz-debt-interest-log') || '[]');
+    recentDebtInterest = log.filter(e => e.date && e.date.slice(0,7) === curM)
+      .map(e => ({ label: e.label, amount: e.amount, rate: e.rate }));
+  } catch(e) {}
+
+  // Saldo líquido total disponível hoje (contas bancárias + dinheiro), para a IA
+  // avaliar alternativas factíveis (ex.: não sugerir quitar com dinheiro que não existe)
+  let liquidBalance = 0;
+  try {
+    liquidBalance = accounts
+      .filter(a => !a.hidden && (a.type === 'bank' || a.type === 'cash'))
+      .reduce((s, a) => s + (a.balance || 0), 0);
+  } catch(e) {}
+
   return { currentMonth: curM, monthsAnalyzed: months.length,
            totalSpentCurrent: Math.round(totalSpentCurrent),
            avgMonthlySpent: Math.round(avgMonthlySpent),
-           categories, budgets };
+           categories, budgets, personalDebts, recentDebtInterest,
+           liquidBalanceToday: Math.round(liquidBalance) };
 }
 
 async function generateInsights(force) {
@@ -871,11 +859,26 @@ function renderInsights(insights) {
     tip:      { bg:'#eff6ff', border:'#bfdbfe', clr:'var(--accent)' },
     trend:    { bg:'#fffbeb', border:'#fde68a', clr:'#b45309' },
   };
+  // Normaliza valores fora do esperado (modelos mais simples às vezes ecoam o
+  // formato do prompt em vez de preencher de fato) para nunca exibir lixo visível.
+  function normalizeType(t) {
+    const clean = String(t || '').toLowerCase().trim();
+    if (typeStyle[clean]) return clean;
+    return 'tip'; // fallback silencioso — não exibe o valor bruto inválido
+  }
+  function normalizeIcon(ic) {
+    const v = String(ic || '').trim();
+    // Considera inválido se vier vazio, com mais de 4 caracteres (provável texto
+    // tipo "<1 emoji>" ou frase), ou sem nenhum caractere fora do intervalo ASCII básico
+    if (!v || v.length > 4 || /^[a-zA-Z0-9<>]+$/.test(v)) return '💡';
+    return v;
+  }
   body.innerHTML = `<div style="display:flex;flex-direction:column;gap:8px">` +
     insights.map(ins => {
-      const ts = typeStyle[ins.type] || typeStyle.tip;
+      const ts = typeStyle[normalizeType(ins.type)];
+      const icon = normalizeIcon(ins.icon);
       return `<div style="background:${ts.bg};border:1px solid ${ts.border};border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:flex-start">
-        <span style="font-size:18px;line-height:1.2">${ins.icon || '💡'}</span>
+        <span style="font-size:18px;line-height:1.2">${icon}</span>
         <div>
           <div style="font-weight:600;font-size:13px;color:${ts.clr}">${esc(ins.title || '')}</div>
           <div style="font-size:13px;color:var(--text2);margin-top:2px">${esc(ins.detail || '')}</div>
@@ -1903,8 +1906,16 @@ async function ctxCreateRecurring() {
   if (!tx) return;
   // Pre-fill recurring modal from this transaction
   openRecurringModal();
+  // Se for uma transferência, busca a conta de destino real (perna pareada)
+  let transferToAccId = null;
+  if (tx.transfer_id) {
+    try {
+      const pair = await ff.getTransferPair(tx.id);
+      if (pair) transferToAccId = pair.account_id;
+    } catch(e) {}
+  }
   setTimeout(() => {
-    G('rec-account').value  = currentAccountId;
+    G('rec-account').value  = tx.account_id || currentAccountId;
     G('rec-memo').value     = tx.memo || '';
     G('rec-category').value = tx.category || '';
     if (tx.amount < 0) { G('rec-expense').setValue?.(Math.abs(tx.amount)); }
@@ -1912,6 +1923,11 @@ async function ctxCreateRecurring() {
     const day = tx.date ? parseInt(tx.date.slice(8,10)) : new Date().getDate();
     G('rec-day').value = day;
     G('rec-next').value = tx.date || todayStr();
+    // Revela o campo de conta destino e pré-seleciona a conta correta
+    _updateRecTransferRow();
+    if (transferToAccId && G('rec-transfer-to')) {
+      G('rec-transfer-to').value = String(transferToAccId);
+    }
   }, 50);
 }
 function updateSelectionUI() {
@@ -3734,6 +3750,43 @@ async function clearPersistedImportState() {
   try { await ff.importClearPending(); } catch(e) {}
 }
 
+// ── Detecção de juros de dívida pessoal na importação ──────────────────
+// Reconhece padrões comuns em extratos/faturas brasileiros: juros rotativo de
+// cartão (fatura anterior não paga), juros de cheque especial, multa por atraso.
+// Tenta extrair a alíquota percentual do próprio texto, quando presente.
+const DEBT_INTEREST_PATTERNS = [
+  { re: /juros?\s*(de\s*|s\/\s*|sobre\s*)?(rotativo|financiamento\s*da\s*fatura|saldo\s*devedor)/i, label: 'Juros rotativo do cartão (fatura anterior não paga)' },
+  { re: /juros?\s*(de\s*|s\/\s*|sobre\s*)?cheque\s*especial/i, label: 'Juros de cheque especial' },
+  { re: /encargos?\s*(de\s*|s\/\s*|sobre\s*)?(rotativo|atraso|mora)/i, label: 'Encargos por atraso/rotativo' },
+  { re: /multa\s*(por\s*)?atraso/i, label: 'Multa por atraso de pagamento' },
+  { re: /iof\s*(financiamento|rotativo|cheque\s*especial)/i, label: 'IOF sobre rotativo/cheque especial' },
+];
+function detectDebtInterest(text) {
+  if (!text) return null;
+  for (const p of DEBT_INTEREST_PATTERNS) {
+    if (p.re.test(text)) {
+      // Tenta achar uma taxa percentual no próprio texto (ex: "12,5%", "8% a.m.")
+      const rateMatch = text.match(/(\d{1,3}(?:[.,]\d{1,2})?)\s*%/);
+      return { label: p.label, rate: rateMatch ? rateMatch[1].replace(',', '.') + '%' : null };
+    }
+  }
+  return null;
+}
+
+function recordDebtInterestSighting(hits, rows) {
+  if (!hits.length) return;
+  let log = [];
+  try { log = JSON.parse(localStorage.getItem('crz-debt-interest-log') || '[]'); } catch(e) {}
+  hits.forEach(x => {
+    const r = rows[x.idx];
+    log.push({ date: r.dateISO, amount: Math.abs(r.amount), label: x.hit.label, rate: x.hit.rate, recordedAt: Date.now() });
+  });
+  // Mantém só os últimos 12 meses para não crescer indefinidamente
+  const cutoff = Date.now() - 365 * 86400000;
+  log = log.filter(e => e.recordedAt >= cutoff).slice(-50);
+  try { localStorage.setItem('crz-debt-interest-log', JSON.stringify(log)); } catch(e) {}
+}
+
 function renderImportEditTable(rows) {
   if (!rows || rows.length === 0) {
     toast('Nenhuma transação para importar após filtrar duplicatas.');
@@ -3742,6 +3795,33 @@ function renderImportEditTable(rows) {
   }
   _importEditRows = rows; // disponibiliza para pickGlobalCat preencher a transferência automaticamente
   persistImportState();
+
+  // Detecta juros de dívida pessoal nas linhas do lote
+  const interestHits = rows
+    .map((r, i) => ({ idx: i, hit: detectDebtInterest(r.desc || r.memo || '') }))
+    .filter(x => x.hit);
+  if (interestHits.length) {
+    recordDebtInterestSighting(interestHits, rows);
+    const lines = interestHits.map(x => {
+      const r = rows[x.idx];
+      const rateStr = x.hit.rate ? ` — taxa identificada: <strong>${x.hit.rate}</strong>` : ' — taxa não identificada no extrato';
+      return `<div style="margin-top:4px">⚠️ <strong>${esc(x.hit.label)}</strong> em ${r.dateISO} (${fmtBRL(r.amount)})${rateStr}</div>`;
+    }).join('');
+    const banner = document.createElement('div');
+    banner.id = 'import-debt-interest-banner';
+    banner.style = 'background:#fef2f2;border:1px solid var(--red);border-radius:8px;padding:12px 16px;margin-bottom:12px;font-size:13px';
+    banner.innerHTML = `<div style="font-weight:600;color:var(--red);margin-bottom:4px">💸 Juros de dívida pessoal identificados neste extrato</div>
+      ${lines}
+      <div style="margin-top:8px;font-size:12px;color:var(--text2)">Esses encargos costumam ter taxas muito acima da média do mercado. Veja a Visão Geral após importar — o assistente de IA pode sugerir alternativas mais baratas com base na sua situação financeira.</div>`;
+    setTimeout(() => {
+      const preview = G('bank-preview');
+      const existing = G('import-debt-interest-banner');
+      if (existing) existing.remove();
+      if (preview) preview.insertAdjacentElement('beforebegin', banner);
+    }, 0);
+  } else {
+    G('import-debt-interest-banner')?.remove();
+  }
 
   const mlBadge = `<span style="font-size:9px;background:var(--accent-bg);color:var(--accent);border-radius:3px;padding:1px 4px;margin-left:4px" title="Sugestão ML">🧠</span>`;
 
@@ -6882,12 +6962,17 @@ function openCatDrop(inputId, dropId) {
   // Original behavior for other cat dropdowns
   const q=G(inputId)?.value||'', nq=norm(q), drop=G(dropId); if(!drop) return;
   let html='';
+  // Recorrência: oferece "Transferência" como opção destacada no topo —
+  // ao escolher, o campo de conta destino aparece automaticamente.
+  const offerTransfer = inputId === 'rec-category';
   if (!nq) {
+    if (offerTransfer) html += `<div class="cat-opt" style="color:var(--accent);font-weight:600" onmousedown="pickCat('${inputId}','${dropId}','Transferência')">⇄ Transferência</div>`;
     const seen=new Set();
     CATS_RAW.forEach(c=>{ const top=c.split(':')[0]; if(!seen.has(top)){seen.add(top);html+=`<div class="cat-section">${esc(top)}</div>`;} if(c.includes(':')) html+=`<div class="cat-opt" onmousedown="pickCat('${inputId}','${dropId}','${esc2(c)}')">${esc(c.split(':').slice(1).join(':'))}</div>`; else html+=`<div class="cat-opt" onmousedown="pickCat('${inputId}','${dropId}','${esc2(c)}')">${esc(c)}</div>`; });
   } else {
+    if (offerTransfer && norm('Transferência').includes(nq)) html += `<div class="cat-opt" style="color:var(--accent);font-weight:600" onmousedown="pickCat('${inputId}','${dropId}','Transferência')">⇄ Transferência</div>`;
     const hits=CATS_RAW.filter(c=>norm(c).includes(nq));
-    if (!hits.length) html='<div class="cat-opt" style="color:var(--text3);cursor:default">Sem resultado</div>';
+    if (!hits.length && !(offerTransfer && norm('Transferência').includes(nq))) html='<div class="cat-opt" style="color:var(--text3);cursor:default">Sem resultado</div>';
     else hits.forEach(c=>{ html+=`<div class="cat-opt" onmousedown="pickCat('${inputId}','${dropId}','${esc2(c)}')">${esc(c)}</div>`; });
   }
   drop.innerHTML=html; drop.style.display='block'; _catKb[dropId]=-1;
@@ -7059,8 +7144,15 @@ function openTransferFromImportRow(row, destAcc) {
 
   G('tr-date').value = row.dateISO || todayStr();
   G('tr-amount').setValue?.(Math.abs(row.amount || 0));
-  // Memorando: prioriza sugestão do ML, depois a descrição original do extrato
-  G('tr-memo').value = row.sugMemo || row.memo || row.desc || '';
+  // Memorando: lê o valor exatamente como está no campo visível da tela de
+  // importação (reflete tanto uma edição manual do usuário quanto a sugestão
+  // do ML, o que for o caso) — não usa row.sugMemo/row.memo diretamente,
+  // porque a edição manual só fica sincronizada em row.memo, e isso criaria
+  // ambiguidade com o caso em que o ML sugeriu algo diferente da descrição crua.
+  const memoFromDom = (row._importIdx != null)
+    ? document.querySelector(`.import-memo-inp[data-idx="${row._importIdx}"]`)?.value
+    : null;
+  G('tr-memo').value = memoFromDom ?? (row.memo || row.sugMemo || row.desc || '');
 
   // Não há tx salva ainda (linha de importação) — nada a excluir após salvar.
   // Marca o índice da linha de importação para evitar duplicar a transferência
@@ -7152,7 +7244,12 @@ document.addEventListener('mousedown', e => {
 });
 
 function closeCatDrop(id){ setTimeout(()=>{ const d=G(id); if(d) d.style.display='none'; },180); }
-function pickCat(inp,drop,val){ G(inp).value=val.replace(/&#39;/g,"'").replace(/&amp;/g,'&'); G(drop).style.display='none'; }
+function pickCat(inp,drop,val){
+  const el = G(inp);
+  el.value = val.replace(/&#39;/g,"'").replace(/&amp;/g,'&');
+  G(drop).style.display='none';
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
 function catKey(e,dropId,inputId){
   const drop=G(dropId); if(!drop||drop.style.display!=='block') return;
   const opts=drop.querySelectorAll('.cat-opt'); if(!opts.length) return;
@@ -7193,9 +7290,11 @@ function confirmDialogResolve(result) {
 }
 
 // Generic info modal — shows a title + arbitrary HTML body, with just a close button.
-function showInfoModal(title, bodyHtml) {
+function showInfoModal(title, bodyHtml, widthPx) {
   if (G('modal-info-title')) G('modal-info-title').textContent = title;
   if (G('modal-info-body'))  G('modal-info-body').innerHTML    = bodyHtml;
+  const modalEl = G('modal-info')?.querySelector('.modal');
+  if (modalEl) modalEl.style.width = (widthPx || 560) + 'px';
   openModal('modal-info');
 }
 function closeInfoModal() { closeModal('modal-info'); }
@@ -7209,8 +7308,6 @@ function openModal(id){ G(id)?.classList.add('open'); }
 function closeModal(id){
   const el = G(id);
   if (!el) return;
-  // Stop voice recognition if the AI entry modal is being closed
-  if (id === 'modal-ai-entry' && typeof stopAiMic === 'function' && window._aiMicActiveFlag) stopAiMic();
   // If the user closes the tx modal via X/Cancelar (not Salvar) while an AI queue
   // is running, treat it as "stop the queue" rather than silently skipping ahead.
   if (id === 'modal-tx' && window._aiQueueActive && !window._aiQueueJustSaved) {
@@ -10085,11 +10182,26 @@ function setupDateMask(input) {
   if (!input || input.dataset.dateMaskSetup) return;
   input.dataset.dateMaskSetup = '1';
   input.addEventListener('input', () => {
+    const selStart = input.selectionStart ?? input.value.length;
+    // Conta quantos dígitos existem ANTES do cursor no valor atual (já digitado),
+    // para depois reposicionar o cursor após o mesmo número de dígitos no valor
+    // reformatado — em vez de sempre forçar o cursor para o final.
+    const digitsBeforeCursor = input.value.slice(0, selStart).replace(/\D/g, '').length;
+
     let digits = input.value.replace(/\D/g, '').slice(0, 8);
     let out = digits;
     if (digits.length > 4) out = `${digits.slice(0,2)}/${digits.slice(2,4)}/${digits.slice(4)}`;
     else if (digits.length > 2) out = `${digits.slice(0,2)}/${digits.slice(2)}`;
     input.value = out;
+
+    // Encontra a posição no texto formatado que fica imediatamente após o
+    // dígito número `digitsBeforeCursor` (pulando as barras "/").
+    let newPos = 0, seenDigits = 0;
+    while (newPos < out.length && seenDigits < digitsBeforeCursor) {
+      if (/\d/.test(out[newPos])) seenDigits++;
+      newPos++;
+    }
+    input.setSelectionRange(newPos, newPos);
   });
 }
 
@@ -10140,10 +10252,26 @@ function setupCurrencyInput(el) {
     const raw = el.value;
     const hasMath = /[+\-*/]/.test(raw.replace(/^R\$[\s\u00a0]*/, ''));
     if (hasMath) return; // let user type freely
+    const selStart = el.selectionStart ?? raw.length;
+    // Conta dígitos antes do cursor no valor digitado, para reposicionar o
+    // cursor após o mesmo dígito no valor reformatado (em vez de ir ao final).
+    const digitsBeforeCursor = raw.slice(0, selStart).replace(/\D/g, '').length;
+
     const cents = toCents(raw);
     const formatted = format(cents);
     el.value = formatted;
-    el.setSelectionRange(formatted.length, formatted.length);
+
+    let newPos = formatted.length, seenDigits = 0, totalDigits = formatted.replace(/\D/g,'').length;
+    if (digitsBeforeCursor >= totalDigits) {
+      newPos = formatted.length; // cursor estava no fim (ou além) — mantém no fim
+    } else {
+      newPos = 0; seenDigits = 0;
+      while (newPos < formatted.length && seenDigits < digitsBeforeCursor) {
+        if (/\d/.test(formatted[newPos])) seenDigits++;
+        newPos++;
+      }
+    }
+    el.setSelectionRange(newPos, newPos);
   });
 
   el.addEventListener('keydown', (e) => {
@@ -12025,7 +12153,7 @@ function refreshPatrimonioTable() {
         </div>
         <div id="pat-pnl-${a.id}" style="font-size:10px;margin-top:2px;color:var(--text3)"></div>
       </td>
-      <td style="${STICKY};left:200px;min-width:80px;max-width:80px;font-size:11px;color:var(--text3);background:${bg}">${PAT_ASSET_TYPES[a.asset_type]||a.asset_type}${a.financed?'<span style="color:#dc2626;font-size:9px;margin-left:3px">🏦</span>':''}</td>
+      <td style="${STICKY};left:200px;min-width:80px;max-width:80px;font-size:11px;color:var(--text3);background:${bg}">${PAT_ASSET_TYPES[a.asset_type]||a.asset_type}${a.asset_type==='societario'&&a.ownership_pct!=null?`<span style="color:var(--accent);font-weight:600;margin-left:3px">${a.ownership_pct}%</span>`:''}${a.financed?'<span style="color:#dc2626;font-size:9px;margin-left:3px">🏦</span>':''}</td>
       <td style="${STICKY};left:280px;min-width:90px;max-width:90px;font-size:11px;color:var(--text3);background:${bg}"></td>
       <td style="${STICKY};left:370px;min-width:90px;max-width:90px;font-size:11px;color:var(--text3);background:${bg}">${PAT_TRENDS[a.trend]||a.trend}</td>
       ${months.map(m => {
@@ -12989,6 +13117,8 @@ async function openPatAssetModal(id) {
   G('pat-asset-trend').value = 'plus1x';
   G('pat-asset-sold-m').value = '';
   G('pat-asset-sold-y').value = '';
+  if (G('pat-asset-ownership-pct')) G('pat-asset-ownership-pct').value = '';
+  patAssetTypeChanged();
   if (G('pat-sale-payment-type')) G('pat-sale-payment-type').value = 'vista';
   setupCurrencyInput(G('pat-asset-value'));
   G('pat-asset-value').setValue(null);
@@ -13005,6 +13135,10 @@ async function openPatAssetModal(id) {
   if (G('fin-first-m'))      G('fin-first-m').value      = '';
   if (G('fin-first-y'))      G('fin-first-y').value      = '';
   if (G('fin-balloon'))      G('fin-balloon').value      = '';
+  if (G('fin-keys-balance')) G('fin-keys-balance').value = '';
+  if (G('fin-keys-balance-m')) G('fin-keys-balance-m').value = '';
+  if (G('fin-keys-balance-y')) G('fin-keys-balance-y').value = '';
+  document.querySelectorAll('#modal-pat-asset .fin-autofill-tag').forEach(t => t.remove());
   if (G('fin-extra-month'))  G('fin-extra-month').value  = '';
   if (G('fin-extra-value'))  G('fin-extra-value').value  = '';
   if (G('fin-schedule-preview')) G('fin-schedule-preview').style.display = 'none';
@@ -13033,6 +13167,8 @@ async function openPatAssetModal(id) {
       G('pat-asset-type').value  = a.asset_type;
       G('pat-asset-trend').value = a.trend;
       G('pat-asset-hidden').checked = !!a.hidden;
+      if (G('pat-asset-ownership-pct')) G('pat-asset-ownership-pct').value = a.ownership_pct ?? '';
+      patAssetTypeChanged();
       if (a.sold_month) {
         const [sy, sm] = a.sold_month.split('-').map(Number);
         G('pat-asset-sold-y').value = sy;
@@ -13113,6 +13249,11 @@ async function openPatAssetModal(id) {
   openModal('modal-pat-asset');
 }
 
+function patAssetTypeChanged() {
+  const f = G('pat-asset-ownership-field');
+  if (f) f.style.display = G('pat-asset-type')?.value === 'societario' ? '' : 'none';
+}
+
 async function savePatAsset() {
   // Read ALL values from DOM FIRST, before any async operations
   const id     = G('pat-asset-id').value ? parseInt(G('pat-asset-id').value) : null;
@@ -13132,6 +13273,7 @@ async function savePatAsset() {
   const soldY  = parseInt(G('pat-asset-sold-y')?.value);
   const soldMonth = (soldM >= 1 && soldM <= 12 && soldY >= 2000) ? `${soldY}-${String(soldM).padStart(2,'0')}` : null;
   const soldValueEl = G('pat-asset-sold-value'); const soldValue = soldValueEl?.rawValue ? (soldValueEl.rawValue()||null) : (parseFloat(soldValueEl?.value)||null);
+  const ownershipPct = (type === 'societario') ? (parseFloat(G('pat-asset-ownership-pct')?.value) || null) : null;
 
   if (!name) { toast('Informe o nome do ativo'); return; }
 
@@ -13139,7 +13281,7 @@ async function savePatAsset() {
   closeModal('modal-pat-asset');
 
   // 1. Save asset record
-  const result = await ff.patAssetSave({ id, name, asset_type: type, trend, sold_month: soldMonth, sold_value: soldValue, hidden, financed, financing_total });
+  const result = await ff.patAssetSave({ id, name, asset_type: type, trend, sold_month: soldMonth, sold_value: soldValue, hidden, financed, financing_total, ownership_pct: ownershipPct });
   const assetId = result.id;
 
   // 2a. Save financing installments; set asset value = financing_total at first installment month
@@ -13159,6 +13301,9 @@ async function savePatAsset() {
         n_installments:   fn,
         first_month:      `${fy2}-${String(fm2).padStart(2,'0')}`,
         balloon_at_keys:  readFinField('fin-balloon') || null,
+        keys_balance:        readFinField('fin-keys-balance') || null,
+        keys_balance_month:  (parseInt(G('fin-keys-balance-m')?.value||'0') && parseInt(G('fin-keys-balance-y')?.value||'0'))
+          ? `${G('fin-keys-balance-y').value}-${String(G('fin-keys-balance-m').value).padStart(2,'0')}` : null,
         extra_annual_month: parseInt(G('fin-extra-month')?.value||'0')||null,
         extra_annual_value: readFinField('fin-extra-value') || null,
         sync_account_id:  parseInt(G('fin-sync-account')?.value||'0') || null,
@@ -13297,6 +13442,10 @@ async function loadContractIntoForm(contract) {
   if (G('fin-first-m'))     G('fin-first-m').value     = parseInt(fm)||'';
   if (G('fin-first-y'))     G('fin-first-y').value     = parseInt(fy)||'';
   if (G('fin-balloon'))     { const b = G('fin-balloon');      if(b.setValue) b.setValue(contract.balloon_at_keys||null); else b.value = contract.balloon_at_keys||''; }
+  if (G('fin-keys-balance')) { const kb = G('fin-keys-balance'); if(kb.setValue) kb.setValue(contract.keys_balance||null); else kb.value = contract.keys_balance||''; }
+  const [kby, kbm] = (contract.keys_balance_month||'').split('-');
+  if (G('fin-keys-balance-m')) G('fin-keys-balance-m').value = parseInt(kbm)||'';
+  if (G('fin-keys-balance-y')) G('fin-keys-balance-y').value = parseInt(kby)||'';
   if (G('fin-extra-month')) G('fin-extra-month').value = contract.extra_annual_month||'';
   if (G('fin-extra-value')) { const ev = G('fin-extra-value'); if(ev.setValue) ev.setValue(contract.extra_annual_value||null); else ev.value = contract.extra_annual_value||''; }
   if (G('fin-sync-account')) G('fin-sync-account').value = contract.sync_account_id || '';
@@ -13468,6 +13617,56 @@ function patFinancingRowHtml(){}  // legacy stub (replaced by contract system)
 
 let _finSchedule = []; // generated schedule for preview
 
+// Entrada/chaves + Valor financiado + Saldo nas chaves = Valor total do ativo.
+// Quando o usuário preenche 3 dos 4 campos, calcula o 4º automaticamente.
+// "justEditedId" é o campo que o usuário acabou de editar — nunca sobrescrevemos
+// esse, só os outros (e só se eles ainda estiverem vazios ou já eram auto-preenchidos).
+function finAutoFillTotal(justEditedId) {
+  // O campo que o usuário acabou de editar deixa de ser "calculado" — é manual agora
+  const editedLbl = G(justEditedId)?.closest('.field')?.querySelector('.lbl .fin-autofill-tag');
+  if (editedLbl) editedLbl.remove();
+
+  const FIELDS = ['fin-balloon', 'fin-principal', 'fin-keys-balance', 'fin-asset-value'];
+  const vals = {};
+  FIELDS.forEach(id => {
+    const el = G(id);
+    const raw = el?.value?.trim();
+    vals[id] = raw ? readFinField(id) : null; // null = campo vazio (ainda não preenchido)
+  });
+
+  const empty = FIELDS.filter(id => vals[id] === null);
+  // Só calcula quando exatamente 1 dos 4 campos está vazio (os outros 3 preenchidos)
+  if (empty.length !== 1) return;
+
+  const target = empty[0];
+  const entrada     = vals['fin-balloon']      ?? 0;
+  const financiado   = vals['fin-principal']    ?? 0;
+  const saldoChaves = vals['fin-keys-balance'] ?? 0;
+  const total       = vals['fin-asset-value']  ?? 0;
+
+  let computed;
+  if (target === 'fin-asset-value') computed = entrada + financiado + saldoChaves;
+  else if (target === 'fin-balloon') computed = total - financiado - saldoChaves;
+  else if (target === 'fin-principal') computed = total - entrada - saldoChaves;
+  else /* fin-keys-balance */ computed = total - entrada - financiado;
+
+  if (computed < 0) return; // não preenche valores negativos — provavelmente os outros estão errados
+
+  const el = G(target);
+  if (el?.setValue) el.setValue(Math.round(computed * 100) / 100);
+  else if (el) el.value = computed.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+
+  // Indicador visual de que este campo foi calculado, não digitado
+  const lbl = el?.closest('.field')?.querySelector('.lbl');
+  if (lbl && !lbl.querySelector('.fin-autofill-tag')) {
+    const tag = document.createElement('span');
+    tag.className = 'fin-autofill-tag';
+    tag.style = 'font-weight:400;color:var(--accent);margin-left:4px;font-size:10px';
+    tag.textContent = '(calculado)';
+    lbl.appendChild(tag);
+  }
+}
+
 function readFinField(id) {
   const el = G(id);
   if (!el) return 0;
@@ -13526,34 +13725,34 @@ async function patGenerateSchedule() {
 function _localGenerateSchedule({ system, annual_rate, principal, n_installments, first_month, balloon_at_keys, extra_annual_month, extra_annual_value }) {
   const r = (annual_rate / 100) / 12;
   let remaining = principal - (balloon_at_keys || 0);
-  let priceInst = 0;
-  if (system === 'PRICE' || system === 'SAM') {
-    priceInst = r > 0
-      ? remaining * r * Math.pow(1+r, n_installments) / (Math.pow(1+r, n_installments) - 1)
-      : remaining / n_installments;
+  function priceInstFor(bal, rate, monthsLeft) {
+    if (monthsLeft <= 0) return 0;
+    return rate > 0 ? bal * rate * Math.pow(1+rate, monthsLeft) / (Math.pow(1+rate, monthsLeft) - 1) : bal / monthsLeft;
   }
   let balance = remaining;
   let cur = first_month;
   const rows = [];
   if (system === 'PLANTA') {
-    const monthlyInst = remaining / n_installments;
-    for (let i = 0; i < n_installments && balance > 0.01; i++) {
+    for (let i = 0; i < n_installments; i++) {
+      const monthsRemaining = n_installments - i;
+      const amort = balance / monthsRemaining; // recalculado a cada mês — extras não encurtam o prazo
       const extra = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month) ? extra_annual_value : 0;
-      balance = Math.max(0, balance - monthlyInst - extra);
-      rows.push({ month: cur, installment: Math.round((monthlyInst+extra)*100)/100,
-        principal: Math.round((monthlyInst+extra)*100)/100, interest: 0,
+      balance = Math.max(0, balance - amort - extra);
+      rows.push({ month: cur, installment: Math.round((amort+extra)*100)/100,
+        principal: Math.round((amort+extra)*100)/100, interest: 0,
         correction: 0, balance_end: Math.round(balance*100)/100, is_projection: 1 });
       const [y, m] = cur.split('-').map(Number);
       cur = m===12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
     }
     return rows;
   }
-  for (let i = 0; i < n_installments && balance > 0.01; i++) {
+  for (let i = 0; i < n_installments; i++) {
+    const monthsRemaining = n_installments - i;
     const interest = balance * r;
     let amort, install;
-    if (system === 'SAC') { amort = remaining / n_installments; install = amort + interest; }
-    else if (system === 'PRICE') { install = priceInst; amort = install - interest; }
-    else { const si = remaining/n_installments+interest; install=(si+priceInst)/2; amort=install-interest; }
+    if (system === 'SAC') { amort = balance / monthsRemaining; install = amort + interest; }
+    else if (system === 'PRICE') { install = priceInstFor(balance, r, monthsRemaining); amort = install - interest; }
+    else { const sacAm = balance / monthsRemaining; const si = sacAm + interest; const pi = priceInstFor(balance, r, monthsRemaining); install=(si+pi)/2; amort=install-interest; }
     const extra = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month) ? extra_annual_value : 0;
     balance = Math.max(0, balance - amort - extra);
     rows.push({ month: cur, installment: Math.round((install+extra)*100)/100,
@@ -13561,6 +13760,7 @@ function _localGenerateSchedule({ system, annual_rate, principal, n_installments
       correction: 0, balance_end: Math.round(balance*100)/100, is_projection: 1 });
     const [y, m] = cur.split('-').map(Number);
     cur = m===12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
+    // Sem corte antecipado por saldo zerado — sempre gera as N parcelas completas.
   }
   return rows;
 }
@@ -13609,12 +13809,16 @@ function patShowFullSchedule() {
   const curM = new Date().toISOString().slice(0,7);
   const sorted = _finSchedule.slice().sort((a,b) => a.month.localeCompare(b.month));
   const totalInstall = sorted.reduce((s,r) => s+r.installment, 0);
+  // Larguras suficientes para valores grandes (até R$ 999.999,99) sem sobrepor —
+  // o problema anterior era colunas fixas de 90-100px, estreitas demais para
+  // financiamentos com parcelas/saldos de seis dígitos.
+  const COLS = '85px 115px 105px 105px 115px 70px';
   const rowsHtml = sorted.map(r => {
     const isPast = r.month <= curM && r.is_projection === 0;
     const isFut  = r.is_projection === 1 && r.month > curM;
     const color  = isPast ? 'var(--text1)' : 'var(--text3)';
     const rowBg  = r.month.slice(0,7) === curM ? 'background:var(--accent-lt)' : '';
-    return `<div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;padding:4px 10px;border-bottom:1px solid var(--border);color:${color};${rowBg}">
+    return `<div style="display:grid;grid-template-columns:${COLS};gap:4px;padding:4px 10px;border-bottom:1px solid var(--border);color:${color};${rowBg};font-size:12px">
       <span>${fmtMonth(r.month)}</span>
       <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.installment)}</span>
       <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.principal)}</span>
@@ -13624,12 +13828,12 @@ function patShowFullSchedule() {
     </div>`;
   }).join('');
   const html = `
-    <div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;padding:6px 10px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;border-bottom:1px solid var(--border2);background:var(--bg4)">
+    <div style="display:grid;grid-template-columns:${COLS};gap:4px;padding:6px 10px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;border-bottom:1px solid var(--border2);background:var(--bg4)">
       <span>Mês</span><span class="right">Parcela</span><span class="right">Principal</span><span class="right">Juros</span><span class="right">Saldo</span><span class="right">Status</span>
     </div>
     <div style="max-height:60vh;overflow-y:auto">${rowsHtml}</div>
     <div style="padding:8px 10px;font-size:11px;color:var(--text3);border-top:1px solid var(--border2)">${sorted.length} parcelas — Total: ${fmtBRL(totalInstall)} — Saldo final: ${fmtBRL(sorted.at(-1)?.balance_end ?? 0)}</div>`;
-  showInfoModal('📅 Cronograma completo de parcelas', html);
+  showInfoModal('📅 Cronograma completo de parcelas', html, 680);
 }
 
 function patCollectFinancingRows() {

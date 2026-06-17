@@ -360,7 +360,7 @@ select.inp option{background:var(--bg2);}
       <input type="text" id="search-input" placeholder="Pesquisar nesta conta…" oninput="onSearch(this.value)">
     </div>
     <button class="btn sm" id="undo-btn" onclick="doUndo()" title="Desfazer (Ctrl+Z)" style="display:none">↩ Desfazer</button>
-    <button class="btn sm" onclick="openAiEntry()" title="Lançar por texto ou voz" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;border:none">✨ Lançar com IA</button>
+    <button class="btn sm" onclick="openAiEntry()" title="Lançar por linguagem natural" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;border:none">✨ Lançar com IA</button>
     <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
     <button class="btn sm" onclick="openTransferModal()">⇄ Transferência</button>
     <button class="btn sm primary" onclick="goPage('import')">📥 Importar</button>
@@ -523,7 +523,7 @@ select.inp option{background:var(--bg2);}
             <option value="category">Por categoria</option>
             <option value="amount">Por valor</option>
           </select>
-          <button class="btn sm" onclick="openAiEntry()" title="Lançar por texto ou voz" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;border:none">✨ Lançar com IA</button>
+          <button class="btn sm" onclick="openAiEntry()" title="Lançar por linguagem natural" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;border:none">✨ Lançar com IA</button>
     <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
         </div>
       </div>
@@ -1124,14 +1124,9 @@ select.inp option{background:var(--bg2);}
       </div>
       <div class="modal-body">
         <div style="font-size:13px;color:var(--text2);margin-bottom:10px">
-          Descreva em linguagem natural, por texto ou voz. Ex.: <em>"almoço 45 reais ontem no cartão Nubank e Uber 22 hoje"</em>
+          Descreva em linguagem natural. Ex.: <em>"almoço 45 reais ontem no cartão Nubank e Uber 22 hoje"</em>
         </div>
-        <div style="position:relative">
-          <textarea class="inp" id="ai-entry-text" rows="3" placeholder="Digite ou use o microfone..." style="width:100%;resize:vertical;padding-right:48px"></textarea>
-          <button id="ai-mic-btn" onclick="toggleAiMic()" title="Ditar por voz"
-            style="position:absolute;right:8px;top:8px;width:36px;height:36px;border-radius:50%;border:1px solid var(--border2);background:var(--bg3);cursor:pointer;font-size:16px">🎤</button>
-        </div>
-        <div id="ai-mic-status" style="font-size:12px;color:var(--text3);min-height:16px;margin-top:4px"></div>
+        <textarea class="inp" id="ai-entry-text" rows="3" placeholder="Digite o lançamento..." style="width:100%;resize:vertical"></textarea>
         <div style="margin-top:10px">
           <button class="btn primary" id="ai-parse-btn" onclick="runAiParse()">Interpretar</button>
           <span id="ai-entry-msg" style="font-size:12px;margin-left:10px"></span>
@@ -1606,7 +1601,7 @@ select.inp option{background:var(--bg2);}
         </div>
         <div class="field">
           <label class="lbl">Tipo</label>
-          <select class="inp" id="pat-asset-type">
+          <select class="inp" id="pat-asset-type" onchange="patAssetTypeChanged()">
             <option value="imovel">🏠 Imóvel</option>
             <option value="veiculo">🚗 Veículo</option>
             <option value="barco">⛵ Barco</option>
@@ -1614,6 +1609,11 @@ select.inp option{background:var(--bg2);}
             <option value="societario">🏢 Participação societária</option>
             <option value="outro">📦 Outro</option>
           </select>
+        </div>
+        <div class="field" id="pat-asset-ownership-field" style="display:none">
+          <label class="lbl">% de participação na empresa</label>
+          <input class="inp" id="pat-asset-ownership-pct" type="number" min="0" max="100" step="0.01" placeholder="Ex: 25">
+          <div style="font-size:11px;color:var(--text3);margin-top:3px">Percentual do seu quotas/ações sobre o capital social total</div>
         </div>
         <div class="field">
           <label class="lbl">Tendência de preço</label>
@@ -1693,7 +1693,7 @@ select.inp option{background:var(--bg2);}
             </div>
             <div class="field" style="margin:0">
               <label class="lbl">Valor financiado (R$)</label>
-              <input class="inp fin-currency" id="fin-principal" type="text" placeholder="R$ 0,00">
+              <input class="inp fin-currency" id="fin-principal" type="text" placeholder="R$ 0,00" onblur="finAutoFillTotal('fin-principal')">
             </div>
             <div class="field" style="margin:0">
               <label class="lbl">Nº de parcelas mensais</label>
@@ -1711,11 +1711,19 @@ select.inp option{background:var(--bg2);}
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
             <div class="field" style="margin:0">
               <label class="lbl">Entrada / chaves (R$) <span style="font-weight:400;color:var(--text3)">opcional</span></label>
-              <input class="inp fin-currency" id="fin-balloon" type="text" placeholder="R$ 0,00">
+              <input class="inp fin-currency" id="fin-balloon" type="text" placeholder="R$ 0,00" onblur="finAutoFillTotal('fin-balloon')">
             </div>
             <div class="field" style="margin:0" id="fin-rate-field">
               <label class="lbl">Saldo nas chaves (R$) <span style="font-weight:400;color:var(--text3)">planta</span></label>
-              <input class="inp fin-currency" id="fin-keys-balance" type="text" placeholder="R$ 0,00">
+              <input class="inp fin-currency" id="fin-keys-balance" type="text" placeholder="R$ 0,00" onblur="finAutoFillTotal('fin-keys-balance')">
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Data prevista do saldo nas chaves</label>
+              <div style="display:flex;gap:4px">
+                <input class="inp" id="fin-keys-balance-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+                <input class="inp" id="fin-keys-balance-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+              </div>
+              <div style="font-size:11px;color:var(--text3);margin-top:3px">O app lança automaticamente essa transação futura na conta sincronizada</div>
             </div>
             <div class="field" style="margin:0">
               <label class="lbl">Parcela anual extra — mês</label>
@@ -1729,7 +1737,7 @@ select.inp option{background:var(--bg2);}
 
           <div class="field" style="margin-bottom:8px;max-width:260px">
             <label class="lbl">Valor total do imóvel/ativo (R$)</label>
-            <input class="inp fin-currency" id="fin-asset-value" type="text" placeholder="R$ 0,00"
+            <input class="inp fin-currency" id="fin-asset-value" type="text" placeholder="R$ 0,00" onblur="finAutoFillTotal('fin-asset-value')"
               title="Valor de mercado do bem. Registra o ativo com este valor e uma movimentação de compra no mês inicial.">
           </div>
 
@@ -1953,7 +1961,7 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
       </div>
       <div style="padding:12px 16px">
         <div style="font-size:13px;color:var(--text2);margin-bottom:10px">
-          Ative a entrada de lançamentos por linguagem natural (texto ou voz) e os insights, usando a sua própria chave de IA. A chave fica salva <strong>apenas neste computador</strong>.
+          Ative a entrada de lançamentos por linguagem natural (texto) e os insights, usando a sua própria chave de IA. A entrada por voz está disponível no app móvel. A chave fica salva <strong>apenas neste computador</strong>.
         </div>
         <div class="field" style="margin-bottom:8px">
           <label class="lbl">Provedor</label>
