@@ -521,6 +521,10 @@ function ensureLateColumns() {
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance REAL',
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance_month TEXT',
     'ALTER TABLE pat_financing ADD COLUMN contract_id INTEGER REFERENCES pat_financing_contracts(id) ON DELETE CASCADE',
+    // Vínculo de recorrência a ativo imobilizado / dívida pessoal
+    'ALTER TABLE recurring ADD COLUMN pat_asset_id INTEGER',
+    'ALTER TABLE recurring ADD COLUMN pat_tx_type TEXT',
+    'ALTER TABLE recurring ADD COLUMN pat_debt_id INTEGER',
   ];
   alters.forEach(sql => { try { db.run(sql); } catch(e) {} });
 }
@@ -1290,6 +1294,13 @@ function syncRecurringTxns(rec) {
         [rec.account_id, date, 'Transferência', rec.memo, -Math.abs(rec.amount), tid, rec.id]);
       run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,transfer_id,recurring_id) VALUES (?,?,?,?,?,0,?,?)`,
         [rec.transfer_to_account_id, date, 'Transferência', rec.memo, Math.abs(rec.amount), tid, rec.id]);
+    } else if (rec.pat_asset_id || rec.pat_debt_id) {
+      // Recorrência vinculada a ativo/dívida: grava pat_installment_month para que,
+      // ao conciliar (cleared 0→1), o mecanismo já existente (_onInstallmentTxCleared)
+      // marque automaticamente a parcela correspondente como paga.
+      const month = date.slice(0, 7);
+      run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,recurring_id,pat_asset_id,pat_debt_id,pat_installment_month) VALUES (?,?,?,?,?,0,?,?,?,?)`,
+        [rec.account_id, date, rec.category, rec.memo, rec.amount, rec.id, rec.pat_asset_id||null, rec.pat_debt_id||null, month]);
     } else {
       run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,recurring_id) VALUES (?,?,?,?,?,0,?)`,
         [rec.account_id, date, rec.category, rec.memo, rec.amount, rec.id]);
@@ -1303,8 +1314,8 @@ ipcMain.handle('recurring:list', () => all('SELECT * FROM recurring WHERE active
 
 ipcMain.handle('recurring:create', (_, r) => {
   migrateRecurring();
-  const id = run('INSERT INTO recurring (account_id,category,memo,amount,frequency,next_date,end_date,transfer_to_account_id) VALUES (?,?,?,?,?,?,?,?)',
-    [r.account_id, r.category||'', r.memo||'', r.amount, r.frequency, r.next_date, r.end_date||null, r.transfer_to_account_id||null]);
+  const id = run('INSERT INTO recurring (account_id,category,memo,amount,frequency,next_date,end_date,transfer_to_account_id,pat_asset_id,pat_debt_id) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [r.account_id, r.category||'', r.memo||'', r.amount, r.frequency, r.next_date, r.end_date||null, r.transfer_to_account_id||null, r.pat_asset_id||null, r.pat_debt_id||null]);
   const rec = first('SELECT * FROM recurring WHERE id=?', [id]);
   const n = syncRecurringTxns(rec);
   save();
@@ -1324,8 +1335,8 @@ ipcMain.handle('recurring:update', (_, r) => {
   const old = first('SELECT * FROM recurring WHERE id=?', [r.id]);
   const amountChanged = old && Math.abs((old.amount || 0) - (r.amount || 0)) > 0.001;
 
-  run('UPDATE recurring SET account_id=?,category=?,memo=?,amount=?,frequency=?,next_date=?,end_date=?,transfer_to_account_id=? WHERE id=?',
-    [r.account_id, r.category||'', r.memo||'', r.amount, r.frequency, r.next_date, r.end_date||null, r.transfer_to_account_id||null, r.id]);
+  run('UPDATE recurring SET account_id=?,category=?,memo=?,amount=?,frequency=?,next_date=?,end_date=?,transfer_to_account_id=?,pat_asset_id=?,pat_debt_id=? WHERE id=?',
+    [r.account_id, r.category||'', r.memo||'', r.amount, r.frequency, r.next_date, r.end_date||null, r.transfer_to_account_id||null, r.pat_asset_id||null, r.pat_debt_id||null, r.id]);
 
   if (amountChanged) {
     // Update amount only on future uncleared transactions (date >= today)
@@ -3263,6 +3274,31 @@ function _onInstallmentTxUncleared(tx) {
 }
 
 // List all financing contracts for an asset (active + closed), most recent first
+// Cronograma REAL persistido (com id e status "paid" verdadeiros) — diferente
+// do retorno de pat:financing-contract-save, que é só o cálculo em memória.
+// Usado pelo modal de visualização/edição de status do cronograma completo.
+ipcMain.handle('pat:financing-schedule-real', (_, { assetId, contractId }) => {
+  const cId = contractId || _activeFinancingContract(assetId)?.id || null;
+  if (!cId) return [];
+  return all('SELECT * FROM pat_financing WHERE contract_id=? ORDER BY month', [cId]);
+});
+
+// Alterna o status pago/pendente de uma ou mais parcelas de financiamento,
+// por id — permite edição manual e seleção múltipla no modal de cronograma.
+ipcMain.handle('pat:financing-toggle-paid', (_, { ids, paid }) => {
+  if (!ids || !ids.length) return { ok: false };
+  const affectedAssets = new Set();
+  ids.forEach(id => {
+    const row = first('SELECT * FROM pat_financing WHERE id=?', [id]);
+    if (!row) return;
+    run('UPDATE pat_financing SET paid=?, is_projection=? WHERE id=?', [paid?1:0, paid?0:1, id]);
+    affectedAssets.add(row.asset_id);
+  });
+  affectedAssets.forEach(assetId => _rebalanceSchedule(assetId));
+  save();
+  return { ok: true };
+});
+
 ipcMain.handle('pat:financing-contracts-list', (_, { assetId }) =>
   all("SELECT * FROM pat_financing_contracts WHERE asset_id=? ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, id DESC", [assetId])
 );
@@ -3515,6 +3551,26 @@ ipcMain.handle('debt:contract-save', (_, { debtId, contract }) => {
 });
 
 // Mark installment as paid (called when a transaction is linked as "parcela desta dívida")
+// Cronograma REAL persistido de dívida pessoal (com id e status "paid" verdadeiros)
+ipcMain.handle('debt:schedule-real', (_, { debtId }) =>
+  all('SELECT * FROM personal_debt_installments WHERE debt_id=? ORDER BY month', [debtId])
+);
+
+// Alterna o status pago/pendente de parcelas de dívida pessoal, por id
+ipcMain.handle('debt:toggle-paid', (_, { ids, paid }) => {
+  if (!ids || !ids.length) return { ok: false };
+  const affectedDebts = new Set();
+  ids.forEach(id => {
+    const row = first('SELECT * FROM personal_debt_installments WHERE id=?', [id]);
+    if (!row) return;
+    run('UPDATE personal_debt_installments SET paid=?, is_projection=? WHERE id=?', [paid?1:0, paid?0:1, id]);
+    affectedDebts.add(row.debt_id);
+  });
+  affectedDebts.forEach(debtId => _rebalanceDebtSchedule(debtId));
+  save();
+  return { ok: true };
+});
+
 ipcMain.handle('debt:mark-paid', (_, { debtId, month, amount }) => {
   const contract = first('SELECT * FROM personal_debt_contracts WHERE debt_id=?', [debtId]);
   const r = contract ? (contract.annual_rate / 100 / 12) : 0;
@@ -4775,11 +4831,28 @@ Outras regras:
 ipcMain.handle('ai:generate-insights', async (_, { summary }) => {
   if (!summary) return { ok: false, error: 'EMPTY' };
   const sys = `Você é um consultor financeiro pessoal analisando os dados de um usuário brasileiro.
-Receberá um resumo em JSON com gastos/receitas por categoria nos últimos meses, médias, orçamentos,
-dívidas pessoais cadastradas (com taxa de juros real), juros de rotativo/cheque especial detectados
-recentemente em importações, e o saldo líquido disponível hoje (contas bancárias + dinheiro).
+Receberá um resumo em JSON com gastos/receitas por categoria. IMPORTANTE: os valores de "current"
+e "avgPrior" por categoria JÁ ESTÃO corrigidos pela inflação (IPCA, valores em R$ de hoje) E JÁ
+ESTÃO suavizados por média móvel de 12 meses (MA12) — ou seja, NÃO são o valor bruto daquele mês
+específico, são uma tendência de 12 meses centrada naquele mês. Isso é intencional: evita que você
+aponte um "salto" em categorias episódicas (viagens, presentes sazonais, manutenções pontuais) que
+naturalmente variam mês a mês sem indicar um problema real — a suavização já filtrou esse ruído.
+Trate "pctChange" como uma variação de TENDÊNCIA ano a ano, não como um pico isolado. NÃO descreva
+variações como "neste mês" ou "no mês passado" — descreva como "nos últimos 12 meses" ou "na
+tendência recente", já que é isso que os números representam.
+
+O resumo também traz: orçamentos, dívidas pessoais cadastradas (com taxa de juros real), juros de
+rotativo/cheque especial detectados recentemente em importações, e o saldo líquido disponível hoje.
+
+Campos de controle da análise (respeite-os com prioridade):
+- "categoriesFilter": se for uma lista (não "todas"), a análise deve focar SOMENTE nessas categorias.
+- "focus": indica a ênfase pedida — "gastos" (onde está gastando mais), "receitas" (como estão as
+  receitas), "tendencia" (variações e tendências), "orcamento" (comparação com limites), "ambos" (livre).
+- "userRequest": se não for null, é um pedido em linguagem natural do PRÓPRIO USUÁRIO — priorize
+  responder exatamente a esse pedido nos insights gerados, usando os números do resumo para isso.
+
 Gere de 3 a 5 insights CURTOS, ESPECÍFICOS e ACIONÁVEIS em português do Brasil.
-Cada insight deve citar números concretos do resumo (ex: "Mercado subiu 32% vs média").
+Cada insight deve citar números concretos do resumo (ex: "Mercado subiu 32% na tendência de 12 meses").
 Foque em: variações relevantes de gasto, categorias acima do orçamento, tendências, oportunidades de economia, e elogios quando o usuário está indo bem.
 
 REGRA ESPECIAL — DÍVIDA CARA (gatilhos independentes, qualquer um já é suficiente):
@@ -5450,7 +5523,7 @@ async function runMobileSync(trigger = 'manual') {
   try {
     const userId = sb.getUserId();
     const pull   = await syncPull.pullAll(all, run, first, save, userId);
-    const push   = await syncPush.pushAll(all, userId);
+    const push   = await syncPush.pushAll(all, userId, getAiConfig);
     const result = { ok: true, trigger, pull, push, at: new Date().toISOString() };
     console.log('[sync] concluído:', result);
 

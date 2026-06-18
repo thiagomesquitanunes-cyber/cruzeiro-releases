@@ -355,10 +355,28 @@ async function pushMlRules(all, userId) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 9. Configuração de IA (provider + chave)
+// Sincroniza a chave que o usuário já colou no desktop,
+// para o mobile não precisar pedir de novo (importante pois
+// o OpenRouter só mostra a chave uma única vez ao gerar).
+// ─────────────────────────────────────────────────────────────
+async function pushAiConfig(getAiConfig, userId) {
+  const { provider, key } = getAiConfig();
+  if (!key) return; // nada para sincronizar — usuário não configurou IA ainda
+
+  await sb.upsert('user_ai_config', [{
+    user_id:   userId,
+    provider:  provider || 'openrouter',
+    api_key:   key,
+    synced_at: new Date().toISOString(),
+  }], 'user_id');
+}
+
+// ─────────────────────────────────────────────────────────────
 // ENTRY POINT — executa todos os pushes em sequência
 // Falhas individuais são logadas mas não interrompem o processo
 // ─────────────────────────────────────────────────────────────
-async function pushAll(all, userId) {
+async function pushAll(all, userId, getAiConfig) {
   const steps = [
     ['balances',     () => pushBalances(all, userId)],
     ['transactions', () => pushTransactions(all, userId)],
@@ -369,6 +387,11 @@ async function pushAll(all, userId) {
     ['evolution',    () => pushEvolution(all, userId)],
     ['ml_rules',     () => pushMlRules(all, userId)],
   ];
+
+  // ai_config só entra se a função foi passada (compatibilidade com chamadas antigas)
+  if (typeof getAiConfig === 'function') {
+    steps.push(['ai_config', () => pushAiConfig(getAiConfig, userId)]);
+  }
 
   const results = {};
   for (const [name, fn] of steps) {
