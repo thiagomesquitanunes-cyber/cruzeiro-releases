@@ -78,7 +78,7 @@ function openAddCategory(isSub, parentName) {
 }
 
 function openRenameCategory(oldName, currentName) {
-  showCatInputModal(`Renomear "${currentName}"`, currentName, val => {
+  showCatInputModal(`Renomear "${currentName}"`, currentName, async val => {
     if (!val?.trim() || val.trim() === currentName) return;
     const newFull = val.trim();
     for (let i = 0; i < CATS_RAW.length; i++) {
@@ -88,7 +88,22 @@ function openRenameCategory(oldName, currentName) {
     }
     saveCategories();
     refreshCategories();
-    toast(`✅ Renomeada para "${newFull}"`);
+    // Propaga o renome para TODAS as transações, orçamentos e recorrências já
+    // cadastrados com a categoria/subcategoria antiga — sem isso, os lançamentos
+    // existentes ficavam órfãos, ainda referenciando o nome antigo.
+    const result = await ff.categoriesRename({ oldName, newName: newFull }).catch(() => null);
+    const counts = [];
+    if (result?.txUpdated)     counts.push(`${result.txUpdated} lançamento(s)`);
+    if (result?.budgetUpdated) counts.push(`${result.budgetUpdated} orçamento(s)`);
+    if (result?.recUpdated)    counts.push(`${result.recUpdated} recorrência(s)`);
+    toast(counts.length
+      ? `✅ Renomeada para "${newFull}" — atualizado em ${counts.join(', ')}`
+      : `✅ Renomeada para "${newFull}"`);
+    // Atualiza as telas que podem estar exibindo a categoria antiga
+    await loadAccounts();
+    if (currentPage === 'account') refreshAccount();
+    if (currentPage === 'overview') await refreshOverview();
+    if (currentPage === 'reports') onReportTypeChange();
   });
 }
 
@@ -687,56 +702,84 @@ async function maybeShowInsightsCard() {
 
 // targetMonth: 'YYYY-MM' do mês a ser analisado (o mês aberto na Visão Geral).
 // Sempre um mês JÁ ENCERRADO — nunca o mês corrente, que ainda está incompleto.
-async function buildInsightsSummary(targetMonth) {
-  const monthlyRaw = await ff.reportMonthlyByCategory({ excludeTransfers: true }).catch(() => []);
-  // Aplica o MESMO filtro de categorias excluídas usado nos cards e gráficos da
-  // Visão Geral (_excludedCats) — sem isso, os insights somavam categorias que
-  // o próprio usuário já marcou como duplicadas/irrelevantes (ex.: contas de
-  // cartão de crédito cuja fatura já aparece como pagamento na conta corrente),
-  // gerando totais muito maiores que o "Saídas no mês" exibido na tela.
-  const monthly = monthlyRaw.filter(r => !_excludedCats.has(r.category));
+// Constrói os dados por categoria EXATAMENTE como a aba Evolução: corrigidos
+// pelo IPCA (valores em R$ de hoje) e suavizados por média móvel de 12 meses.
+// Isso evita falsos alarmes de "salto" em categorias episódicas (viagens,
+// presentes sazonais) que naturalmente variam mês a mês sem indicar problema —
+// a MA12 absorve essa sazonalidade e permite comparação ano a ano de verdade.
+async function buildEvolucaoCategorySeries() {
+  if (!Object.keys(_ev.ipcaMonthly).length) await loadEvolucaoConfig().catch(() => {});
+  const excl = [..._excludedCats];
+  const catRows = await ff.evolucaoByCat({ excludedCats: excl }).catch(() => []);
 
-  // Todos os meses com dados, até e incluindo o mês alvo (ignora meses futuros/posteriores)
-  const allMonths = [...new Set(monthly.map(r => r.month))].sort().filter(m => m <= targetMonth);
-  // Até 6 meses terminando no mês alvo, para servir de contexto de comparação
-  const months = allMonths.slice(-6);
-  if (!months.includes(targetMonth)) months.push(targetMonth); // garante presença mesmo sem dados
-  const monthsSet = new Set(months);
+  const corr = (v, m) => inflateMonth(v, m, new Date().getFullYear());
 
-  // Aggregate: { category: { 'YYYY-MM': total } }
+  const today = todayStr();
+  const curM = today.slice(0,7);
+  const allMonths = [...new Set(catRows.map(r => r.month))].filter(m => m <= curM).sort();
+  const allCats = [...new Set(catRows.map(r => r.category))].sort();
+
+  // net por categoria por mês (despesa positiva, receita negativa — antes da inversão de sinal)
   const byCat = {};
-  monthly.forEach(r => {
-    if (!monthsSet.has(r.month)) return;
+  catRows.forEach(r => {
     if (!byCat[r.category]) byCat[r.category] = {};
-    byCat[r.category][r.month] = (byCat[r.category][r.month] || 0) + r.total;
+    byCat[r.category][r.month] = (r.expenses||0) - (r.income||0);
   });
 
+  // Para cada categoria: série corrigida por IPCA, depois suavizada por MA12
+  const series = {};
+  allCats.forEach(cat => {
+    const rawNet = allMonths.map(m => corr(byCat[cat]?.[m] || 0, m));
+    const ma12 = allMonths.map((_,i) => movAvg12(rawNet, i));
+    series[cat] = { months: allMonths, raw: rawNet, ma12 };
+  });
+
+  return { allMonths, allCats, series, refYear };
+}
+
+// targetMonth/filters: período (quantos meses), categorias (lista ou vazio=todas),
+// foco (string livre repassada ao prompt), e freeText (pedido em linguagem natural).
+async function buildInsightsSummary(targetMonth, filters) {
+  filters = filters || {};
+  const periodMonths = filters.periodMonths || 6;
+  const selectedCats = filters.categories && filters.categories.length ? new Set(filters.categories) : null;
+
+  const { allMonths, series } = await buildEvolucaoCategorySeries();
+  const months = allMonths.filter(m => m <= targetMonth).slice(-periodMonths);
+  if (!months.includes(targetMonth) && allMonths.includes(targetMonth)) months.push(targetMonth);
   const curM = targetMonth;
   const prevMonths = months.filter(m => m !== curM);
 
-  // Total gasto de CADA mês anterior (soma de todas as categorias naquele mês) —
-  // a média mensal real é a média DESSES totais, não a soma de médias por categoria.
-  const totalByMonth = {};
-  monthly.forEach(r => {
-    if (!monthsSet.has(r.month)) return;
-    totalByMonth[r.month] = (totalByMonth[r.month] || 0) + r.total;
-  });
-  const priorTotals = prevMonths.map(m => totalByMonth[m] || 0).filter(v => v > 0);
-  const avgMonthlySpent = priorTotals.length
-    ? priorTotals.reduce((s,v) => s+v, 0) / priorTotals.length : 0;
-  const totalSpentCurrent = totalByMonth[curM] || 0;
+  const catsToUse = selectedCats ? [...selectedCats] : Object.keys(series);
 
-  // Por categoria: gasto no mês alvo, média dos meses anteriores, variação %
-  const categories = Object.entries(byCat).map(([cat, m]) => {
-    const cur = m[curM] || 0;
-    const priorVals = prevMonths.map(mm => m[mm] || 0).filter(v => v > 0);
-    const avgPrior = priorVals.length ? priorVals.reduce((s,v)=>s+v,0) / priorVals.length : 0;
-    const pctChange = avgPrior > 0 ? ((cur - avgPrior) / avgPrior) * 100 : null;
+  // Por categoria: valor MA12 (já suavizado) no mês alvo, média dos meses
+  // anteriores (também já em MA12, então a comparação é "tendência vs tendência",
+  // não "mês episódico vs média simples" — é isso que evita o falso alarme).
+  const categories = catsToUse.map(cat => {
+    const s = series[cat];
+    if (!s) return null;
+    const idxOf = m => s.months.indexOf(m);
+    const curIdx = idxOf(curM);
+    const cur = curIdx >= 0 ? s.ma12[curIdx] : 0;
+    const priorVals = prevMonths.map(m => { const i = idxOf(m); return i>=0 ? s.ma12[i] : 0; }).filter(v => v !== 0);
+    const avgPrior = priorVals.length ? priorVals.reduce((a,b)=>a+b,0)/priorVals.length : 0;
+    const pctChange = avgPrior !== 0 ? ((cur - avgPrior) / Math.abs(avgPrior)) * 100 : null;
     return { category: cat, current: Math.round(cur), avgPrior: Math.round(avgPrior),
              pctChange: pctChange === null ? null : Math.round(pctChange) };
-  }).filter(c => c.current > 0 || c.avgPrior > 0)
-    .sort((a,b) => b.current - a.current)
-    .slice(0, 15);
+  }).filter(c => c && (c.current !== 0 || c.avgPrior !== 0))
+    .sort((a,b) => Math.abs(b.current) - Math.abs(a.current))
+    .slice(0, 20);
+
+  const totalByMonth = {};
+  months.forEach(m => {
+    totalByMonth[m] = Object.keys(series).reduce((s, cat) => {
+      const i = series[cat].months.indexOf(m);
+      return s + (i >= 0 ? series[cat].ma12[i] : 0);
+    }, 0);
+  });
+  const totalSpentCurrent = totalByMonth[curM] || 0;
+  const priorTotals = prevMonths.map(m => totalByMonth[m]).filter(v => v);
+  const avgMonthlySpent = priorTotals.length ? priorTotals.reduce((a,b)=>a+b,0)/priorTotals.length : 0;
 
   // Orçamentos referentes ao mês alvo (não ao mês corrente real)
   let budgets = [];
@@ -782,13 +825,16 @@ async function buildInsightsSummary(targetMonth) {
   } catch(e) {}
 
   return { currentMonth: curM, monthsAnalyzed: months.length,
+           dataSource: 'Evolução (valores já corrigidos pelo IPCA e suavizados por média móvel de 12 meses)',
+           focus: filters.focus || 'ambos', userRequest: filters.freeText || null,
+           categoriesFilter: selectedCats ? [...selectedCats] : 'todas',
            totalSpentCurrent: Math.round(totalSpentCurrent),
            avgMonthlySpent: Math.round(avgMonthlySpent),
            categories, budgets, personalDebts, recentDebtInterest,
            liquidBalanceToday: Math.round(liquidBalance) };
 }
 
-async function generateInsights(force) {
+async function generateInsights(force, usePersonalization) {
   const body = G('ai-insights-body');
   const status = G('ai-insights-status');
   const btn = G('ai-insights-refresh');
@@ -809,13 +855,17 @@ async function generateInsights(force) {
     return;
   }
 
+  // Coleta os filtros do painel de personalização, se estiver sendo usado
+  const filters = usePersonalization ? collectInsightsFilters() : {};
+  const cacheKey = usePersonalization ? `${targetMonth}::${JSON.stringify(filters)}` : targetMonth;
+
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Analisando...'; }
   if (status) status.textContent = '';
 
   try {
-    const summary = await buildInsightsSummary(targetMonth);
+    const summary = await buildInsightsSummary(targetMonth, filters);
     if (!summary.categories.length) {
-      body.innerHTML = '<div style="font-size:13px;color:var(--text3)">Não há dados suficientes neste mês para gerar insights.</div>';
+      body.innerHTML = '<div style="font-size:13px;color:var(--text3)">Não há dados suficientes neste período para gerar insights. Tente outro período ou outras categorias.</div>';
       return;
     }
 
@@ -839,15 +889,100 @@ async function generateInsights(force) {
       return;
     }
 
-    _insightsCache = { month: targetMonth, data: insights };
+    _insightsCache = { month: cacheKey, data: insights };
     renderInsights(insights);
-    if (status) status.textContent = `Mês analisado: ${fmtMonth(targetMonth)}`;
+    if (status) status.textContent = `Mês analisado: ${fmtMonth(targetMonth)}${usePersonalization ? ' (personalizado)' : ''}`;
   } catch(e) {
     body.innerHTML = `<div style="font-size:13px;color:var(--red)">⚠️ Erro ao gerar insights: ${esc(e.message||String(e))}</div>`;
   } finally {
     // SEMPRE reabilita o botão, mesmo se algo lançar exceção acima — corrige o "travamento"
     if (btn) { btn.disabled = false; btn.textContent = '✨ Gerar'; }
   }
+}
+
+// ── Personalização do Insight ──────────────────────────────────────────
+function toggleInsightsPersonalize() {
+  const panel = G('ai-insights-personalize-panel');
+  if (!panel) return;
+  const opening = panel.style.display === 'none';
+  panel.style.display = opening ? '' : 'none';
+  if (opening) {
+    populateInsightsCatChips();
+    renderSavedInsightsAnalyses();
+  }
+}
+
+function populateInsightsCatChips() {
+  const container = G('ai-insights-cat-chips');
+  if (!container) return;
+  const cats = [...new Set([...CATS_RAW])].sort();
+  container.innerHTML = cats.map(c => `
+    <label style="display:flex;align-items:center;gap:4px;font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:3px 8px;cursor:pointer">
+      <input type="checkbox" class="ai-insights-cat-chk" value="${esc2(c)}" style="margin:0;width:11px;height:11px"> ${esc(c)}
+    </label>`).join('');
+}
+
+function collectInsightsFilters() {
+  const categories = [...document.querySelectorAll('.ai-insights-cat-chk:checked')].map(el => el.value);
+  const periodMonths = parseInt(G('ai-insights-period')?.value || '6');
+  const focus = G('ai-insights-focus')?.value || 'ambos';
+  const freeText = G('ai-insights-freetext')?.value?.trim() || '';
+  return { categories, periodMonths, focus, freeText };
+}
+
+function applyInsightsFilters(filters) {
+  document.querySelectorAll('.ai-insights-cat-chk').forEach(el => {
+    el.checked = filters.categories?.includes(el.value);
+  });
+  if (G('ai-insights-period')) G('ai-insights-period').value = String(filters.periodMonths || 6);
+  if (G('ai-insights-focus')) G('ai-insights-focus').value = filters.focus || 'ambos';
+  if (G('ai-insights-freetext')) G('ai-insights-freetext').value = filters.freeText || '';
+}
+
+function getSavedInsightsAnalyses() {
+  try { return JSON.parse(localStorage.getItem('crz-insights-saved') || '[]'); } catch(e) { return []; }
+}
+function setSavedInsightsAnalyses(list) {
+  try { localStorage.setItem('crz-insights-saved', JSON.stringify(list)); } catch(e) {}
+}
+
+async function saveInsightsAnalysis() {
+  const filters = collectInsightsFilters();
+  const name = await showPromptDialog('Nome para esta análise', 'Ex.: "Gastos com viagem vs orçamento"');
+  if (!name) return;
+  const list = getSavedInsightsAnalyses();
+  list.push({ id: Date.now(), name, filters });
+  setSavedInsightsAnalyses(list);
+  toast('💾 Análise salva');
+  renderSavedInsightsAnalyses();
+}
+
+function renderSavedInsightsAnalyses() {
+  const container = G('ai-insights-saved-list');
+  if (!container) return;
+  const list = getSavedInsightsAnalyses();
+  if (!list.length) { container.innerHTML = ''; return; }
+  container.innerHTML = `<div style="font-size:11px;color:var(--text3);margin-bottom:5px">Análises salvas:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">` +
+    list.map(a => `
+      <div style="display:flex;align-items:center;gap:4px;background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:3px 4px 3px 10px">
+        <button class="btn-link" style="font-size:11px;background:none;border:none;cursor:pointer;color:var(--accent)" onclick="runSavedInsightsAnalysis(${a.id})">${esc(a.name)}</button>
+        <button class="btn-icon" style="font-size:11px;padding:0 4px;color:var(--text3)" title="Remover" onclick="deleteSavedInsightsAnalysis(${a.id})">✕</button>
+      </div>`).join('') +
+    `</div>`;
+}
+
+function runSavedInsightsAnalysis(id) {
+  const list = getSavedInsightsAnalyses();
+  const a = list.find(x => x.id === id);
+  if (!a) return;
+  applyInsightsFilters(a.filters);
+  generateInsights(true, true);
+}
+
+function deleteSavedInsightsAnalysis(id) {
+  setSavedInsightsAnalyses(getSavedInsightsAnalyses().filter(a => a.id !== id));
+  renderSavedInsightsAnalyses();
 }
 
 function renderInsights(insights) {
@@ -1754,6 +1889,7 @@ function renderLedgerBody(txs, startingBalance = 0) {
 
     html += `<tr class="${sel} ${futCls}" data-id="${t.id}" data-date="${t.date}"
       onclick="rowClick(event,${t.id})"
+      ondblclick="rowDblClick(event,${t.id})"
       oncontextmenu="rowCtxMenu(event,${t.id})"
       onkeydown="rowKey(event,${t.id})"
       tabindex="0"
@@ -1800,6 +1936,19 @@ function rowKey(e, id) {
     updateSelectionUI();
   }
   // Delete handled at document level to avoid double-prompt
+}
+// Duplo clique em QUALQUER parte da linha que não seja um campo de edição inline
+// (ou botão/ação própria) abre o modal completo de edição da transação.
+// Campos com edição inline (data, valor, categoria, memo, cleared) continuam
+// respondendo ao próprio ondblclick deles (startInlineEdit), que tem prioridade
+// porque dispara primeiro no alvo exato da célula antes deste handler na <tr>.
+function rowDblClick(e, id) {
+  if (e.target.closest('.cell-editable')) return; // edição inline já trata isso
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'BUTTON') return;
+  if (e.target.classList.contains('cleared-toggle')) return;
+  if (e.target.closest('.btn-icon')) return; // botões de ação (editar/excluir) já fazem o próprio onclick
+  e.preventDefault();
+  editTx(id);
 }
 function selectAll(e) {
   const rows = [...G('acct-tbody').querySelectorAll('tr[data-id]')];
@@ -3037,6 +3186,10 @@ async function initImportPage() {
   _customBankParsers = all.filter(p => p.id !== '__builtin_overrides__' && p.type !== 'broker');
   renderImportDropdowns();
   await initBrokerDropdown();
+  // Garante que os ativos/dívidas estejam disponíveis para o vínculo na revisão
+  // de importação, mesmo que a aba Patrimônio nunca tenha sido aberta nesta sessão.
+  if (!_pat.assets.length) _pat.assets = await ff.patAssetsList().catch(() => []);
+  if (!_pat.debts.length)  _pat.debts  = await ff.debtList().catch(() => []);
   // Populate broker account selector with investment accounts
   const brokerAccSel = G('broker-account');
   if (brokerAccSel && accounts.length) {
@@ -3861,6 +4014,34 @@ function renderImportEditTable(rows) {
             onmousedown="event.preventDefault();openGlobalCatDrop(this.previousElementSibling)">▾</button>
         </div>
       </td>
+      <td style="padding:3px 4px;vertical-align:middle">
+        <select class="inp import-pat-asset-inp" data-idx="${i}" ${r._transferDone?'disabled':''}
+          style="font-size:11px;padding:3px 4px;min-width:90px;max-width:120px"
+          onchange="onImportPatAssetChange(this, ${i})">
+          <option value="">— Nenhum —</option>
+          ${(_pat.assets||[]).filter(a=>!a.hidden).map(a => `<option value="${a.id}" ${r.pat_asset_id===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}
+        </select>
+      </td>
+      <td style="padding:3px 4px;vertical-align:middle">
+        <select class="inp import-pat-type-inp" data-idx="${i}" ${r._transferDone?'disabled':''}
+          style="font-size:11px;padding:3px 4px;min-width:90px;max-width:120px">
+          <option value="aluguel" ${r.pat_tx_type==='aluguel'?'selected':''}>🏠 Aluguel</option>
+          <option value="dividendo" ${r.pat_tx_type==='dividendo'?'selected':''}>💰 Dividendo</option>
+          <option value="jcp" ${r.pat_tx_type==='jcp'?'selected':''}>💵 JCP</option>
+          <option value="aporte" ${r.pat_tx_type==='aporte'?'selected':''}>➕ Aporte</option>
+          <option value="parcela_financiamento" ${r.pat_tx_type==='parcela_financiamento'?'selected':''}>🏦 Parcela financ.</option>
+          <option value="compra" ${r.pat_tx_type==='compra'?'selected':''}>🛒 Compra</option>
+          <option value="venda" ${r.pat_tx_type==='venda'?'selected':''}>🔴 Venda</option>
+          <option value="venda_parcela" ${r.pat_tx_type==='venda_parcela'?'selected':''}>🔴 Parcela de venda</option>
+        </select>
+      </td>
+      <td style="padding:3px 4px;vertical-align:middle">
+        <select class="inp import-debt-inp" data-idx="${i}" ${r._transferDone?'disabled':''}
+          style="font-size:11px;padding:3px 4px;min-width:90px;max-width:120px" title="Vincular a dívida pessoal">
+          <option value="">— Nenhuma —</option>
+          ${(_pat.debts||[]).filter(d=>!d.hidden).map(d => `<option value="${d.id}" ${r.pat_debt_id===d.id?'selected':''}>${esc(d.name)}</option>`).join('')}
+        </select>
+      </td>
       <td class="${amtCls} right" style="font-size:12px;padding:5px 8px;white-space:nowrap;font-family:'DM Mono',monospace;vertical-align:middle">${fmtBRL(r.amount)}</td>
     </tr>`;
   }).join('');
@@ -3876,7 +4057,7 @@ function renderImportEditTable(rows) {
       <div class="tbl-outer" style="max-height:calc(100vh - 360px)">
         <table class="ledger">
           <thead><tr>
-            <th>Data</th><th>Descrição original</th>${multiCard ? '<th>Titular → Conta</th>' : ''}<th>Memorando</th><th>Categoria</th><th>Ativo imob.</th><th>Tipo mov.</th><th class="right">Valor</th>
+            <th>Data</th><th>Descrição original</th>${multiCard ? '<th>Titular → Conta</th>' : ''}<th>Memorando</th><th>Categoria</th><th>Ativo imob.</th><th>Tipo mov.</th><th>Dívida</th><th class="right">Valor</th>
           </tr></thead>
           <tbody id="bank-preview-body">${tableRows}</tbody>
         </table>
@@ -3958,16 +4139,31 @@ async function doImportFromTable() {
     };
   });
 
-  // Collect pat asset linkages from the table
+  // Collect pat asset linkages from the table — usa origIdx (índice na lista
+  // original "rows"), não o índice de finalRows, já que finalRows pode ter
+  // menos elementos que o DOM (linhas de transferência já processadas são
+  // removidas de finalRows mas continuam no DOM até a próxima renderização).
   const patAssetInputs = G('bank-preview-body')?.querySelectorAll('.import-pat-asset-inp');
   const patTypeInputs  = G('bank-preview-body')?.querySelectorAll('.import-pat-type-inp');
-  const patLinks = finalRows.map((r, i) => ({
-    assetId:  parseInt(patAssetInputs?.[i]?.value || '0'),
-    txType:   patTypeInputs?.[i]?.value || 'aluguel',
-    month:    (r.dateISO || '').slice(0, 7),
-    amount:   Math.abs(r.amount),
-    memo:     r.memo || '',
-  })).filter(p => p.assetId && p.month);
+  const debtLinkInputs = G('bank-preview-body')?.querySelectorAll('.import-debt-inp');
+  const patLinks = finalRows.map((r) => {
+    const origIdx = rows.indexOf(r);
+    return {
+      assetId:  parseInt(patAssetInputs?.[origIdx]?.value || '0'),
+      txType:   patTypeInputs?.[origIdx]?.value || 'aluguel',
+      month:    (r.dateISO || '').slice(0, 7),
+      amount:   Math.abs(r.amount),
+      memo:     r.memo || '',
+    };
+  }).filter(p => p.assetId && p.month);
+  const debtLinks = finalRows.map((r) => {
+    const origIdx = rows.indexOf(r);
+    return {
+      debtId: parseInt(debtLinkInputs?.[origIdx]?.value || '0'),
+      month:  (r.dateISO || '').slice(0, 7),
+      amount: Math.abs(r.amount),
+    };
+  }).filter(d => d.debtId && d.month);
 
   // ── Round 2: memo+category duplicates (recurring placeholders with variable amount) ──
   try {
@@ -3988,16 +4184,16 @@ async function doImportFromTable() {
       }
     }
     if (allMatches.length > 0) {
-      showMemoDupUI(allMatches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks);
+      showMemoDupUI(allMatches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks);
       return; // user decides; finishMemoDupImport continues the flow
     }
   } catch(e) { /* on error, proceed without round-2 check */ }
 
-  await finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks);
+  await finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks);
 }
 
 // Shared tail of the import flow (called directly or after memo-dup resolution)
-async function finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks) {
+async function finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks) {
   await doImport(finalRows, updatedInstallments, accountId, checkDailySaldo);
 
   for (const p of (patLinks || [])) {
@@ -4006,14 +4202,17 @@ async function finishImportWithPatLinks(finalRows, updatedInstallments, accountI
       tx_type: p.txType, total_value: p.amount, notes: p.memo || null,
     }).catch(() => {});
   }
-  if (patLinks?.length) {
+  for (const d of (debtLinks || [])) {
+    await ff.debtMarkPaid({ debtId: d.debtId, month: d.month, amount: d.amount }).catch(() => {});
+  }
+  if (patLinks?.length || debtLinks?.length) {
     _pat.txAll = await ff.patTxAll().catch(() => _pat.txAll);
     if (currentPage === 'patrimonio') refreshPatrimonioTable();
   }
 }
 
 // ── Round-2 dup resolution UI: same memo+category, variable amount ──
-function showMemoDupUI(matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks) {
+function showMemoDupUI(matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks) {
   const dupMap = {};
   matches.forEach(m => { dupMap[m.rowIndex] = m.existing || []; });
 
@@ -4074,7 +4273,7 @@ function showMemoDupUI(matches, finalRows, updatedInstallments, accountId, check
       </div>
     </div>`;
 
-  preview._memoDup = { matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks };
+  preview._memoDup = { matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks };
   preview.style.display = 'block';
   preview.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -4083,7 +4282,7 @@ async function confirmMemoDupImport() {
   const preview = G('bank-preview');
   const ctx = preview?._memoDup;
   if (!ctx) return;
-  const { matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks } = ctx;
+  const { matches, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks } = ctx;
 
   const skipIdx = new Set();
   for (const m of matches) {
@@ -4101,7 +4300,7 @@ async function confirmMemoDupImport() {
 
   const rowsToImport = finalRows.filter((_, i) => !skipIdx.has(i));
   preview._memoDup = null;
-  await finishImportWithPatLinks(rowsToImport, updatedInstallments, accountId, checkDailySaldo, patLinks);
+  await finishImportWithPatLinks(rowsToImport, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks);
 }
 
 async function doImport(finalRows, parcelInstallments, accountId, checkDailySaldo) {
@@ -6836,6 +7035,27 @@ function openRecurringModal(editRec){
     catInp.addEventListener('input', _updateRecTransferRow);
     catInp.addEventListener('change', _updateRecTransferRow);
   }
+  // Populate pat-asset and debt dropdowns (mesma fonte usada no modal de transação normal)
+  const patSel = G('rec-pat-asset');
+  if (patSel) {
+    patSel.innerHTML = '<option value="">— Nenhum —</option>' +
+      (_pat.assets||[]).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+    patSel.value = isEdit ? (editRec.pat_asset_id || '') : '';
+  }
+  const hasPatLink = isEdit && !!editRec.pat_asset_id;
+  if (G('rec-pat-toggle')) G('rec-pat-toggle').checked = hasPatLink;
+  if (G('rec-pat-section')) G('rec-pat-section').style.display = hasPatLink ? '' : 'none';
+
+  const debtSel = G('rec-debt-id');
+  if (debtSel) {
+    debtSel.innerHTML = '<option value="">— Nenhuma —</option>' +
+      (_pat.debts||[]).map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+    debtSel.value = isEdit ? (editRec.pat_debt_id || '') : '';
+  }
+  const hasDebtLink = isEdit && !!editRec.pat_debt_id;
+  if (G('rec-debt-toggle')) G('rec-debt-toggle').checked = hasDebtLink;
+  if (G('rec-debt-section')) G('rec-debt-section').style.display = hasDebtLink ? '' : 'none';
+
   openModal('modal-recurring');
 }
 function _updateRecTransferRow() {
@@ -6856,13 +7076,17 @@ async function saveRecurring(){
   const end_date   = G('rec-end')?.value || null;
   const isTransfer = /^transferên/i.test(category);
   const transfer_to_account_id = isTransfer ? (parseInt(G('rec-transfer-to')?.value)||null) : null;
+  const pat_asset_id = G('rec-pat-toggle')?.checked ? (parseInt(G('rec-pat-asset')?.value)||null) : null;
+  const pat_debt_id  = G('rec-debt-toggle')?.checked ? (parseInt(G('rec-debt-id')?.value)||null) : null;
   if (!memo){ toast('Informe o memorando'); return; }
   if (amount===0){ toast('Informe o valor (despesa ou receita)'); return; }
   if (!next_date){ toast('Informe a data inicial'); return; }
   if (isTransfer && (!transfer_to_account_id || transfer_to_account_id === account_id)) { toast('Selecione uma conta destino diferente da origem'); return; }
+  if (G('rec-pat-toggle')?.checked && !pat_asset_id) { toast('Selecione o ativo imobilizado'); return; }
+  if (G('rec-debt-toggle')?.checked && !pat_debt_id) { toast('Selecione a dívida pessoal'); return; }
   closeModal('modal-recurring');
   if (editingId) {
-    const result = await ff.updateRecurring({ id:editingId, account_id, memo, category, amount, frequency, next_date, end_date, transfer_to_account_id });
+    const result = await ff.updateRecurring({ id:editingId, account_id, memo, category, amount, frequency, next_date, end_date, transfer_to_account_id, pat_asset_id, pat_debt_id });
     const n = result?.generated ?? 0;
     toast(`Recorrência atualizada — ${n} lançamentos futuros regenerados`);
   } else {
@@ -6870,7 +7094,7 @@ async function saveRecurring(){
     openLicenseModal();
     return;
   }
-  const result = await ff.createRecurring({ account_id, memo, category, amount, frequency, next_date, end_date, transfer_to_account_id });
+  const result = await ff.createRecurring({ account_id, memo, category, amount, frequency, next_date, end_date, transfer_to_account_id, pat_asset_id, pat_debt_id });
     const n = result?.generated ?? 0;
     const endMsg = end_date ? ` até ${fmtDate(end_date)}` : ' (indefinida, 5 anos à frente)';
     toast(`Recorrência criada — ${n} lançamentos gerados${endMsg}`);
@@ -7287,6 +7511,26 @@ function showConfirmDialog(title, detail = '', okLabel = 'Confirmar', danger = f
 function confirmDialogResolve(result) {
   closeModal('modal-confirm');
   if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
+}
+
+let _promptResolve = null;
+function showPromptDialog(title, detail = '', defaultValue = '') {
+  return new Promise(resolve => {
+    _promptResolve = resolve;
+    const el = G('modal-prompt');
+    if (!el) { resolve(null); return; }
+    G('modal-prompt-title').textContent  = title;
+    G('modal-prompt-detail').textContent = detail;
+    const inp = G('modal-prompt-input');
+    inp.value = defaultValue;
+    el.classList.add('open');
+    setTimeout(() => { inp.focus(); inp.select(); }, 50);
+  });
+}
+function promptDialogResolve(confirmed) {
+  const value = G('modal-prompt-input')?.value?.trim() || '';
+  closeModal('modal-prompt');
+  if (_promptResolve) { _promptResolve(confirmed ? value : null); _promptResolve = null; }
 }
 
 // Generic info modal — shows a title + arbitrary HTML body, with just a close button.
@@ -10213,12 +10457,9 @@ function setupCurrencyInput(el) {
 
   // Try to evaluate a simple math expression (only + - * /) and return cents
   function evalMathExpr(str) {
-    // Clean: accept digits, commas, dots, +, -, *, /, spaces, parentheses
     const clean = str.replace(/R\$\s*/g, '').replace(/\./g, '').replace(/,/g, '.').trim();
-    // Only allow safe chars
     if (!/^[\d\s\+\-\*\/\.\(\)]+$/.test(clean)) return null;
     try {
-      // eslint-disable-next-line no-new-func
       const val = Function('"use strict"; return (' + clean + ')')();
       if (typeof val === 'number' && isFinite(val) && val >= 0) return Math.round(val * 100);
     } catch(e) {}
@@ -10252,26 +10493,16 @@ function setupCurrencyInput(el) {
     const raw = el.value;
     const hasMath = /[+\-*/]/.test(raw.replace(/^R\$[\s\u00a0]*/, ''));
     if (hasMath) return; // let user type freely
-    const selStart = el.selectionStart ?? raw.length;
-    // Conta dígitos antes do cursor no valor digitado, para reposicionar o
-    // cursor após o mesmo dígito no valor reformatado (em vez de ir ao final).
-    const digitsBeforeCursor = raw.slice(0, selStart).replace(/\D/g, '').length;
-
+    // Formato "caixa eletrônico": todo dígito digitado entra pela direita,
+    // empurrando os centavos. O cursor fica sempre no fim. Comprovamos
+    // matematicamente que edição posicional no meio do valor é incompatível
+    // com a formatação monetária ancorada à direita (qualquer Backspace/Delete
+    // desloca o peso decimal de todos os dígitos ao redor) — então este é o
+    // único comportamento livre de ambiguidade.
     const cents = toCents(raw);
     const formatted = format(cents);
     el.value = formatted;
-
-    let newPos = formatted.length, seenDigits = 0, totalDigits = formatted.replace(/\D/g,'').length;
-    if (digitsBeforeCursor >= totalDigits) {
-      newPos = formatted.length; // cursor estava no fim (ou além) — mantém no fim
-    } else {
-      newPos = 0; seenDigits = 0;
-      while (newPos < formatted.length && seenDigits < digitsBeforeCursor) {
-        if (/\d/.test(formatted[newPos])) seenDigits++;
-        newPos++;
-      }
-    }
-    el.setSelectionRange(newPos, newPos);
+    el.setSelectionRange(formatted.length, formatted.length);
   });
 
   el.addEventListener('keydown', (e) => {
@@ -10457,6 +10688,7 @@ async function exportReportPDF() {
 // ══ EVOLUÇÃO ══
 let _ev = {
   ipca: {},
+  ipcaMonthly: {}, // {"2024-01": 0.0042, ...} — fonte real da correção mensal
   catConfig:     [], // [{cat,mode}] — Resumo
   catConfigCats: [], // [{cat,mode}] — Por Categoria
   allCats: [],
@@ -10478,8 +10710,18 @@ async function saveEvConfig() {
 }
 
 async function loadEvolucaoConfig() {
-  const ipca = await ff.evolucaoIpcaGet().catch(()=>({}));
-  _ev.ipca = Object.fromEntries(Object.entries(ipca).filter(([k,v])=>parseInt(k)>=2000&&v>0&&v<1));
+  // Usa a MESMA fonte de IPCA mensal já usada pelo Patrimônio (pat:ipca-monthly-get),
+  // em vez do IPCA anual agregado. A correção mensal é mais precisa: um gasto de
+  // dezembro/2024 "perdeu" só 1 mês de inflação até hoje, não o ano inteiro de uma
+  // vez, como a versão anual fazia.
+  _ev.ipcaMonthly = await ff.patIpcaMonthlyGet().catch(() => ({}));
+  // Mantém _ev.ipca (anual) populado a partir do mensal, só para telas/exportações
+  // antigas que ainda possam referenciar o formato anual — calculado por composição.
+  _ev.ipca = {};
+  Object.entries(_ev.ipcaMonthly).forEach(([ym, rate]) => {
+    const y = ym.slice(0,4);
+    _ev.ipca[y] = (1 + (_ev.ipca[y] || 0)) * (1 + (rate||0)) - 1;
+  });
   const cfg = await ff.overviewConfigGet().catch(()=>null);
   if (!cfg) return;
   if (cfg.ev_catConfig?.length)      _ev.catConfig     = cfg.ev_catConfig;
@@ -10510,17 +10752,33 @@ function onEvViewChange()    { saveEvConfig(); refreshEvolucao(); }
 function onEvDisplayChange() { saveEvConfig(); refreshEvolucao(); }
 
 // ── IPCA ──
-function inflateAnnual(value, fromYear, refYear) {
-  if (!value || fromYear > refYear) return value || 0;
-  let f = 1;
-  for (let y = fromYear; y <= refYear; y++) {
-    const rate = _ev.ipca[String(y)] ?? _ev.ipca[y] ?? 0;
+// Correção monetária mensal: compõe o IPCA mês a mês desde `fromMonth` (YYYY-MM)
+// até o mês de referência mais recente disponível (hoje, ou o último mês com
+// dado de IPCA carregado) — mesma precisão usada na aba Patrimônio. Substitui
+// a versão anterior, que aplicava a taxa do ANO INTEIRO de uma vez só, tratando
+// um gasto de janeiro e um de dezembro do mesmo ano como igualmente desatualizados.
+function inflateToMonth(value, fromMonth, toMonth) {
+  if (!value || !fromMonth || fromMonth >= toMonth) return value || 0;
+  let f = 1, cur = fromMonth;
+  while (cur < toMonth) {
+    const [y, mo] = cur.split('-').map(Number);
+    const next = mo === 12 ? `${y+1}-01` : `${y}-${String(mo+1).padStart(2,'0')}`;
+    const rate = _ev.ipcaMonthly[next] ?? 0;
     if (rate > 0) f *= (1 + rate);
+    cur = next;
   }
   return value * f;
 }
+function inflateAnnual(value, fromYear, refYear) {
+  // Mantida por compatibilidade com qualquer chamador remanescente — agora
+  // delega para a correção mensal real, usando dezembro do ano de origem.
+  return inflateToMonth(value, `${fromYear}-01`, `${refYear}-12`);
+}
 function inflateMonth(value, fromMonth, refYear) {
-  return inflateAnnual(value, parseInt(fromMonth.slice(0,4)), refYear);
+  // refYear aqui é só o ano; usamos o último mês de IPCA carregado como teto real.
+  const months = Object.keys(_ev.ipcaMonthly).sort();
+  const toMonth = months.length ? months[months.length-1] : `${refYear}-12`;
+  return inflateToMonth(value, fromMonth, toMonth);
 }
 function movAvg12(arr, i) {
   const w = arr.slice(Math.max(0,i-11),i+1).filter(v=>v!==0&&!isNaN(v));
@@ -10634,15 +10892,15 @@ async function refreshEvolucao() {
   const useMA   = G('ev-ma')?.checked    !== false;
   const selYear = G('ev-year')?.value    || 'all';
 
-  // IPCA status
-  const currentYear = new Date().getFullYear();
-  const ipcaYears = Object.keys(_ev.ipca).map(Number).filter(y=>y<currentYear).sort((a,b)=>a-b);
-  const refYear   = ipcaYears.length ? ipcaYears[ipcaYears.length-1] : null;
+  // IPCA status — agora baseado no IPCA MENSAL (mais preciso que o anual anterior)
+  const ipcaMonths = Object.keys(_ev.ipcaMonthly).sort();
+  const refMonth   = ipcaMonths.length ? ipcaMonths[ipcaMonths.length-1] : null;
+  const refYear    = refMonth ? parseInt(refMonth.slice(0,4)) : null;
   const statusEl  = G('ev-ipca-status');
   if (statusEl) {
-    if (ipcaYears.length) {
+    if (ipcaMonths.length) {
       statusEl.style.display='block';
-      statusEl.textContent=`IPCA carregado: ${ipcaYears[0]}–${refYear} — valores em R$ de dez/${refYear}`;
+      statusEl.textContent=`IPCA mensal carregado: ${fmtMonth(ipcaMonths[0])} – ${fmtMonth(refMonth)} — valores corrigidos mês a mês até ${fmtMonth(refMonth)}`;
     } else if (useIPCA) {
       statusEl.style.display='block';
       statusEl.textContent='⚠ IPCA não carregado — clique em "📡 Atualizar IPCA"';
@@ -10650,7 +10908,7 @@ async function refreshEvolucao() {
       statusEl.style.display='none';
     }
   }
-  if (G('ev-ipca-note')) G('ev-ipca-note').textContent = useIPCA&&refYear ? `R$ de ${refYear}` : '';
+  if (G('ev-ipca-note')) G('ev-ipca-note').textContent = useIPCA&&refMonth ? `R$ de ${fmtMonth(refMonth)}` : '';
 
   const { byCategory, byCatFull } = await getEvolucaoData();
   const now2 = new Date();
@@ -11117,15 +11375,22 @@ function openEvCatSelector(context) {
 }
 
 // ── Atualizar IPCA ──
+// Usa a MESMA série mensal do BCB (SGS 433) já compartilhada com o Patrimônio —
+// elimina a duplicação que existia entre o IPCA anual (Evolução) e mensal (Patrimônio).
 async function fetchIPCA() {
-  toast('⏳ Buscando IPCA do Banco Central…');
-  const result = await ff.evolucaoIpcaFetch();
+  toast('⏳ Buscando IPCA mensal do Banco Central…');
+  const result = await ff.patIpcaMonthlyFetch();
   if (result.ok) {
+    _ev.ipcaMonthly = result.data;
+    await ff.patIpcaMonthlySave(result.data);
+    // Recalcula o anual derivado, só para compatibilidade
     _ev.ipca = {};
-    Object.entries(result.data).forEach(([k,v])=>{const y=parseInt(k);if(y>=2000&&v>0&&v<1)_ev.ipca[y]=v;});
-    await ff.evolucaoIpcaSave(_ev.ipca);
-    const years=Object.keys(_ev.ipca).sort();
-    toast(`✅ IPCA: ${years[0]}–${years[years.length-1]} (${years.length} anos)`);
+    Object.entries(_ev.ipcaMonthly).forEach(([ym, rate]) => {
+      const y = ym.slice(0,4);
+      _ev.ipca[y] = (1 + (_ev.ipca[y] || 0)) * (1 + (rate||0)) - 1;
+    });
+    const months = Object.keys(_ev.ipcaMonthly).sort();
+    toast(`✅ IPCA mensal: ${fmtMonth(months[0])} – ${fmtMonth(months[months.length-1])} (${months.length} meses)`);
     refreshEvolucao();
   } else {
     toast(`❌ Erro IPCA: ${result.error}`);
@@ -11879,6 +12144,8 @@ let _pat = {
   debts: [],            // personal_debts
   debtInstallments: {}, // {debtId: [{month, installment, balance_end, ...}]}
   currentMonth: '',
+  showAssetFlow: false,   // Fluxo nominal/real dos ativos imobilizados — colapsado por padrão
+  showDebtInstallments: false, // Linha de parcelas das dívidas pessoais — colapsada por padrão
 };
 
 // Sign convention for pat_transactions (from investor's cash perspective)
@@ -12351,7 +12618,7 @@ function refreshPatrimonioTable() {
         ${months.map(m => `<td style="background:${m===curM?'var(--accent-lt)':bg}"></td>`).join('')}
         <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
       </tr>` : ''}
-      <tr style="background:${bg}">
+      ${_pat.showAssetFlow ? `<tr style="background:${bg}">
         <td style="${STICKY};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${bg}" colspan="4">📊 Fluxo nominal</td>
         ${patNomCells}
         <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
@@ -12360,7 +12627,7 @@ function refreshPatrimonioTable() {
         <td style="${STICKY};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${bg}" colspan="4">📈 Fluxo real (IPCA)</td>
         ${patRealCells}
         <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
-      </tr>`;
+      </tr>` : ''}`;
     }
   });
 
@@ -12444,11 +12711,11 @@ function refreshPatrimonioTable() {
         <button class="btn-icon" onclick="deletePatDebt(${d.id})" style="color:var(--red)" title="Excluir">✕</button>
       </td>
     </tr>
-    <tr style="background:${bg}">
+    ${_pat.showDebtInstallments ? `<tr style="background:${bg}">
       <td style="${STICKY};left:0;font-size:10px;color:#dc2626;padding:2px 12px 2px 24px;background:${bg}" colspan="4">📅 Parcelas (pagas e projetadas)</td>
       ${iCells}
       <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
-    </tr>`;
+    </tr>` : ''}`;
   });
 
   const debtTotalRowCells = months.map(m => {
@@ -12630,6 +12897,8 @@ function refreshPatrimonioTable() {
 
   // Real flow toggle button
   const realFlowToggle = `<button class="btn xs" onclick="_inv.showRealFlow=!_inv.showRealFlow;refreshPatrimonioTable()" style="font-size:10px;margin-left:8px">${_inv.showRealFlow?'▲ Ocultar':'▼ Fluxo real'} IPCA</button>`;
+  const assetFlowToggle = `<button class="btn xs" onclick="_pat.showAssetFlow=!_pat.showAssetFlow;refreshPatrimonioTable()" style="font-size:10px;margin-left:8px">${_pat.showAssetFlow?'▲ Ocultar':'▼ Fluxo'} nominal/real</button>`;
+  const debtInstallToggle = `<button class="btn xs" onclick="_pat.showDebtInstallments=!_pat.showDebtInstallments;refreshPatrimonioTable()" style="font-size:10px;margin-left:8px">${_pat.showDebtInstallments?'▲ Ocultar':'▼ Parcelas'}</button>`;
 
   // inv rows
   const invRows = buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden);
@@ -12677,7 +12946,7 @@ function refreshPatrimonioTable() {
       <!-- 1. IMOBILIZADO -->
       <tbody>
         <tr style="background:var(--bg3)">
-          <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">🏠 Patrimônio Imobilizado</td>
+          <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">🏠 Patrimônio Imobilizado ${assetFlowToggle}</td>
           ${months.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
           <td style="${STICKY3};right:0;min-width:60px;text-align:right">
             <button class="btn xs primary" onclick="openPatAssetModal()" style="font-size:10px">+ Novo</button>
@@ -12691,7 +12960,7 @@ function refreshPatrimonioTable() {
       <!-- 2b. DÍVIDAS PESSOAIS -->
       <tbody>
         <tr style="background:var(--bg3)">
-          <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">💳 Dívidas Pessoais</td>
+          <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">💳 Dívidas Pessoais ${debtInstallToggle}</td>
           ${months.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
           <td style="${STICKY3};right:0;min-width:60px;text-align:right">
             <button class="btn xs primary" onclick="openDebtModal()" style="font-size:10px">+ Nova</button>
@@ -12845,9 +13114,11 @@ let _patInlineActive = false; // guard against re-entrant refreshes during inlin
 async function patInlineEdit(td, assetId, month, currentValue) {
   if (td.querySelector('input')) return;
   const orig = td.innerHTML;
-  td.innerHTML = `<input type="number" step="0.01" value="${currentValue}"
+  td.innerHTML = `<input type="text"
     style="width:110px;text-align:right;font-size:12px" onclick="event.stopPropagation()">`;
   const inp = td.querySelector('input');
+  setupCurrencyInput(inp);
+  inp.setValue(currentValue);
   inp.focus(); inp.select();
   let committed = false;
 
@@ -12855,7 +13126,7 @@ async function patInlineEdit(td, assetId, month, currentValue) {
     if (committed) return;
     committed = true;
     _patInlineActive = false;
-    const v = parseFloat(inp.value.replace(',','.'));
+    const v = inp.rawValue();
     if (!isNaN(v) && v !== currentValue) {
       // Don't write to td after commit — td may be detached
       await ff.patHistorySet({ assetId, month, value: v, manual: true });
@@ -12889,13 +13160,15 @@ async function patInstallmentInlineEdit(td, id, month, currentValue, isProj, isD
   const orig = td.innerHTML;
   const wasPaid = isProj === 0;
   td.innerHTML = `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px" onclick="event.stopPropagation()">
-    <input type="number" step="0.01" value="${currentValue}" style="width:90px;text-align:right;font-size:11px;padding:1px 3px">
+    <input type="text" style="width:90px;text-align:right;font-size:11px;padding:1px 3px">
     <label style="font-size:9px;display:flex;align-items:center;gap:3px;cursor:pointer;white-space:nowrap">
       <input type="checkbox" ${wasPaid?'checked':''} style="margin:0;width:11px;height:11px"> Pago
     </label>
   </div>`;
-  const inp = td.querySelector('input[type=number]');
+  const inp = td.querySelector('input[type=text]');
   const chk = td.querySelector('input[type=checkbox]');
+  setupCurrencyInput(inp);
+  inp.setValue(currentValue);
   inp.focus(); inp.select();
   let committed = false;
 
@@ -12903,7 +13176,7 @@ async function patInstallmentInlineEdit(td, id, month, currentValue, isProj, isD
     if (committed) return;
     committed = true;
     _patInlineActive = false;
-    const v = parseFloat(inp.value.replace(',','.'));
+    const v = inp.rawValue();
     const paid = chk.checked;
     if (!isNaN(v) && (v !== currentValue || paid !== wasPaid)) {
       if (isDebt) {
@@ -13017,11 +13290,28 @@ function patTxRenderTable() {
         </select>
         ${syncHint}
       </div>
-      <input class="inp" style="font-size:12px;padding:3px 4px;text-align:right" type="number" step="0.01" value="${histVal}" placeholder="Auto (IPCA)" title="Valor do ativo neste mês (deixe vazio para cálculo automático)" onchange="patTxUpdateRow(${i},'hist',this.value)">
-      <input class="inp" style="font-size:12px;padding:3px 4px;text-align:right" type="number" step="0.01" value="${row.total_value ?? ''}" placeholder="Movim." onchange="patTxUpdateRow(${i},'val',this.value)">
+      <input class="inp pat-tx-currency" data-row="${i}" data-field="hist" style="font-size:12px;padding:3px 4px;text-align:right" type="text" placeholder="Auto (IPCA)" title="Valor do ativo neste mês (deixe vazio para cálculo automático)">
+      <input class="inp pat-tx-currency" data-row="${i}" data-field="val" style="font-size:12px;padding:3px 4px;text-align:right" type="text" placeholder="Movim.">
       <button class="btn-icon" style="color:#dc2626;font-size:15px;padding:0 4px" onclick="patTxDeleteRow(${i})">×</button>
     </div>`;
   }).join('') || `<div style="padding:14px;text-align:center;color:var(--text3);font-size:12px">Nenhuma movimentação registrada. Use "+ Adicionar linha" para começar.</div>`;
+
+  // Aplica máscara de moeda nos campos de valor (posição/movimentação) e
+  // preenche o valor inicial sem disparar reformatação indevida. Lê o valor
+  // de volta via rawValue() no blur — não no onchange/this.value crus, que
+  // não entendem o formato "R$ 1.234,56".
+  tbody.querySelectorAll('.pat-tx-currency').forEach(el => {
+    setupCurrencyInput(el);
+    const i = parseInt(el.dataset.row);
+    const field = el.dataset.field;
+    const row = _patTxRows[i];
+    const initial = field === 'hist' ? row?.hist_value : row?.total_value;
+    if (initial != null && initial !== '') el.setValue(parseFloat(initial));
+    el.addEventListener('blur', () => {
+      const v = el.rawValue();
+      patTxUpdateRow(i, field, (v === 0 && (el.value === '' || el.value === 'R$\u00a00,00')) ? '' : String(v));
+    });
+  });
 }
 
 function patTxUpdateRow(i, field, val) {
@@ -13804,36 +14094,98 @@ function patRenderSchedulePreview(schedule) {
 
 // Show a scrollable modal with the FULL installment schedule for the contract
 // currently loaded in the financing form.
-function patShowFullSchedule() {
-  if (!_finSchedule.length) return;
+// Modal de cronograma completo — unificado para financiamento de ativo e dívida
+// pessoal. Busca os dados REAIS persistidos (com id e status "paid" verdadeiros,
+// não a simulação em memória), permite selecionar uma ou mais parcelas via
+// checkbox e alternar o status pago/pendente manualmente.
+async function patShowFullSchedule() {
+  const assetId = parseInt(G('pat-asset-id')?.value || '0');
+  if (!assetId || !_finCurrentContractId) { toast('Salve o financiamento antes de ver o cronograma completo.'); return; }
+  const rows = await ff.patFinancingScheduleReal({ assetId, contractId: _finCurrentContractId }).catch(() => []);
+  showFullScheduleModal('financing', rows, { assetId });
+}
+
+async function debtShowFullSchedule() {
+  const debtId = parseInt(G('debt-id')?.value || '0');
+  if (!debtId) { toast('Salve a dívida antes de ver o cronograma completo.'); return; }
+  const rows = await ff.debtScheduleReal({ debtId }).catch(() => []);
+  showFullScheduleModal('debt', rows, { debtId });
+}
+
+function showFullScheduleModal(type, rows, ctx) {
+  if (!rows.length) { toast('Nenhuma parcela encontrada.'); return; }
   const curM = new Date().toISOString().slice(0,7);
-  const sorted = _finSchedule.slice().sort((a,b) => a.month.localeCompare(b.month));
+  const sorted = rows.slice().sort((a,b) => a.month.localeCompare(b.month));
   const totalInstall = sorted.reduce((s,r) => s+r.installment, 0);
-  // Larguras suficientes para valores grandes (até R$ 999.999,99) sem sobrepor —
-  // o problema anterior era colunas fixas de 90-100px, estreitas demais para
-  // financiamentos com parcelas/saldos de seis dígitos.
-  const COLS = '85px 115px 105px 105px 115px 70px';
+  // Larguras suficientes para valores grandes sem sobrepor (coluna extra de checkbox)
+  const COLS = '24px 85px 115px 105px 105px 115px 80px';
   const rowsHtml = sorted.map(r => {
-    const isPast = r.month <= curM && r.is_projection === 0;
-    const isFut  = r.is_projection === 1 && r.month > curM;
-    const color  = isPast ? 'var(--text1)' : 'var(--text3)';
+    const isPaid = r.paid === 1 || r.is_projection === 0;
+    const isFut  = !isPaid && r.month > curM;
+    const color  = isPaid ? 'var(--text1)' : 'var(--text3)';
     const rowBg  = r.month.slice(0,7) === curM ? 'background:var(--accent-lt)' : '';
-    return `<div style="display:grid;grid-template-columns:${COLS};gap:4px;padding:4px 10px;border-bottom:1px solid var(--border);color:${color};${rowBg};font-size:12px">
+    const statusLabel = isFut ? '📊 proj.' : isPaid ? '✅ pago' : '⏳ pend.';
+    return `<div style="display:grid;grid-template-columns:${COLS};gap:4px;padding:4px 10px;border-bottom:1px solid var(--border);color:${color};${rowBg};font-size:12px;align-items:center">
+      <input type="checkbox" class="fs-row-chk" data-id="${r.id}" data-paid="${isPaid?1:0}" style="cursor:pointer">
       <span>${fmtMonth(r.month)}</span>
       <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.installment)}</span>
       <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.principal)}</span>
       <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.interest)}</span>
       <span class="right" style="font-family:'DM Mono',monospace">${fmtBRL(r.balance_end)}</span>
-      <span class="right" style="font-size:9px">${isFut ? '📊 proj.' : isPast ? '✅ pago' : '⏳ pend.'}</span>
+      <span class="right" style="font-size:9px;cursor:pointer" title="Clique para alternar pago/pendente" onclick="fsToggleSingle(${r.id},${isPaid?1:0},'${type}')">${statusLabel} ✎</span>
     </div>`;
   }).join('');
   const html = `
-    <div style="display:grid;grid-template-columns:${COLS};gap:4px;padding:6px 10px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;border-bottom:1px solid var(--border2);background:var(--bg4)">
-      <span>Mês</span><span class="right">Parcela</span><span class="right">Principal</span><span class="right">Juros</span><span class="right">Saldo</span><span class="right">Status</span>
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg4);border-bottom:1px solid var(--border2)">
+      <label style="display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer">
+        <input type="checkbox" id="fs-select-all" onchange="fsSelectAll(this.checked)"> Selecionar todas
+      </label>
+      <span style="flex:1"></span>
+      <button class="btn xs" onclick="fsBulkSetPaid(true,'${type}')">✅ Marcar pagas</button>
+      <button class="btn xs" onclick="fsBulkSetPaid(false,'${type}')">⏳ Marcar pendentes</button>
     </div>
-    <div style="max-height:60vh;overflow-y:auto">${rowsHtml}</div>
+    <div style="display:grid;grid-template-columns:${COLS};gap:4px;padding:6px 10px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;border-bottom:1px solid var(--border2);background:var(--bg4)">
+      <span></span><span>Mês</span><span class="right">Parcela</span><span class="right">Principal</span><span class="right">Juros</span><span class="right">Saldo</span><span class="right">Status</span>
+    </div>
+    <div style="max-height:55vh;overflow-y:auto" id="fs-rows-container">${rowsHtml}</div>
     <div style="padding:8px 10px;font-size:11px;color:var(--text3);border-top:1px solid var(--border2)">${sorted.length} parcelas — Total: ${fmtBRL(totalInstall)} — Saldo final: ${fmtBRL(sorted.at(-1)?.balance_end ?? 0)}</div>`;
-  showInfoModal('📅 Cronograma completo de parcelas', html, 680);
+  showInfoModal('📅 Cronograma completo de parcelas', html, 720);
+  window._fsCtx = ctx; // guarda o contexto (assetId ou debtId) para refresh pós-ação
+  window._fsType = type;
+}
+
+function fsSelectAll(checked) {
+  document.querySelectorAll('#fs-rows-container .fs-row-chk').forEach(chk => chk.checked = checked);
+}
+
+async function fsToggleSingle(id, currentlyPaid, type) {
+  await fsApplyToggle([id], !currentlyPaid, type);
+}
+
+async function fsBulkSetPaid(paid, type) {
+  const ids = [...document.querySelectorAll('#fs-rows-container .fs-row-chk:checked')].map(el => parseInt(el.dataset.id));
+  if (!ids.length) { toast('Selecione ao menos uma parcela.'); return; }
+  await fsApplyToggle(ids, paid, type);
+}
+
+async function fsApplyToggle(ids, paid, type) {
+  if (type === 'financing') {
+    await ff.patFinancingTogglePaid({ ids, paid }).catch(() => {});
+  } else {
+    await ff.debtTogglePaid({ ids, paid }).catch(() => {});
+  }
+  toast(`${ids.length} parcela(s) marcada(s) como ${paid ? 'paga(s)' : 'pendente(s)'}`);
+  // Recarrega o modal com os dados atualizados
+  if (type === 'financing' && window._fsCtx?.assetId) {
+    const rows = await ff.patFinancingScheduleReal({ assetId: window._fsCtx.assetId, contractId: _finCurrentContractId }).catch(() => []);
+    showFullScheduleModal('financing', rows, window._fsCtx);
+    // Também atualiza a tabela de patrimônio em segundo plano, se estiver visível
+    if (currentPage === 'patrimonio') refreshPatrimonioTable();
+  } else if (type === 'debt' && window._fsCtx?.debtId) {
+    const rows = await ff.debtScheduleReal({ debtId: window._fsCtx.debtId }).catch(() => []);
+    showFullScheduleModal('debt', rows, window._fsCtx);
+    if (currentPage === 'patrimonio') refreshPatrimonioTable();
+  }
 }
 
 function patCollectFinancingRows() {
@@ -13990,7 +14342,12 @@ function debtRenderSchedulePreview(schedule) {
       <span class="right" style="font-size:9px">${isFut ? '📊 proj.' : isPast ? '✅ pago' : '⏳ pend.'}</span>
     </div>`;
   }).join('');
-  if (schedule.length > 6) body.innerHTML += `<div style="padding:6px 10px;color:var(--text3);font-size:11px">... e mais ${schedule.length - 6} parcelas</div>`;
+  if (schedule.length > 6) {
+    body.innerHTML += `<div style="padding:6px 10px;color:var(--text3);font-size:11px;display:flex;justify-content:space-between;align-items:center">
+      <span>... e mais ${schedule.length - 6} parcela${schedule.length-6===1?'':'s'}</span>
+      <button class="btn xs" onclick="debtShowFullSchedule()">Ver todas</button>
+    </div>`;
+  }
   preview.style.display = '';
 }
 
@@ -16055,11 +16412,10 @@ async function computeEvMA12LucroData() {
     const allMonths = [...new Set(Object.keys(byCatFull))].filter(m => m <= curM2).sort();
     if (!allMonths.length) return;
 
-    // Determine IPCA ref year (same logic as refreshEvolucao)
-    const ipcaYears = Object.keys(_ev.ipca||{}).map(Number).filter(y => y < now2.getFullYear()).sort((a,b)=>a-b);
-    const refYear   = ipcaYears.length ? ipcaYears[ipcaYears.length-1] : null;
+    // Determine IPCA ref month (mesma lógica usada na Evolução, agora mensal)
+    if (!Object.keys(_ev.ipcaMonthly).length) await loadEvolucaoConfig().catch(() => {});
     const useIPCA   = G('ev-ipca')?.checked !== false;
-    const corr = (v, m) => useIPCA && refYear ? inflateMonth(v, m, refYear) : (v || 0);
+    const corr = (v, m) => useIPCA ? inflateMonth(v, m, now2.getFullYear()) : (v || 0);
 
     const allSummary = computeSummaryFromByCat(allMonths, byCatFull);
     const allInc = allMonths.map(m => corr(allSummary[m]?.income   || 0, m));
