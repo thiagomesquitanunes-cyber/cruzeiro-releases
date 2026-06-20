@@ -158,7 +158,27 @@ try {
     { name: 'OpenAI API Key',      re: /sk-[a-zA-Z0-9]{32,}/ },
     { name: 'Anthropic API Key',   re: /sk-ant-[a-zA-Z0-9-]{16,}/ },
     { name: 'Google API Key',      re: /AIza[0-9A-Za-z\-_]{20,}/ },
-    { name: 'Supabase Service JWT',re: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ },
+    {
+      name: 'Supabase Service-Role JWT',
+      re: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/,
+      // JWTs do Supabase com role "anon" (ou "authenticated") são as chaves
+      // PÚBLICAS, feitas para ir no app cliente — a segurança real vem das
+      // políticas de RLS no servidor, não de manter essa chave em segredo.
+      // Só "service_role" é um segredo de verdade (acesso total ao banco,
+      // ignora RLS). Decodifica o payload do JWT e só alarma nesse caso —
+      // sem isso, a própria anon key legítima do app trava a publicação.
+      isDangerous(match) {
+        try {
+          const payloadB64 = match.split('.')[1];
+          const padded = payloadB64.replace(/-/g, '+').replace(/_/g, '/')
+            + '='.repeat((4 - payloadB64.length % 4) % 4);
+          const payload = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+          return !!payload.role && payload.role !== 'anon' && payload.role !== 'authenticated';
+        } catch (e) {
+          return true; // não conseguiu decodificar — assume o pior, por segurança
+        }
+      },
+    },
   ];
   const stagedNow = (runSilent('git diff --cached --name-only') || '').split('\n').filter(Boolean);
   const filesAboutToStage = (runSilent('git status --porcelain') || '')
@@ -185,7 +205,8 @@ try {
     let content = '';
     try { content = fs.readFileSync(path.join(__dirname, f), 'utf8'); } catch(e) { return; }
     SECRET_PATTERNS.forEach(p => {
-      if (p.re.test(content)) {
+      const m = content.match(p.re);
+      if (m && (!p.isDangerous || p.isDangerous(m[0]))) {
         console.error(`  🚨 Possível ${p.name} encontrada em "${f}" — publicação ABORTADA.`);
         foundSecret = true;
       }

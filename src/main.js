@@ -297,6 +297,10 @@ async function initDB() {
   try { db.run('ALTER TABLE pat_assets ADD COLUMN sold_value REAL'); } catch(e) {}
   try { db.run('ALTER TABLE pat_assets ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0'); } catch(e) {}
   try { db.run('ALTER TABLE pat_accounts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0'); } catch(e) {}
+  try { db.run("ALTER TABLE pat_financing_contracts ADD COLUMN extra_annual_effect TEXT NOT NULL DEFAULT 'moment'"); } catch(e) {}
+  try { db.run("ALTER TABLE personal_debt_contracts ADD COLUMN extra_annual_effect TEXT NOT NULL DEFAULT 'moment'"); } catch(e) {}
+  try { db.run("ALTER TABLE pat_financing_contracts ADD COLUMN correction_ref_month TEXT NOT NULL DEFAULT 'minus2'"); } catch(e) {}
+  try { db.run("ALTER TABLE personal_debt_contracts ADD COLUMN correction_ref_month TEXT NOT NULL DEFAULT 'minus2'"); } catch(e) {}
   try { db.run('ALTER TABLE inv_assets ADD COLUMN broker TEXT'); } catch(e) {}
   try { db.run('ALTER TABLE inv_assets ADD COLUMN maturity_month TEXT'); } catch(e) {}
   try { db.run('ALTER TABLE inv_assets ADD COLUMN liquidity TEXT DEFAULT "vencimento"'); } catch(e) {}
@@ -520,7 +524,21 @@ function ensureLateColumns() {
     'ALTER TABLE pat_financing_contracts ADD COLUMN closed_month TEXT',
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance REAL',
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance_month TEXT',
+    // Mês de aquisição (compra) — distinto do mês da 1ª parcela (first_month),
+    // usado como base real para a correção monetária. Estava sendo perdido ao
+    // salvar o contrato (não fazia parte do INSERT/UPDATE), fazendo a UI cair
+    // de volta para first_month ao reabrir o ativo.
+    'ALTER TABLE pat_financing_contracts ADD COLUMN purchase_month TEXT',
+    "ALTER TABLE pat_financing_contracts ADD COLUMN extra_annual_effect TEXT NOT NULL DEFAULT 'moment'",
+    "ALTER TABLE pat_financing_contracts ADD COLUMN correction_ref_month TEXT NOT NULL DEFAULT 'minus2'",
     'ALTER TABLE pat_financing ADD COLUMN contract_id INTEGER REFERENCES pat_financing_contracts(id) ON DELETE CASCADE',
+    // personal_debt_contracts nunca recebeu a coluna status (só
+    // pat_financing_contracts tinha), mas o código já consulta
+    // "WHERE status='active'" nela — gerando "no such column: status" e
+    // interrompendo o recálculo de cronogramas de dívidas a cada fetch de
+    // índices. Como debt_id é UNIQUE nessa tabela (1 contrato por dívida),
+    // o default 'active' replica exatamente o comportamento já existente.
+    "ALTER TABLE personal_debt_contracts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
     // Vínculo de recorrência a ativo imobilizado / dívida pessoal
     'ALTER TABLE recurring ADD COLUMN pat_asset_id INTEGER',
     'ALTER TABLE recurring ADD COLUMN pat_tx_type TEXT',
@@ -2134,27 +2152,56 @@ app.whenReady().then(async () => {
     setImmediate(() => {
       try { const recs = all('SELECT * FROM recurring WHERE active=1'); recs.forEach(rec => syncRecurringTxns(rec)); save(); } catch(e) { console.error('syncRecurring startup:', e); }
     });
-    // Restaura sessão Supabase salva (refresh token) antes de rodar o sync
+    // Carrega índices de financiamento já salvos localmente (cache offline)
+    // e dispara atualização em background — igual ao padrão usado para o IPCA.
     setImmediate(async () => {
-      const s = loadSettings();
-      if (s.supabaseRefreshToken) {
-        try {
-          await sb.refreshSession(s.supabaseRefreshToken);
-          console.log('[sync] sessão restaurada para', s.supabaseEmail);
-        } catch(e) {
-          console.log('[sync] sessão expirada, login necessário:', e.message);
-          const s2 = loadSettings();
-          delete s2.supabaseRefreshToken;
-          saveSettings(s2);
+      try {
+        const idxPath = getDbPath().replace('.db', '_financing_indexes.json');
+        if (fs.existsSync(idxPath)) {
+          global._financingIndexes = JSON.parse(fs.readFileSync(idxPath, 'utf8'));
         }
-      }
-      runMobileSync('startup').catch(() => {});
+      } catch(e) { console.warn('[financing indexes] cache load failed:', e.message); }
+
+      try {
+        const result = await _fetchFinancingIndexesInternal();
+        console.log('[financing indexes] atualizados:', result.updated.join(', ') || 'nenhum',
+          result.errors.length ? ' | erros: ' + result.errors.join(', ') : '');
+        // Recalcula os cronogramas de todos os contratos ativos (ativo + dívida
+        // pessoal) para refletir a correção monetária com os índices atualizados.
+        const activeAssetContracts = all("SELECT id, asset_id FROM pat_financing_contracts WHERE status='active'");
+        activeAssetContracts.forEach(c => { try { _regenerateProjectedSchedule(c.asset_id, c.id); } catch(e) {} });
+        const activeDebts = all("SELECT DISTINCT debt_id FROM personal_debt_contracts WHERE status='active'");
+        activeDebts.forEach(r => { try { _regenerateProjectedDebtSchedule(r.debt_id); } catch(e) {} });
+        if (activeAssetContracts.length || activeDebts.length) save();
+      } catch(e) { console.warn('[financing indexes] fetch failed:', e.message); }
     });
   }
 
+  // ── Tenta restaurar sessão Supabase ANTES de decidir se exibe login ──
   const settings = loadSettings();
-  // Show login if DB is encrypted OR legacy passwordHash exists
-  if (settings.hasEncryptedDB || _dbPendingDecrypt || settings.passwordHash) {
+  let sessionRestored = false;
+  if (!_dbPendingDecrypt && settings.supabaseRefreshToken) {
+    try {
+      await sb.refreshSession(settings.supabaseRefreshToken);
+      console.log('[sync] sessão restaurada para', settings.supabaseEmail);
+      sessionRestored = true;
+      if (sb.getUserId()) await _ensureFirstRun(sb.getUserId()).catch(() => {});
+      runMobileSync('startup').catch(() => {});
+    } catch(e) {
+      console.log('[sync] sessão expirada, login necessário:', e.message);
+      const s2 = loadSettings();
+      delete s2.supabaseRefreshToken;
+      delete s2.supabaseEmail;
+      saveSettings(s2);
+      sessionRestored = false;
+    }
+  }
+
+  // Mostra login se:
+  //   (a) DB criptografado — precisa de senha local para decriptar
+  //   (b) Não há sessão Supabase válida — primeira abertura ou após reinstalação
+  const needsLogin = settings.hasEncryptedDB || _dbPendingDecrypt || settings.passwordHash || !sessionRestored;
+  if (needsLogin) {
     createLoginWindow();
     // Don't pre-create main window — create it AFTER login so it loads with real DB
   } else {
@@ -3062,9 +3109,65 @@ ipcMain.handle('pat:financing-paid-value', (_, { assetId }) => {
 // SAC: equal principal, decreasing installment
 // PRICE: equal installment (French method)
 // SAM: average of SAC and PRICE
-function generateSchedule({ system, annual_rate, principal, n_installments, first_month, balloon_at_keys, extra_annual_month, extra_annual_value }) {
+// Calcula o índice mensal (em fração, ex: 0.005 = 0.5%) para um mês "YYYY-MM"
+// e um index_type ('INCC','TR','IGP-M','IPCA','none'). Retorna 0 se não houver
+// dado disponível (evita travar o cálculo por falta de atualização do índice).
+function _monthlyIndexRate(indexType, monthKey) {
+  if (!indexType || indexType === 'none') return 0;
+  const idx = global._financingIndexes && global._financingIndexes[indexType];
+  if (!idx) return 0;
+  const v = idx[monthKey];
+  return typeof v === 'number' && isFinite(v) ? v : 0;
+}
+
+// Mês de referência inicial para correção: desloca purchaseMonth pelo offset
+// ('minus2' = 2 meses antes, 'minus1' = 1 mês antes, 'same' = mesmo mês).
+function _correctionRefMonth(purchaseMonth, refMode) {
+  if (!purchaseMonth) return purchaseMonth;
+  const offset = refMode === 'minus1' ? -1 : refMode === 'same' ? 0 : -2; // default minus2
+  const [y, m] = purchaseMonth.split('-').map(Number);
+  const total = (y * 12 + (m - 1)) + offset;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
+  return `${ny}-${String(nm).padStart(2,'0')}`;
+}
+
+// Fator de correção acumulado entre o mês de referência e o mês alvo (ambos
+// deslocados pelo mesmo offset, conforme correction_ref_month). Composição
+// mensal: produto de (1 + taxa_do_mês) para cada mês no intervalo.
+function _accumulatedCorrectionFactor(indexType, refMonthOffset, targetMonth) {
+  if (!indexType || indexType === 'none') return 1;
+  const refForTarget = _correctionRefMonth(targetMonth, refMonthOffset);
+  const refForBase    = _correctionRefMonth(_correctionBaseMonth, refMonthOffset);
+  if (refForTarget <= refForBase) return 1;
+  let factor = 1;
+  let [y, m] = refForBase.split('-').map(Number);
+  let cur = `${y}-${String(m).padStart(2,'0')}`;
+  while (cur < refForTarget) {
+    const rate = _monthlyIndexRate(indexType, cur);
+    factor *= (1 + rate);
+    m++; if (m > 12) { m = 1; y++; }
+    cur = `${y}-${String(m).padStart(2,'0')}`;
+  }
+  return factor;
+}
+let _correctionBaseMonth = null; // setado por generateSchedule a cada chamada
+
+function generateSchedule({ system, annual_rate, principal, n_installments, first_month, purchase_month, balloon_at_keys, extra_annual_month, extra_annual_value, extra_annual_effect, index_type, correction_ref_month }) {
+  // Mês-base para correção monetária = mês de aquisição (compra), quando informado;
+  // cai para first_month (mês da 1ª parcela) se purchase_month não vier preenchido.
+  _correctionBaseMonth = purchase_month || first_month;
+  const _idxType = index_type || 'none';
+  const _refMode = correction_ref_month || 'minus2';
   const r = annual_rate / 100 / 12; // monthly rate
   const schedule = [];
+  // extra_annual_effect:
+  //   'origin'  → parcela anual reduz o saldo ANTES de calcular as mensais:
+  //               base_principal = principal - (n_anuais * extra_annual_value)
+  //               mensais são calculadas sobre base_principal e ficam fixas.
+  //   'moment'  → parcela anual reduz o saldo NO MOMENTO em que cai:
+  //               mensais recalculadas a cada pagamento anual (comportamento atual).
+  const effect = extra_annual_effect || 'moment';
 
   // Balloon at keys (upfront payment, reduces principal)
   let remainingPrincipal = principal - (balloon_at_keys || 0);
@@ -3072,19 +3175,57 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
 
   // PLANTA: equal installments with no interest (amortization only, correction applied at payment)
   if (system === 'PLANTA') {
+    // Se efeito 'origin': calcula quantas parcelas anuais caem no período e
+    // subtrai do saldo base antes de dimensionar as mensais.
+    let basePrincipal = remainingPrincipal;
+    if (effect === 'origin' && extra_annual_month && extra_annual_value) {
+      // Conta quantos meses do cronograma têm parcela anual
+      let tmpCur = first_month;
+      let nAnuais = 0;
+      for (let i = 0; i < n_installments; i++) {
+        if (parseInt(tmpCur.split('-')[1]) === extra_annual_month) nAnuais++;
+        const [y2, m2] = tmpCur.split('-').map(Number);
+        tmpCur = m2 === 12 ? `${y2+1}-01` : `${y2}-${String(m2+1).padStart(2,'0')}`;
+      }
+      basePrincipal = Math.max(0, remainingPrincipal - nAnuais * extra_annual_value);
+    }
+
     let balance = remainingPrincipal;
     let cur = first_month;
+    // Para 'origin': amort mensal fixo calculado sobre basePrincipal / n_installments
+    const fixedMonthlyAmort = effect === 'origin' ? basePrincipal / n_installments : 0;
+    let prevFactor = 1; // fator de correção acumulado até o mês anterior
+
     for (let i = 0; i < n_installments; i++) {
       const monthsRemaining = n_installments - i;
-      // Recalculado a cada mês (saldo/meses restantes) — extras anuais não
-      // encurtam o prazo; a amortização regular se ajusta para fechar em N.
-      const amort = balance / monthsRemaining;
-      const extra = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month) ? extra_annual_value : 0;
+
+      // Correção monetária: aplica a variação do índice entre o mês anterior
+      // e este mês sobre o saldo devedor, ANTES de calcular a amortização.
+      const curFactor = _accumulatedCorrectionFactor(_idxType, _refMode, cur);
+      const correctionAmt = balance * (curFactor / prevFactor - 1);
+      balance = balance + correctionAmt;
+      prevFactor = curFactor;
+
+      let amort;
+      if (effect === 'origin') {
+        // 'origin': a parcela fixa também é corrigida pelo mesmo fator acumulado
+        amort = fixedMonthlyAmort * curFactor;
+      } else {
+        // 'moment': recalculado a cada mês sobre o saldo real (já corrigido)
+        amort = balance / monthsRemaining;
+      }
+      const isExtraMonth = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month);
+      const extra = isExtraMonth ? (extra_annual_value * curFactor) : 0;
       balance = Math.max(0, balance - amort - extra);
+      // Linha única por mês — soma mensal + anual (quando o mês coincide com a
+      // parcela anual extra). Duas linhas separadas para o mesmo mês colidem
+      // com a constraint UNIQUE(contract_id, month) de pat_financing e fazem
+      // uma sobrescrever a outra, perdendo dados ao persistir.
       schedule.push({
-        month: cur, installment: Math.round((amort + extra)*100)/100,
-        principal: Math.round((amort+extra)*100)/100, interest: 0, correction: 0,
+        month: cur, installment: Math.round((amort+extra)*100)/100,
+        principal: Math.round((amort+extra)*100)/100, interest: 0, correction: Math.round(correctionAmt*100)/100,
         balance_end: Math.round(balance*100)/100, is_projection: 1,
+        annual_component: Math.round(extra*100)/100,
       });
       const [y, m] = cur.split('-').map(Number);
       cur = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
@@ -3102,12 +3243,37 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
       : bal / monthsLeft;
   }
 
-  let balance = remainingPrincipal;
+  // Para efeito 'origin' em SAC/PRICE: subtrai o total de parcelas anuais do
+  // saldo base antes de dimensionar as mensais, tornando-as todas iguais.
+  let baseBalance = remainingPrincipal;
+  if (effect === 'origin' && extra_annual_month && extra_annual_value) {
+    let tmpCur = first_month;
+    let nAnuais = 0;
+    for (let i = 0; i < n_installments; i++) {
+      if (parseInt(tmpCur.split('-')[1]) === extra_annual_month) nAnuais++;
+      const [y2, m2] = tmpCur.split('-').map(Number);
+      tmpCur = m2 === 12 ? `${y2+1}-01` : `${y2}-${String(m2+1).padStart(2,'0')}`;
+    }
+    baseBalance = Math.max(0, remainingPrincipal - nAnuais * extra_annual_value);
+  }
+  let balance = remainingPrincipal; // saldo real (afetado por pagamentos anuais)
+  let baseForCalc = baseBalance;    // saldo base para cálculo das mensais (fixo em 'origin')
   let cur = first_month;
+  let prevFactorSac = 1; // fator de correção acumulado até o mês anterior
 
   for (let i = 0; i < n_installments; i++) {
     const monthsRemaining = n_installments - i;
-    const interest = balance * r;
+
+    // Correção monetária: aplica a variação do índice entre o mês anterior e
+    // este mês sobre o saldo (real e base), ANTES de calcular juros/amort.
+    const curFactorSac = _accumulatedCorrectionFactor(_idxType, _refMode, cur);
+    const factorStep = curFactorSac / prevFactorSac;
+    const correctionAmt = balance * (factorStep - 1);
+    balance = balance * factorStep;
+    baseForCalc = baseForCalc * factorStep;
+    prevFactorSac = curFactorSac;
+
+    const interest = (effect === 'origin' ? baseForCalc : balance) * r;
     let amortization, installment;
 
     if (system === 'SAC') {
@@ -3115,36 +3281,43 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
       // que pagamentos extras (parcela anual) NÃO encurtem o número de parcelas:
       // eles aceleram a quitação do saldo, e a amortização regular se ajusta
       // para que as N parcelas sempre fechem o saldo exatamente na última.
-      amortization = balance / monthsRemaining;
+      amortization = (effect === 'origin' ? baseForCalc : balance) / monthsRemaining;
       installment  = amortization + interest;
     } else if (system === 'PRICE') {
-      installment  = priceInstallmentFor(balance, r, monthsRemaining);
+      installment  = priceInstallmentFor(effect === 'origin' ? baseForCalc : balance, r, monthsRemaining);
       amortization = installment - interest;
     } else { // SAM
-      const sacAm   = balance / monthsRemaining;
+      const b = effect === 'origin' ? baseForCalc : balance;
+      const sacAm   = b / monthsRemaining;
       const sacInst = sacAm + interest;
-      const priceInst = priceInstallmentFor(balance, r, monthsRemaining);
+      const priceInst = priceInstallmentFor(b, r, monthsRemaining);
       installment   = (sacInst + priceInst) / 2;
       amortization  = installment - interest;
     }
 
     // Extra annual installment (balão)
+    // 'origin': já descontado do saldo base — a mensal não muda quando a anual cai.
+    // 'moment': desconta do saldo no momento, recalculando mensais subsequentes.
     let extra = 0;
     if (extra_annual_month && extra_annual_value) {
       const mo = parseInt(cur.split('-')[1]);
-      if (mo === extra_annual_month) extra = extra_annual_value;
+      if (mo === extra_annual_month) extra = effect === 'origin' ? 0 : (extra_annual_value * curFactorSac);
     }
 
     balance = Math.max(0, balance - amortization - extra);
 
+    // Linha única por mês — soma mensal + anual extra (quando coincidem), pelo
+    // mesmo motivo do branch PLANTA: linhas separadas para o mesmo mês colidem
+    // com a constraint UNIQUE(contract_id, month) e perdem dados ao persistir.
     schedule.push({
       month:        cur,
       installment:  Math.round((installment + extra) * 100) / 100,
       principal:    Math.round((amortization + extra) * 100) / 100,
       interest:     Math.round(interest * 100) / 100,
-      correction:   0,
+      correction:   Math.round(correctionAmt * 100) / 100,
       balance_end:  Math.round(balance * 100) / 100,
       is_projection: 1,
+      annual_component: Math.round(extra*100)/100,
     });
 
     // Advance month
@@ -3318,29 +3491,29 @@ ipcMain.handle('pat:financing-contract-close', (_, { contractId, closedMonth }) 
 });
 
 ipcMain.handle('pat:financing-contract-save', (_, { assetId, contractId, contract }) => {
-  const { label, system, index_type, annual_rate, principal, n_installments, first_month,
-          balloon_at_keys, extra_annual_month, extra_annual_value, notes,
+  const { label, system, index_type, annual_rate, principal, n_installments, first_month, purchase_month,
+          balloon_at_keys, extra_annual_month, extra_annual_value, extra_annual_effect, correction_ref_month, notes,
           sync_account_id, sync_day, sync_category, keys_balance, keys_balance_month } = contract;
 
   let cId = contractId;
   if (cId) {
     // Update existing contract
     run(`UPDATE pat_financing_contracts SET
-        label=COALESCE(?, label), system=?, index_type=?, annual_rate=?, principal=?, n_installments=?, first_month=?,
-        balloon_at_keys=?, extra_annual_month=?, extra_annual_value=?, notes=?,
+        label=COALESCE(?, label), system=?, index_type=?, annual_rate=?, principal=?, n_installments=?, first_month=?, purchase_month=?,
+        balloon_at_keys=?, extra_annual_month=?, extra_annual_value=?, extra_annual_effect=?, correction_ref_month=?, notes=?,
         sync_account_id=COALESCE(?, sync_account_id), sync_day=COALESCE(?, sync_day), sync_category=COALESCE(?, sync_category),
         keys_balance=?, keys_balance_month=?
       WHERE id=?`,
-      [label||null, system, index_type||'none', annual_rate, principal, n_installments, first_month,
-       balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null,
+      [label||null, system, index_type||'none', annual_rate, principal, n_installments, first_month, purchase_month||first_month,
+       balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, extra_annual_effect||'moment', correction_ref_month||'minus2', notes||null,
        sync_account_id||null, sync_day||null, sync_category||null, keys_balance||null, keys_balance_month||null, cId]);
   } else {
     // New contract — insert as the active one
     cId = run(`INSERT INTO pat_financing_contracts
-      (asset_id,label,status,system,index_type,annual_rate,principal,n_installments,first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes,sync_account_id,sync_day,sync_category,keys_balance,keys_balance_month)
-      VALUES (?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [assetId, label||null, system, index_type||'none', annual_rate, principal, n_installments, first_month,
-       balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null,
+      (asset_id,label,status,system,index_type,annual_rate,principal,n_installments,first_month,purchase_month,balloon_at_keys,extra_annual_month,extra_annual_value,extra_annual_effect,correction_ref_month,notes,sync_account_id,sync_day,sync_category,keys_balance,keys_balance_month)
+      VALUES (?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [assetId, label||null, system, index_type||'none', annual_rate, principal, n_installments, first_month, purchase_month||first_month,
+       balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, extra_annual_effect||'moment', correction_ref_month||'minus2', notes||null,
        sync_account_id||null, sync_day||null, sync_category||null, keys_balance||null, keys_balance_month||null]);
   }
 
@@ -3506,23 +3679,24 @@ ipcMain.handle('debt:contract-get', (_, { debtId }) =>
 
 ipcMain.handle('debt:contract-save', (_, { debtId, contract }) => {
   const { system, index_type, annual_rate, principal, n_installments, first_month,
-          balloon_at_keys, extra_annual_month, extra_annual_value, notes,
+          balloon_at_keys, extra_annual_month, extra_annual_value, extra_annual_effect, correction_ref_month, notes,
           sync_account_id, sync_day, sync_category } = contract;
 
   // Upsert contract
   run(`INSERT INTO personal_debt_contracts
-    (debt_id,system,index_type,annual_rate,principal,n_installments,first_month,balloon_at_keys,extra_annual_month,extra_annual_value,notes,sync_account_id,sync_day,sync_category)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    (debt_id,system,index_type,annual_rate,principal,n_installments,first_month,balloon_at_keys,extra_annual_month,extra_annual_value,extra_annual_effect,correction_ref_month,notes,sync_account_id,sync_day,sync_category)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(debt_id) DO UPDATE SET
       system=excluded.system, index_type=excluded.index_type, annual_rate=excluded.annual_rate,
       principal=excluded.principal, n_installments=excluded.n_installments, first_month=excluded.first_month,
       balloon_at_keys=excluded.balloon_at_keys, extra_annual_month=excluded.extra_annual_month,
-      extra_annual_value=excluded.extra_annual_value, notes=excluded.notes,
+      extra_annual_value=excluded.extra_annual_value, extra_annual_effect=excluded.extra_annual_effect,
+      correction_ref_month=excluded.correction_ref_month, notes=excluded.notes,
       sync_account_id=COALESCE(excluded.sync_account_id, personal_debt_contracts.sync_account_id),
       sync_day=COALESCE(excluded.sync_day, personal_debt_contracts.sync_day),
       sync_category=COALESCE(excluded.sync_category, personal_debt_contracts.sync_category)`,
     [debtId, system, index_type||'none', annual_rate, principal, n_installments, first_month,
-     balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, notes||null,
+     balloon_at_keys||null, extra_annual_month||null, extra_annual_value||null, extra_annual_effect||'moment', correction_ref_month||'minus2', notes||null,
      sync_account_id||null, sync_day||null, sync_category||null]);
 
   // Generate and save schedule (only projected rows — don't overwrite paid rows)
@@ -3656,45 +3830,79 @@ function _rebalanceDebtSchedule(debtId) {
 }
 
 // Fetch financing indexes (INCC, IGP-M, TR, IPC-FIPE)
-ipcMain.handle('financing:fetch-indexes', async () => {
+// Lógica de busca dos índices, extraída para reuso no startup automático
+// e no botão manual "Atualizar índices" (financing:fetch-indexes).
+async function _fetchFinancingIndexesInternal() {
   const result = { updated: [], errors: [] };
   const idxPath = getDbPath().replace('.db', '_financing_indexes.json');
   if (!global._financingIndexes) global._financingIndexes = {};
 
-  const fetch = (url) => new Promise((res, rej) => {
+  const fetchUrl = (url) => new Promise((res, rej) => {
     const mod = url.startsWith('https') ? require('https') : require('http');
-    mod.get(url, { headers: { 'User-Agent': 'Cruzeiro/1.0' } }, r => {
+    const headers = { 'User-Agent': 'Cruzeiro/1.0', 'Accept': 'application/json' };
+    const handleResponse = r => {
+      let d = ''; r.on('data', c => d += c); r.on('end', () => {
+        if (r.statusCode < 200 || r.statusCode >= 300) {
+          rej(new Error(`HTTP ${r.statusCode}${d ? ' — ' + d.slice(0, 200) : ''}`));
+        } else {
+          res(d);
+        }
+      });
+    };
+    mod.get(url, { headers }, r => {
       if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location)
-        return mod.get(r.headers.location, { headers: { 'User-Agent': 'Cruzeiro/1.0' } }, r2 => {
-          let d = ''; r2.on('data', c => d+=c); r2.on('end', () => res(d));
-        }).on('error', rej);
-      let d = ''; r.on('data', c => d+=c); r.on('end', () => res(d)); r.on('error', rej);
+        return mod.get(r.headers.location, { headers }, handleResponse).on('error', rej);
+      handleResponse(r);
     }).on('error', rej);
   });
 
   // BCB series (monthly rates, already in %):
   // IGP-M = 189 (% ao mês)
   // INCC  = 192 (% ao mês)
-  // TR    = 4347 (acumulada mensal, em % ao mês)
-  // IPCA  = 433  (% ao mês) — backup if needed
+  // TR    = 226 (Taxa Referencial mensal, % ao mês) — a série 4347 usada antes
+  //         era "TR para financiamentos imobiliários prefixados do SFH", uma
+  //         série específica e descontinuada (parou de ser publicada em 2019).
+  // O Bacen serve a série 226 como periodicidade DIÁRIA (mesmo representando
+  // uma taxa mensal) — por isso uma consulta de ~26 anos (2000 até hoje) é
+  // rejeitada com HTTP 406 ("janela de consulta de, no máximo, 10 anos em
+  // séries de periodicidade diária"). IGP-M/INCC não têm essa limitação.
   const bcbSeries = {
-    'IGP-M': { code: 189,  divisor: 100 },
-    'INCC':  { code: 192,  divisor: 100 },
-    'TR':    { code: 4347, divisor: 100 },
+    'IGP-M': { code: 189, divisor: 100 },
+    'INCC':  { code: 192, divisor: 100 },
+    'TR':    { code: 226, divisor: 100, dailyLimited: true },
   };
-  for (const [name, { code, divisor }] of Object.entries(bcbSeries)) {
+  const todayBr   = (() => { const d = new Date(); return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`; })();
+  const todayYear = new Date().getFullYear();
+  const parseBcbRows = (raw, divisor, monthly) => {
+    JSON.parse(raw).forEach(r => {
+      const parts = r.data.split('/');
+      const y = parts[2], m = parts[1];
+      const val = parseFloat(r.valor.replace(',','.'));
+      if (isFinite(val)) monthly[`${y}-${m}`] = val / divisor;
+    });
+  };
+  for (const [name, { code, divisor, dailyLimited }] of Object.entries(bcbSeries)) {
     try {
-      const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.${code}/dados?formato=json&dataInicial=01/01/2000`;
-      const raw = await fetch(url);
-      const rows = JSON.parse(raw);
       const monthly = {};
-      rows.forEach(r => {
-        // BCB date format: DD/MM/YYYY
-        const parts = r.data.split('/');
-        const y = parts[2], m = parts[1];
-        const val = parseFloat(r.valor.replace(',','.'));
-        if (isFinite(val)) monthly[`${y}-${m}`] = val / divisor;
-      });
+      if (dailyLimited) {
+        // Bacen não só limita a JANELA de datas (10 anos) como também tem um
+        // limite de VOLUME de linhas por requisição (aviso oficial deles sobre
+        // "volume de dados retornados será limitado"). Como essa série é
+        // diária (não mensal), um bloco de vários anos gera milhares de
+        // linhas e a resposta vem CORTADA silenciosamente, sem erro — foi
+        // exatamente isso que mantinha a TR sempre parada num mesmo mês,
+        // mesmo com o fetch "funcionando". Blocos de 1 ano (~365 linhas)
+        // ficam bem abaixo de qualquer limite plausível de volume.
+        for (let startYear = 2000; startYear <= todayYear; startYear += 1) {
+          const dataInicial = `01/01/${startYear}`;
+          const dataFinal = (startYear === todayYear) ? todayBr : `31/12/${startYear}`;
+          const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.${code}/dados?formato=json&dataInicial=${dataInicial}&dataFinal=${dataFinal}`;
+          parseBcbRows(await fetchUrl(url), divisor, monthly);
+        }
+      } else {
+        const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.${code}/dados?formato=json&dataInicial=01/01/2000&dataFinal=${todayBr}`;
+        parseBcbRows(await fetchUrl(url), divisor, monthly);
+      }
       global._financingIndexes[name] = monthly;
       result.updated.push(name);
     } catch(e) { result.errors.push(`${name}: ${e.message}`); }
@@ -3702,9 +3910,55 @@ ipcMain.handle('financing:fetch-indexes', async () => {
 
   require('fs').writeFileSync(idxPath, JSON.stringify(global._financingIndexes));
   return result;
+}
+
+ipcMain.handle('financing:fetch-indexes', async () => {
+  const result = await _fetchFinancingIndexesInternal();
+  // Recalcula cronogramas ativos com os índices recém-atualizados
+  try {
+    const activeAssetContracts = all("SELECT id, asset_id FROM pat_financing_contracts WHERE status='active'");
+    activeAssetContracts.forEach(c => { try { _regenerateProjectedSchedule(c.asset_id, c.id); } catch(e) {} });
+    const activeDebts = all("SELECT DISTINCT debt_id FROM personal_debt_contracts WHERE status='active'");
+    activeDebts.forEach(r => { try { _regenerateProjectedDebtSchedule(r.debt_id); } catch(e) {} });
+    if (activeAssetContracts.length || activeDebts.length) save();
+  } catch(e) { console.warn('[financing indexes] rebalance failed:', e.message); }
+  return result;
 });
 
 ipcMain.handle('financing:get-indexes', () => global._financingIndexes || {});
+
+// Regenera as linhas PROJETADAS (não pagas) do cronograma de um contrato,
+// preservando linhas já pagas. Usado após atualização dos índices de
+// correção monetária, para refletir os novos valores nas parcelas futuras.
+function _regenerateProjectedSchedule(assetId, contractId) {
+  const contract = first('SELECT * FROM pat_financing_contracts WHERE id=?', [contractId]);
+  if (!contract) return;
+  const schedule = generateSchedule(contract);
+  run('DELETE FROM pat_financing WHERE contract_id=? AND is_projection=1', [contractId]);
+  schedule.forEach(row => {
+    const existing = first('SELECT id FROM pat_financing WHERE contract_id=? AND month=? AND is_projection=0', [contractId, row.month]);
+    if (!existing) {
+      run(`INSERT OR REPLACE INTO pat_financing (asset_id,contract_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+           VALUES (?,?,?,?,?,?,?,?,1,0)`,
+        [assetId, contractId, row.month, row.installment, row.principal, row.interest, row.correction, row.balance_end]);
+    }
+  });
+}
+
+function _regenerateProjectedDebtSchedule(debtId) {
+  const contract = first('SELECT * FROM personal_debt_contracts WHERE debt_id=?', [debtId]);
+  if (!contract) return;
+  const schedule = generateSchedule(contract);
+  run('DELETE FROM personal_debt_installments WHERE debt_id=? AND is_projection=1', [debtId]);
+  schedule.forEach(row => {
+    const existing = first('SELECT id FROM personal_debt_installments WHERE debt_id=? AND month=? AND is_projection=0', [debtId, row.month]);
+    if (!existing) {
+      run(`INSERT OR REPLACE INTO personal_debt_installments (debt_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+           VALUES (?,?,?,?,?,?,?,1,0)`,
+        [debtId, row.month, row.installment, row.principal, row.interest, row.correction, row.balance_end]);
+    }
+  });
+}
 
 function _rebalanceSchedule(assetId) {
   const contract = _activeFinancingContract(assetId);
@@ -3796,20 +4050,21 @@ const PAT_TX_SIGN = {
 };
 // Types that also affect pat_history value
 const PAT_TX_AFFECTS_VALUE = {
-  compra:  'set',    // set value = total_value
-  venda:   'set',    // set value = total_value (then zeroed by sold_month logic)
-  aporte:  'add',    // value += total_value
-  reducao: 'sub',    // value -= total_value
+  compra:          'set',  // set value = total_value
+  // parcela_compra NÃO altera o valor do ativo — posição já foi fixada na compra
+  venda:           'set',  // set value = total_value (then zeroed by sold_month logic)
+  aporte:          'add',  // value += total_value
+  reducao:         'sub',  // value -= total_value
 };
 
-// Cash-flow sign convention, mirroring PAT_TX_CASH in renderer.js — used when
-// auto-creating a bank transaction for a future-dated pat_transactions row.
+// Cash-flow sign convention, mirroring PAT_TX_CASH in renderer.js
 const PAT_TX_CASH_SIGN = {
-  compra: -1, aporte: -1, despesa: -1, parcela_financiamento: -1,
+  compra: -1, parcela_compra: -1, aporte: -1, despesa: -1, parcela_financiamento: -1,
   reducao: +1, aluguel: +1, dividendo: +1, jcp: +1, venda: +1, venda_parcela: +1,
 };
 const PAT_TX_LABELS = {
-  compra: 'Compra', aporte: 'Aporte de capital', despesa: 'Despesa do ativo',
+  compra: 'Compra', parcela_compra: 'Parcela de compra',
+  aporte: 'Aporte de capital', despesa: 'Despesa do ativo',
   parcela_financiamento: 'Parcela de financiamento', reducao: 'Redução de capital',
   aluguel: 'Aluguel recebido', dividendo: 'Dividendo', jcp: 'JCP',
   venda: 'Venda', venda_parcela: 'Parcela de venda',
@@ -4352,48 +4607,6 @@ ipcMain.handle('categories:save', (_, { categories }) => {
   } catch(e) { return { ok: false, error: e.message }; }
 });
 
-// Renomeia uma categoria (ou subcategoria) em TODAS as transações, orçamentos
-// e recorrências já cadastrados — sem isso, o renome só mudava a lista de
-// categorias disponíveis, deixando os lançamentos existentes "órfãos" com o
-// nome antigo, desincronizados da categoria renomeada.
-ipcMain.handle('categories:rename', (_, { oldName, newName }) => {
-  if (!oldName || !newName || oldName === newName) return { ok: false, txUpdated: 0 };
-  let txUpdated = 0, budgetUpdated = 0, recUpdated = 0;
-
-  // Categoria exata
-  const exactCount = first('SELECT COUNT(*) as c FROM transactions WHERE category=?', [oldName])?.c || 0;
-  run('UPDATE transactions SET category=? WHERE category=?', [newName, oldName]);
-
-  // Subcategorias (prefixo "Antigo:") — renomeia para "Novo:" preservando o sufixo
-  const subRows = all(`SELECT id, category FROM transactions WHERE category LIKE ?`, [oldName + ':%']);
-  subRows.forEach(r => {
-    const newCat = newName + r.category.slice(oldName.length);
-    run('UPDATE transactions SET category=? WHERE id=?', [newCat, r.id]);
-  });
-
-  txUpdated = exactCount + subRows.length;
-
-  // Orçamentos (categoria exata — orçamento normalmente não é definido por subcategoria,
-  // mas cobre o caso se existir)
-  const budgetRows = all(`SELECT id, category FROM budgets WHERE category=? OR category LIKE ?`, [oldName, oldName + ':%']);
-  budgetRows.forEach(r => {
-    const newCat = r.category === oldName ? newName : (newName + r.category.slice(oldName.length));
-    run('UPDATE budgets SET category=? WHERE id=?', [newCat, r.id]);
-  });
-  budgetUpdated = budgetRows.length;
-
-  // Recorrências
-  const recRows = all(`SELECT id, category FROM recurring WHERE category=? OR category LIKE ?`, [oldName, oldName + ':%']);
-  recRows.forEach(r => {
-    const newCat = r.category === oldName ? newName : (newName + r.category.slice(oldName.length));
-    run('UPDATE recurring SET category=? WHERE id=?', [newCat, r.id]);
-  });
-  recUpdated = recRows.length;
-
-  save();
-  return { ok: true, txUpdated, budgetUpdated, recUpdated };
-});
-
 ipcMain.handle('settings:get', () => {
   const s = loadSettings();
   return {
@@ -4417,28 +4630,96 @@ ipcMain.handle('settings:get', () => {
 //   - Otherwise requires a valid license code
 //   - License codes: SHA-256 HMAC signed with APP_SECRET, format XXXX-XXXX-XXXX-XXXX
 
-const LICENSE_SECRET    = 'cruzeiro-lic-2026-thiago'; // keep private
+// ── SEGURANÇA: LICENSE_SECRET removido do app desktop ──────────────────────
+// A validação de licença agora é feita pelo servidor (Supabase Edge Function).
+// O segredo nunca é distribuído com o instalador.
+const VALIDATE_LICENSE_URL = 'https://nfpjxmwrtwogctocqtxp.supabase.co/functions/v1/validate-license';
+const SUPABASE_ANON_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mcGp4bXdydHdvZ2N0b2NxdHhwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0MDU1ODQsImV4cCI6MjA5Njk4MTU4NH0.26t--V7O8RAPMsURHqwu3x19LHIdjJHjKvHpSHMvhGo';
+
 const FREE_MONTHS       = 6;
 const INCOME_THRESHOLD  = 3000;
 const EXPENSE_THRESHOLD = 5000;
 const WEALTH_THRESHOLD  = 100000;
 
-function generateLicenseCode(email) {
-  // Produces a deterministic 16-char code for a given email
-  const raw = crypto.createHmac('sha256', LICENSE_SECRET)
-    .update(email.toLowerCase().trim()).digest('hex');
-  // Format as XXXX-XXXX-XXXX-XXXX (uppercase alphanumeric)
-  const chars = raw.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0, 16);
-  return `${chars.slice(0,4)}-${chars.slice(4,8)}-${chars.slice(8,12)}-${chars.slice(12,16)}`;
+// ── Cache de validação (válido por 24h para não exigir internet a cada abertura) ──
+function _getLicenseCache() {
+  const s = loadSettings();
+  return s._licenseCache || null;
+}
+function _setLicenseCache(email, code, valid) {
+  const s = loadSettings();
+  s._licenseCache = { email, code, valid, validatedAt: new Date().toISOString() };
+  saveSettings(s);
+}
+function _isCacheValid(cache) {
+  if (!cache) return false;
+  const age = Date.now() - new Date(cache.validatedAt).getTime();
+  return age < 24 * 60 * 60 * 1000; // 24 horas
 }
 
+// ── Valida licença no servidor (async, com fallback para cache offline) ──
+async function validateLicenseServerSide(email, code) {
+  const cache = _getLicenseCache();
+  if (_isCacheValid(cache) && cache.email === email.toLowerCase().trim() && cache.code === code.trim().toUpperCase()) {
+    return cache.valid;
+  }
+  try {
+    const https = require('https');
+    const body  = JSON.stringify({ email: email.toLowerCase().trim(), code: code.trim().toUpperCase() });
+    const url   = new URL(VALIDATE_LICENSE_URL);
+
+    const result = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: url.hostname,
+        path:     url.pathname,
+        method:   'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          'apikey':        SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Content-Length': Buffer.byteLength(body),
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => { data += chunk; });
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error('Resposta inválida do servidor')); }
+        });
+      });
+      req.on('error', reject);
+      req.setTimeout(8000, () => { req.destroy(); reject(new Error('Timeout')); });
+      req.write(body);
+      req.end();
+    });
+
+    const valid = result?.valid === true;
+    _setLicenseCache(email, code, valid);
+    return valid;
+  } catch (err) {
+    console.warn('[license] Servidor indisponível, usando cache offline:', err.message);
+    if (cache && cache.email === email.toLowerCase().trim() && cache.code === code.trim().toUpperCase()) {
+      return cache.valid;
+    }
+    const s = loadSettings();
+    return !!(s.licenseCode && s.licenseEmail);
+  }
+}
+
+// Wrapper síncrono para uso em computeLicenseStatus (que não pode ser async)
 function validateLicenseCode(code) {
-  // A code is valid if it matches the HMAC pattern for ANY email
-  // We store the email alongside the code so we can verify
   const s = loadSettings();
   if (!s.licenseCode || !s.licenseEmail) return false;
-  const expected = generateLicenseCode(s.licenseEmail);
-  return code.trim().toUpperCase() === expected;
+  if (code.trim().toUpperCase() !== s.licenseCode.trim().toUpperCase()) return false;
+
+  const cache = _getLicenseCache();
+  if (_isCacheValid(cache) &&
+      cache.email === s.licenseEmail.toLowerCase().trim() &&
+      cache.code  === s.licenseCode.trim().toUpperCase()) {
+    return cache.valid;
+  }
+  validateLicenseServerSide(s.licenseEmail, s.licenseCode).catch(() => {});
+  return true; // benefício da dúvida enquanto revalida
 }
 
 function computeLicenseStatus() {
@@ -4570,11 +4851,16 @@ ipcMain.handle('license:debug-override', (_, { value }) => {
   return computeLicenseStatus();
 });
 
-ipcMain.handle('license:activate', (_, { code, email }) => {
+ipcMain.handle('license:activate', async (_, { code, email }) => {
   if (!code || !email) return { ok: false, error: 'Código e email são obrigatórios.' };
-  const expected = generateLicenseCode(email.toLowerCase().trim());
-  if (code.trim().toUpperCase() !== expected) {
-    return { ok: false, error: 'Código de licença inválido.' };
+  let valid = false;
+  try {
+    valid = await validateLicenseServerSide(email, code);
+  } catch (err) {
+    return { ok: false, error: 'Não foi possível verificar a licença. Verifique sua conexão com a internet.' };
+  }
+  if (!valid) {
+    return { ok: false, error: 'Código de licença inválido para este e-mail.' };
   }
   const s = loadSettings();
   s.licenseCode  = code.trim().toUpperCase();
@@ -4591,14 +4877,10 @@ ipcMain.handle('license:deactivate', () => {
   return { ok: true };
 });
 
-// Admin tool: generate a code for a given email (run from Node, not exposed to renderer)
-// Usage: node -e "require('./src/main-stub').genCode('email@example.com')"
+// Nota: geração de licenças agora é feita pelo servidor. O CLI --gen-license
+// foi removido pois o segredo não está mais no app desktop.
 if (process.argv[2] === '--gen-license') {
-  const email = process.argv[3];
-  if (email) {
-    const code = generateLicenseCode(email);
-    console.log(`License for ${email}: ${code}`);
-  }
+  console.log('Geração de licenças migrada para o servidor. Use o cruzeiro_license_generator.html.');
   process.exit(0);
 }
 
@@ -5300,6 +5582,47 @@ ipcMain.handle('settings:clear-data-dir', () => {
   return { ok: true };
 });
 
+ipcMain.handle('login:get-mode', () => {
+  // 'local' = DB criptografado (exige senha local)
+  // 'supabase' = login com e-mail + senha do Supabase
+  const s = loadSettings();
+  if (s.hasEncryptedDB || _dbPendingDecrypt || s.passwordHash) return 'local';
+  return 'supabase';
+});
+
+ipcMain.handle('login:supabase', async (_, { email, password }) => {
+  try {
+    const result = await sb.login(email, password);
+    const s = loadSettings();
+    s.supabaseEmail        = result.user.email;
+    s.supabaseRefreshToken = result.refresh_token;
+    saveSettings(s);
+    await _ensureFirstRun(result.user.id);
+    return { ok: true };
+  } catch(e) {
+    const msg = e.message || '';
+    if (msg.includes('Invalid login') || msg.includes('invalid_grant') || msg.includes('400')) {
+      return { ok: false, error: 'E-mail ou senha incorretos.' };
+    }
+    return { ok: false, error: 'Não foi possível conectar. Verifique sua internet.' };
+  }
+});
+
+// Garante que o firstRun do usuário está registrado no Supabase (controla
+// o trial de 6 meses de forma server-side, resistente a reinstalação)
+async function _ensureFirstRun(userId) {
+  try {
+    const rows = await sb.select('user_first_run', { user_id: userId });
+    if (!rows.length) {
+      const today = new Date().toISOString().slice(0, 10);
+      await sb.upsert('user_first_run', [{ user_id: userId, first_run: today }], 'user_id');
+      console.log('[firstRun] registrado:', today);
+    }
+  } catch(e) {
+    console.warn('[firstRun] não foi possível registrar no servidor:', e.message);
+  }
+}
+
 // Check password from login window
 ipcMain.handle('login:check', (_, pw) => {
   const s = loadSettings();
@@ -5565,7 +5888,7 @@ async function runMobileSync(trigger = 'manual') {
   try {
     const userId = sb.getUserId();
     const pull   = await syncPull.pullAll(all, run, first, save, userId);
-    const push   = await syncPush.pushAll(all, userId);
+    const push   = await syncPush.pushAll(all, userId, getAiConfig);
     const result = { ok: true, trigger, pull, push, at: new Date().toISOString() };
     console.log('[sync] concluído:', result);
 
