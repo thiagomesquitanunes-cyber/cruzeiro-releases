@@ -11,8 +11,23 @@ const crypto    = require('crypto');
 const readline  = require('readline');
 const initSqlJs = require('./node_modules/sql.js');
 
-const PROJECT_DIR = __dirname;
-const DB_PATH     = path.join(PROJECT_DIR, 'cruzeiro_data.db');
+const PROJECT_DIR  = __dirname;
+const SETTINGS_PATH = path.join(PROJECT_DIR, '_settings.json');
+
+// Resolve a mesma pasta de dados que o main.js usaria (getDbPath) — respeita
+// um dataDir customizado (ex: pasta Dropbox escolhida em "Configurações >
+// Pasta de dados"), em vez de sempre assumir a pasta do projeto. Sem isso,
+// quem configurou uma pasta de dados separada teria o banco/categorias REAIS
+// preservados intactos após o clean-data, enquanto o script limpava (ou
+// tentava limpar) um arquivo na pasta do projeto que não é o que está em uso.
+const DATA_DIR = (() => {
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+    if (s.dataDir && fs.existsSync(s.dataDir)) return s.dataDir;
+  } catch (e) {}
+  return PROJECT_DIR;
+})();
+const DB_PATH     = path.join(DATA_DIR, 'cruzeiro_data.db');
 const DB_MAGIC    = Buffer.from('CRUZEIRO1');
 
 function isEncrypted(buf) {
@@ -69,6 +84,7 @@ if (!fs.existsSync(DB_PATH)) {
 
 (async () => {
   console.log('🧹 Iniciando limpeza de dados...');
+  console.log(`   Pasta de dados: ${DATA_DIR}${DATA_DIR !== PROJECT_DIR ? ' (customizada — configurada em Configurações > Pasta de dados)' : ' (pasta do projeto)'}`);
   console.log(`   DB: ${DB_PATH}\n`);
 
   const SQL = await initSqlJs();
@@ -144,8 +160,11 @@ if (!fs.existsSync(DB_PATH)) {
     }
   }
 
-  // Lateral JSON files
-  const sideFiles = [
+  // Arquivos JSON "laterais" — a maioria é derivada de getDbPath() no main.js
+  // (prefixo "cruzeiro_data_"), então segue o mesmo DATA_DIR do banco. Só
+  // _bank_parsers.json e latest.json são de fato relativos à pasta do
+  // projeto (mesmo padrão de _settings.json), independente de dataDir.
+  const dataDirFiles = [
     'cruzeiro_data_financing_indexes.json',
     'cruzeiro_data_import_defaults.json',
     'cruzeiro_data_ml_export.json',
@@ -157,13 +176,24 @@ if (!fs.existsSync(DB_PATH)) {
     'cruzeiro_data_saved_reports.json',
     'cruzeiro_data_cat_types.json',
     'cruzeiro_data_col_config.json',
+    'cruzeiro_data_categories.json',
+    'cruzeiro_data_recovery.enc',        // era '_recovery.enc' — nome não batia com o que o main.js realmente grava
+    'cruzeiro_data_emergency.db.bak',     // backup de emergência do banco — faltava na lista
+    '_categories.json',                  // nome legado, de versões anteriores ao dataDir
+  ];
+  const projectDirFiles = [
     'latest.json',
     '_bank_parsers.json',
-    '_recovery.enc',
-    '_categories.json',
   ];
 
-  for (const fname of sideFiles) {
+  for (const fname of dataDirFiles) {
+    const fpath = path.join(DATA_DIR, fname);
+    if (fs.existsSync(fpath)) {
+      fs.unlinkSync(fpath);
+      console.log(`   ✅ Removido: ${fname}`);
+    }
+  }
+  for (const fname of projectDirFiles) {
     const fpath = path.join(PROJECT_DIR, fname);
     if (fs.existsSync(fpath)) {
       fs.unlinkSync(fpath);
@@ -171,8 +201,8 @@ if (!fs.existsSync(DB_PATH)) {
     }
   }
 
-  // Backups folder
-  const backupsDir = path.join(PROJECT_DIR, 'backups');
+  // Backups folder — também segue dataDir (ver getBackupDir em main.js)
+  const backupsDir = path.join(DATA_DIR, 'backups');
   if (fs.existsSync(backupsDir)) {
     const files = fs.readdirSync(backupsDir);
     files.forEach(f => {

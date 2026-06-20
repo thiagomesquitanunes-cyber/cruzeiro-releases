@@ -1624,208 +1624,474 @@ select.inp option{background:var(--bg2);}
 
   <!-- Modal: Novo/Editar Ativo -->
   <div class="overlay" id="modal-pat-asset" style="z-index:400">
-    <div class="modal" style="width:680px;max-width:98vw">
+    <div class="modal" style="width:720px;max-width:98vw">
       <div class="modal-hdr">
         <h3 id="pat-asset-modal-title">Novo ativo imobilizado</h3>
         <button class="btn-icon" onclick="closeModal('modal-pat-asset')">✕</button>
       </div>
       <div class="modal-body">
         <input type="hidden" id="pat-asset-id">
-        <div class="field">
-          <label class="lbl">Nome do ativo</label>
-          <input class="inp" id="pat-asset-name" placeholder="Ex: Apartamento Santos, Jeep Compass...">
+
+        <!-- Campos básicos do ativo -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div class="field" style="margin:0">
+            <label class="lbl">Nome do ativo</label>
+            <input class="inp" id="pat-asset-name" placeholder="Ex: Apartamento Santos, Jeep Compass...">
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Tipo</label>
+            <select class="inp" id="pat-asset-type" onchange="patAssetTypeChanged()">
+              <option value="imovel">🏠 Imóvel</option>
+              <option value="veiculo">🚗 Veículo</option>
+              <option value="barco">⛵ Barco</option>
+              <option value="clube">🏌️ Título em clube</option>
+              <option value="societario">🏢 Participação societária</option>
+              <option value="outro">📦 Outro</option>
+            </select>
+          </div>
         </div>
-        <div class="field">
-          <label class="lbl">Tipo</label>
-          <select class="inp" id="pat-asset-type" onchange="patAssetTypeChanged()">
-            <option value="imovel">🏠 Imóvel</option>
-            <option value="veiculo">🚗 Veículo</option>
-            <option value="barco">⛵ Barco</option>
-            <option value="clube">🏌️ Título em clube</option>
-            <option value="societario">🏢 Participação societária</option>
-            <option value="outro">📦 Outro</option>
-          </select>
-        </div>
-        <div class="field" id="pat-asset-ownership-field" style="display:none">
+        <div class="field" id="pat-asset-ownership-field" style="display:none;margin-top:8px">
           <label class="lbl">% de participação na empresa</label>
           <input class="inp" id="pat-asset-ownership-pct" type="number" min="0" max="100" step="0.01" placeholder="Ex: 25">
-          <div style="font-size:11px;color:var(--text3);margin-top:3px">Percentual do seu quotas/ações sobre o capital social total</div>
         </div>
-        <div class="field">
-          <label class="lbl">Tendência de preço</label>
-          <select class="inp" id="pat-asset-trend">
-            <option value="minus2x">📉📉 Redução em 2× o IPCA</option>
-            <option value="minus1x">📉 Redução conforme IPCA</option>
-            <option value="stable">➡️ Estável (sem correção)</option>
-            <option value="plus1x" selected>📈 Elevação conforme IPCA</option>
-            <option value="plus2x">📈📈 Elevação em 2× o IPCA</option>
-          </select>
-        </div>
-        <div id="pat-initial-value-section">
-          <div class="field">
-            <label class="lbl">Mês de compra</label>
-            <div style="display:flex;gap:8px;align-items:center">
-              <input class="inp" id="pat-asset-month-m" type="number" min="1" max="12" placeholder="Mês (1-12)" style="width:110px">
-              <span style="color:var(--text3)">/</span>
-              <input class="inp" id="pat-asset-month-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:110px">
-            </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+          <div class="field" style="margin:0">
+            <label class="lbl">Tendência de preço</label>
+            <select class="inp" id="pat-asset-trend">
+              <option value="minus2x">📉📉 Redução em 2× o IPCA</option>
+              <option value="minus1x">📉 Redução conforme IPCA</option>
+              <option value="stable">➡️ Estável (sem correção)</option>
+              <option value="plus1x" selected>📈 Elevação conforme IPCA</option>
+              <option value="plus2x">📈📈 Elevação em 2× o IPCA</option>
+            </select>
           </div>
-          <div class="field">
-            <label class="lbl">Valor de compra</label>
-            <input class="inp" id="pat-asset-value" type="number" step="0.01" placeholder="0,00">
-          </div>
-          <div class="info-box" style="font-size:12px;margin-top:4px">
-            O valor será atualizado automaticamente todo mês usando o IPCA mensal conforme a tendência escolhida. Você pode editar qualquer mês diretamente na tabela a qualquer momento.
+          <div class="field" style="margin:0">
+            <label class="lbl">Forma de aquisição</label>
+            <select class="inp" id="pat-acquisition-type" onchange="patAcquisitionTypeChanged()">
+              <option value="vista">💵 À vista</option>
+              <option value="parcelado_vendedor">📋 Parcelado com o vendedor</option>
+              <option value="financiamento_construtora">🏗️ Financiamento com a construtora</option>
+              <option value="financiamento_bancario">🏦 Financiamento bancário</option>
+            </select>
           </div>
         </div>
-        <!-- Financing section — toggled by checkbox -->
-        <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;font-size:13px">
-          <input type="checkbox" id="pat-financed-check" onchange="patToggleFinancingSection()">
-          Este ativo é financiado (parcelas a pagar)
-        </label>
-        <div id="pat-financing-section" style="display:none">
-          <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
-          <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Contrato de Financiamento</div>
 
-          <div id="pat-fin-contract-selector" style="display:none;margin-bottom:10px;padding:8px;background:var(--bg3);border-radius:8px;border:1px solid var(--border)">
-            <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-              <div class="field" style="margin:0;flex:1;min-width:160px">
-                <label class="lbl">Contrato</label>
-                <select class="inp" id="pat-fin-contract-select" onchange="onFinContractSelect()"></select>
-              </div>
-              <button class="btn sm" onclick="finNewContract()" title="Encerra o contrato atual (se houver) e inicia um novo, em branco">+ Novo contrato</button>
-              <button class="btn sm" id="pat-fin-close-btn" style="color:#dc2626" onclick="finCloseContract()" title="Marca este contrato como encerrado, preservando o histórico">Encerrar este contrato</button>
+        <!-- Seletor de contrato (compartilhado entre construtora e bancário —
+             um ativo pode ter mais de um contrato ao longo do tempo, ex:
+             financiamento direto com a construtora e depois bancário após as
+             chaves). Sua visibilidade é controlada via JS conforme o ativo
+             tenha ou não mais de um contrato cadastrado. -->
+        <div id="pat-fin-contract-selector" style="display:none;margin-top:12px;padding:8px;background:var(--bg4);border-radius:8px;border:1px solid var(--border)">
+          <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+            <div class="field" style="margin:0;flex:1">
+              <label class="lbl">Contrato</label>
+              <select class="inp" id="pat-fin-contract-select" onchange="onFinContractSelect()"></select>
             </div>
-            <div class="field" style="margin:8px 0 0">
-              <label class="lbl">Identificação do contrato (opcional)</label>
-              <input class="inp" id="fin-contract-label" type="text" placeholder="Ex: INCC — planta, Bancário — chaves">
-            </div>
-            <div id="pat-fin-closed-notice" style="display:none;margin-top:8px;font-size:11px;color:var(--text3)">⚠️ Este contrato está encerrado e é mostrado apenas para histórico. Os campos abaixo não podem ser editados. Para editar, selecione outro contrato ou crie um novo.</div>
+            <button class="btn sm" onclick="finNewContract()">+ Novo contrato</button>
+            <button class="btn sm" id="pat-fin-close-btn" style="color:#dc2626" onclick="finCloseContract()">Encerrar este contrato</button>
           </div>
+          <div class="field" style="margin:8px 0 0">
+            <label class="lbl">Identificação do contrato (opcional)</label>
+            <input class="inp" id="fin-contract-label" type="text" placeholder="Ex: Construtora — obra / Bancário — chaves">
+          </div>
+          <div id="pat-fin-closed-notice" style="display:none;margin-top:8px;font-size:11px;color:var(--text3)">⚠️ Contrato encerrado — somente leitura.</div>
+        </div>
 
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <!-- Seção: à vista (opção i) -->
+        <div id="pat-section-vista" style="margin-top:12px">
+          <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <div class="field" style="margin:0">
-              <label class="lbl">Sistema de amortização</label>
-              <select class="inp" id="fin-system" onchange="onFinSystemChange()">
-                <option value="SAC">SAC (parcela decrescente)</option>
-                <option value="PRICE">PRICE (parcela fixa)</option>
-                <option value="SAM">SAM (misto)</option>
-                <option value="PLANTA">Planta (sem juros, só correção)</option>
-              </select>
+              <label class="lbl">Mês de compra</label>
+              <div style="display:flex;gap:6px;align-items:center">
+                <input class="inp" id="pat-asset-month-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px">
+                <span style="color:var(--text3)">/</span>
+                <input class="inp" id="pat-asset-month-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:80px">
+              </div>
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Valor de compra (R$)</label>
+              <input class="inp" id="pat-asset-value" type="number" step="0.01" placeholder="0,00">
+            </div>
+          </div>
+          <div class="info-box" style="font-size:12px;margin-top:8px">
+            O valor será atualizado automaticamente todo mês usando o IPCA conforme a tendência escolhida.
+          </div>
+        </div>
+
+        <!-- Seção: parcelado com vendedor (opção ii) -->
+        <div id="pat-section-parcelado-vendedor" style="display:none;margin-top:12px">
+          <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+          <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">📋 Parcelamento direto com o vendedor</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+            <div class="field" style="margin:0">
+              <label class="lbl">Mês de aquisição</label>
+              <div style="display:flex;gap:4px">
+                <input class="inp" id="pv-month-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+                <input class="inp" id="pv-month-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+              </div>
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Valor total do ativo (R$)</label>
+              <input class="inp fin-currency" id="pv-total-value" type="text" placeholder="R$ 0,00" onblur="patCheckPvSum()">
             </div>
             <div class="field" style="margin:0">
               <label class="lbl">Índice de correção</label>
-              <select class="inp" id="fin-index">
-                <option value="none">Sem correção (taxa nominal)</option>
-                <option value="TR">TR (Taxa Referencial)</option>
+              <select class="inp" id="pv-index">
+                <option value="none" selected>Sem correção</option>
                 <option value="IPCA">IPCA</option>
                 <option value="IGP-M">IGP-M</option>
                 <option value="INCC">INCC</option>
               </select>
             </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Taxa de juros nominal (% a.a.)</label>
-              <input class="inp fin-percent" id="fin-rate" type="text" placeholder="Ex: 10,50%">
-            </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Valor financiado (R$)</label>
-              <input class="inp fin-currency" id="fin-principal" type="text" placeholder="R$ 0,00" onblur="finAutoFillTotal('fin-principal')">
-            </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Nº de parcelas mensais</label>
-              <input class="inp" id="fin-installments" type="number" min="1" placeholder="Ex: 360">
-            </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Primeira parcela</label>
-              <div style="display:flex;gap:4px">
-                <input class="inp" id="fin-first-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
-                <input class="inp" id="fin-first-y" type="number" min="2000" placeholder="Ano" style="width:70px">
-              </div>
-            </div>
           </div>
-
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
-            <div class="field" style="margin:0">
-              <label class="lbl">Entrada / chaves (R$) <span style="font-weight:400;color:var(--text3)">opcional</span></label>
-              <input class="inp fin-currency" id="fin-balloon" type="text" placeholder="R$ 0,00" onblur="finAutoFillTotal('fin-balloon')">
-            </div>
-            <div class="field" style="margin:0" id="fin-rate-field">
-              <label class="lbl">Saldo nas chaves (R$) <span style="font-weight:400;color:var(--text3)">planta</span></label>
-              <input class="inp fin-currency" id="fin-keys-balance" type="text" placeholder="R$ 0,00" onblur="finAutoFillTotal('fin-keys-balance')">
-            </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Data prevista do saldo nas chaves</label>
-              <div style="display:flex;gap:4px">
-                <input class="inp" id="fin-keys-balance-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
-                <input class="inp" id="fin-keys-balance-y" type="number" min="2000" placeholder="Ano" style="width:70px">
-              </div>
-              <div style="font-size:11px;color:var(--text3);margin-top:3px">O app lança automaticamente essa transação futura na conta sincronizada</div>
-            </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Parcela anual extra — mês</label>
-              <input class="inp" id="fin-extra-month" type="number" min="1" max="12" placeholder="Ex: 12">
-            </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Parcela anual extra — valor (R$)</label>
-              <input class="inp fin-currency" id="fin-extra-value" type="text" placeholder="R$ 0,00">
-            </div>
+          <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px">Cronograma de parcelas</div>
+          <div id="pv-installments-list" style="display:flex;flex-direction:column;gap:4px;margin-bottom:6px"></div>
+          <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px">
+            <button class="btn xs" onclick="pvAddInstallmentRow()">+ Adicionar parcela</button>
+            <button class="btn xs" onclick="pvRepeatLastInstallment()" title="Repete o valor da última parcela no mês seguinte">↻ Repetir valor</button>
           </div>
+          <div id="pv-sum-alert" style="display:none;color:#dc2626;font-size:12px;margin-top:4px"></div>
+          <div id="pv-sum-ok" style="display:none;color:#16a34a;font-size:12px;margin-top:4px"></div>
+        </div>
 
-          <div class="field" style="margin-bottom:8px;max-width:260px">
-            <label class="lbl">Valor total do imóvel/ativo (R$)</label>
-            <input class="inp fin-currency" id="fin-asset-value" type="text" placeholder="R$ 0,00" onblur="finAutoFillTotal('fin-asset-value')"
-              title="Valor de mercado do bem. Registra o ativo com este valor e uma movimentação de compra no mês inicial.">
-          </div>
-
+        <!-- Seção: financiamento construtora (opção iii) -->
+        <div id="pat-section-construtora" style="display:none;margin-top:12px">
           <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
-          <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">🔄 Sincronização com conta bancária (opcional)</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 100px;gap:8px;margin-bottom:8px">
+          <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">🏗️ Financiamento com a construtora</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
             <div class="field" style="margin:0">
-              <label class="lbl">Conta para lançamento das parcelas</label>
-              <select class="inp" id="fin-sync-account">
-                <option value="">— Não sincronizar —</option>
-              </select>
-            </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Categoria</label>
-              <select class="inp" id="fin-sync-category"></select>
-            </div>
-            <div class="field" style="margin:0">
-              <label class="lbl">Dia de vencimento</label>
-              <input class="inp" id="fin-sync-day" type="number" min="1" max="31" placeholder="Ex: 10">
-            </div>
-          </div>
-          <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Se preenchido, as parcelas futuras serão lançadas automaticamente nessa conta como "não conferidas", no dia escolhido de cada mês. Ao conferir o lançamento, a parcela é marcada como paga aqui.</div>
-
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <button class="btn sm" onclick="patGenerateSchedule()">⚙️ Gerar cronograma</button>
-            <button class="btn sm" onclick="ff.financingFetchIndexes().then(r => { const ok=r.updated.join(', ')||'nenhum'; const err=r.errors.length?` | Erros: ${r.errors.join(', ')}`:'';
-toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message))">📡 Atualizar índices (TR/IGP-M/INCC)</button>
-            <span id="fin-schedule-summary" style="font-size:11px;color:var(--text3)"></span>
-          </div>
-
-          <!-- Schedule preview (first 6 + projection warning) -->
-          <div id="fin-schedule-preview" style="margin-top:10px;display:none">
-            <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden">
-              <div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
-                <span>Mês</span><span class="right">Parcela</span><span class="right">Principal</span><span class="right">Juros</span><span class="right">Saldo</span><span class="right">Tipo</span>
+              <label class="lbl">Mês de aquisição</label>
+              <div style="display:flex;gap:4px">
+                <input class="inp" id="fc-month-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+                <input class="inp" id="fc-month-y" type="number" min="2000" placeholder="Ano" style="width:70px">
               </div>
-              <div id="fin-schedule-body" style="max-height:200px;overflow-y:auto;font-size:11px"></div>
             </div>
-            <div style="margin-top:6px;font-size:11px;color:#f59e0b;background:#fef3c7;padding:6px 10px;border-radius:6px;border:1px solid #fde68a">
-              ⚠️ As parcelas futuras são uma projeção em valores constantes (sem correção monetária futura), calculada para referência. O saldo devedor só será reduzido conforme o registro de parcelas pagas nas contas bancárias.
+            <div class="field" style="margin:0">
+              <label class="lbl">Valor total do ativo (R$)</label>
+              <input class="inp fin-currency" id="fc-total-value" type="text" placeholder="R$ 0,00" onblur="fcUpdateFinanciado()">
+            </div>
+          </div>
+
+          <!-- Entrada -->
+          <div style="background:var(--bg3);border-radius:8px;padding:10px;border:1px solid var(--border);margin-bottom:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px">Entrada</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+              <div class="field" style="margin:0;flex:1">
+                <label class="lbl">Valor total da entrada (R$)</label>
+                <input class="inp fin-currency" id="fc-entrada-total" type="text" placeholder="R$ 0,00" onblur="fcUpdateFinanciado()">
+              </div>
+              <div style="padding-top:18px">
+                <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;white-space:nowrap">
+                  <input type="checkbox" id="fc-entrada-parcelada" onchange="fcToggleEntradaParcelada()"> Parcelada
+                </label>
+              </div>
+            </div>
+            <div id="fc-entrada-vista-row" style="display:flex;gap:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl">Data de pagamento</label>
+                <div style="display:flex;gap:4px">
+                  <input class="inp" id="fc-entrada-d" type="number" min="1" max="31" placeholder="Dia" style="width:52px">
+                  <input class="inp" id="fc-entrada-m" type="number" min="1" max="12" placeholder="Mês" style="width:52px">
+                  <input class="inp" id="fc-entrada-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+                </div>
+              </div>
+            </div>
+            <div id="fc-entrada-parcelas-section" style="display:none">
+              <div id="fc-entrada-parcelas-list" style="display:flex;flex-direction:column;gap:4px;margin-bottom:4px"></div>
+              <div style="display:flex;gap:6px">
+                <button class="btn xs" onclick="fcAddEntradaRow()">+ Adicionar parcela</button>
+                <button class="btn xs" onclick="fcRepeatEntradaRow()">↻ Repetir valor</button>
+              </div>
+              <div id="fc-entrada-sum-alert" style="display:none;color:#dc2626;font-size:12px;margin-top:4px"></div>
+              <div id="fc-entrada-sum-ok" style="display:none;color:#16a34a;font-size:12px;margin-top:4px"></div>
+            </div>
+          </div>
+
+          <!-- Financiamento construtora -->
+          <div id="fc-financiamento-section" style="background:var(--bg3);border-radius:8px;padding:10px;border:1px solid var(--border);margin-bottom:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px">Financiamento (planta — sem juros, correção pelo INCC)</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl">Índice de correção</label>
+                <select class="inp" id="fc-index">
+                  <option value="INCC" selected>INCC</option>
+                  <option value="IPCA">IPCA</option>
+                  <option value="IGP-M">IGP-M</option>
+                  <option value="none">Sem correção</option>
+                </select>
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Mês ref. início correção</label>
+                <select class="inp" id="fc-correction-ref">
+                  <option value="minus2" selected>2º mês antes da compra</option>
+                  <option value="minus1">Mês anterior à compra</option>
+                  <option value="same">Mês da compra</option>
+                </select>
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Saldo nas chaves (R$)</label>
+                <input class="inp fin-currency" id="fc-keys-balance" type="text" placeholder="R$ 0,00" onblur="fcUpdateFinanciado()">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl" style="color:var(--accent)">Valor financiado com a construtora (R$)</label>
+                <input class="inp fin-currency" id="fc-principal" type="text" placeholder="Calculado automaticamente" readonly style="background:var(--accent-bg);color:var(--accent)">
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Data prevista das chaves (MM/AAAA)</label>
+                <div style="display:flex;gap:4px">
+                  <input class="inp" id="fc-keys-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+                  <input class="inp" id="fc-keys-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+                </div>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl">Nº de parcelas mensais</label>
+                <input class="inp" id="fc-installments" type="number" min="1" placeholder="Ex: 36">
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Dia de vencimento</label>
+                <input class="inp" id="fc-due-day" type="number" min="1" max="31" placeholder="Ex: 10">
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Primeira parcela (MM/AAAA)</label>
+                <div style="display:flex;gap:4px">
+                  <input class="inp" id="fc-first-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+                  <input class="inp" id="fc-first-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+                </div>
+              </div>
+            </div>
+            <!-- Parcela anual extra -->
+            <div style="background:var(--bg4);border-radius:6px;padding:8px;border:1px solid var(--border)">
+              <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px">Parcela anual extra (opcional)</div>
+              <div style="display:grid;grid-template-columns:80px 1fr 1fr;gap:8px">
+                <div class="field" style="margin:0">
+                  <label class="lbl">Mês (1–12)</label>
+                  <input class="inp" id="fc-extra-month" type="number" min="1" max="12" placeholder="Ex: 12">
+                </div>
+                <div class="field" style="margin:0">
+                  <label class="lbl">Valor (R$)</label>
+                  <input class="inp fin-currency" id="fc-extra-value" type="text" placeholder="R$ 0,00">
+                </div>
+                <div class="field" style="margin:0">
+                  <label class="lbl">Efeito sobre as mensais</label>
+                  <select class="inp" id="fc-extra-effect">
+                    <option value="origin">Reduz saldo na origem (mensais fixas)</option>
+                    <option value="moment" selected>Reduz saldo no pagamento (mensais recalculadas)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <!-- Sincronização bancária -->
+            <div style="margin-top:8px">
+              <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.4px">🔄 Sincronização com conta bancária (opcional)</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <div class="field" style="margin:0">
+                  <label class="lbl">Conta para lançamento das parcelas</label>
+                  <select class="inp" id="fc-sync-account"><option value="">— Não sincronizar —</option></select>
+                </div>
+                <div class="field" style="margin:0">
+                  <label class="lbl">Categoria</label>
+                  <select class="inp" id="fc-sync-category"></select>
+                </div>
+              </div>
+            </div>
+            <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn sm" onclick="patGenerateSchedule()">⚙️ Gerar cronograma</button>
+              <button class="btn sm" onclick="ff.financingFetchIndexes().then(r=>{const ok=r.updated.join(', ')||'nenhum';const errs=(r.errors&&r.errors.length)?(' | Falhou: '+r.errors.join(' / ')):'';toast((errs?'⚠️':'✅')+' Atualizados: '+ok+errs, errs?6000:2500);}).catch(e=>toast('⚠️ '+e.message,6000))">📡 Atualizar índices</button>
+              <span id="fin-schedule-summary" style="font-size:11px;color:var(--text3)"></span>
             </div>
           </div>
         </div>
 
+        <!-- Seção: financiamento bancário (opção iv) -->
+        <div id="pat-section-bancario" style="display:none;margin-top:12px">
+          <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+          <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">🏦 Financiamento bancário</div>
+
+          <!-- Campos preenchidos automaticamente no 2º contrato -->
+          <div id="fb-header-fields">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl">Mês de aquisição</label>
+                <div style="display:flex;gap:4px">
+                  <input class="inp" id="fb-month-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+                  <input class="inp" id="fb-month-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+                </div>
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Valor total do ativo (R$)</label>
+                <input class="inp fin-currency" id="fb-total-value" type="text" placeholder="R$ 0,00" onblur="fbAutoFillTotal('fb-total-value')">
+              </div>
+            </div>
+          </div>
+
+          <!-- Parcela não financiada -->
+          <div style="background:var(--bg3);border-radius:8px;padding:10px;border:1px solid var(--border);margin-bottom:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px">Parcela não financiada</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+              <div class="field" style="margin:0;flex:1">
+                <label class="lbl">Valor total (R$)</label>
+                <input class="inp fin-currency" id="fb-entrada-total" type="text" placeholder="R$ 0,00" onblur="fbAutoFillTotal('fb-entrada-total')">
+              </div>
+              <div style="padding-top:18px">
+                <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;white-space:nowrap">
+                  <input type="checkbox" id="fb-entrada-parcelada" onchange="fbToggleEntradaParcelada()"> Parcelada
+                </label>
+              </div>
+            </div>
+            <div id="fb-entrada-vista-row" style="display:flex;gap:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl">Data de pagamento</label>
+                <div style="display:flex;gap:4px">
+                  <input class="inp" id="fb-entrada-d" type="number" min="1" max="31" placeholder="Dia" style="width:52px">
+                  <input class="inp" id="fb-entrada-m" type="number" min="1" max="12" placeholder="Mês" style="width:52px">
+                  <input class="inp" id="fb-entrada-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+                </div>
+              </div>
+            </div>
+            <div id="fb-entrada-parcelas-section" style="display:none">
+              <div id="fb-entrada-parcelas-list" style="display:flex;flex-direction:column;gap:4px;margin-bottom:4px"></div>
+              <div style="display:flex;gap:6px">
+                <button class="btn xs" onclick="fbAddEntradaRow()">+ Adicionar parcela</button>
+                <button class="btn xs" onclick="fbRepeatEntradaRow()">↻ Repetir valor</button>
+              </div>
+              <div id="fb-entrada-sum-alert" style="display:none;color:#dc2626;font-size:12px;margin-top:4px"></div>
+              <div id="fb-entrada-sum-ok" style="display:none;color:#16a34a;font-size:12px;margin-top:4px"></div>
+            </div>
+          </div>
+
+          <!-- Financiamento bancário em si -->
+          <div style="background:var(--bg3);border-radius:8px;padding:10px;border:1px solid var(--border);margin-bottom:8px">
+            <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px">Contrato de financiamento bancário</div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl">Sistema de amortização</label>
+                <select class="inp" id="fin-system" onchange="onFinSystemChange()">
+                  <option value="SAC" selected>SAC (parcela decrescente)</option>
+                  <option value="PRICE">PRICE (parcela fixa)</option>
+                  <option value="SAM">SAM (misto)</option>
+                </select>
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Índice de correção</label>
+                <select class="inp" id="fin-index">
+                  <option value="TR" selected>TR (Taxa Referencial)</option>
+                  <option value="IPCA">IPCA</option>
+                  <option value="IGP-M">IGP-M</option>
+                  <option value="none">Sem correção</option>
+                </select>
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Mês ref. início correção</label>
+                <select class="inp" id="fb-correction-ref">
+                  <option value="minus2" selected>2º mês antes da compra</option>
+                  <option value="minus1">Mês anterior à compra</option>
+                  <option value="same">Mês da compra</option>
+                </select>
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl">Taxa de juros nominal (% a.a.)</label>
+                <input class="inp fin-percent" id="fin-rate" type="text" placeholder="Ex: 10,50%">
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Valor financiado (R$)</label>
+                <input class="inp fin-currency" id="fin-principal" type="text" placeholder="R$ 0,00" onblur="fbAutoFillTotal('fin-principal')">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+              <div class="field" style="margin:0">
+                <label class="lbl">Nº de parcelas mensais</label>
+                <input class="inp" id="fin-installments" type="number" min="1" placeholder="Ex: 360">
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Dia de vencimento</label>
+                <input class="inp" id="fin-sync-day" type="number" min="1" max="31" placeholder="Ex: 10">
+              </div>
+              <div class="field" style="margin:0">
+                <label class="lbl">Primeira parcela (MM/AAAA)</label>
+                <div style="display:flex;gap:4px">
+                  <input class="inp" id="fin-first-m" type="number" min="1" max="12" placeholder="Mês" style="width:60px">
+                  <input class="inp" id="fin-first-y" type="number" min="2000" placeholder="Ano" style="width:70px">
+                </div>
+              </div>
+            </div>
+            <!-- Parcela anual extra -->
+            <div style="background:var(--bg4);border-radius:6px;padding:8px;border:1px solid var(--border);margin-bottom:8px">
+              <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px">Parcela anual extra (opcional)</div>
+              <div style="display:grid;grid-template-columns:80px 1fr 1fr;gap:8px">
+                <div class="field" style="margin:0">
+                  <label class="lbl">Mês (1–12)</label>
+                  <input class="inp" id="fin-extra-month" type="number" min="1" max="12" placeholder="Ex: 12">
+                </div>
+                <div class="field" style="margin:0">
+                  <label class="lbl">Valor (R$)</label>
+                  <input class="inp fin-currency" id="fin-extra-value" type="text" placeholder="R$ 0,00">
+                </div>
+                <div class="field" style="margin:0">
+                  <label class="lbl">Efeito sobre as mensais</label>
+                  <select class="inp" id="fin-extra-effect">
+                    <option value="origin">Reduz saldo na origem (mensais fixas)</option>
+                    <option value="moment" selected>Reduz saldo no pagamento (mensais recalculadas)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+            <!-- Sincronização bancária -->
+            <div>
+              <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.4px">🔄 Sincronização com conta bancária (opcional)</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <div class="field" style="margin:0">
+                  <label class="lbl">Conta para lançamento das parcelas</label>
+                  <select class="inp" id="fin-sync-account"><option value="">— Não sincronizar —</option></select>
+                </div>
+                <div class="field" style="margin:0">
+                  <label class="lbl">Categoria</label>
+                  <select class="inp" id="fin-sync-category"></select>
+                </div>
+              </div>
+            </div>
+            <!-- Campos ocultos mantidos para compatibilidade com savePatAsset -->
+            <input type="hidden" id="fin-balloon" value="0">
+            <input type="hidden" id="fin-keys-balance" value="0">
+            <input type="hidden" id="fin-keys-balance-m" value="">
+            <input type="hidden" id="fin-keys-balance-y" value="">
+            <input type="hidden" id="fin-asset-value" value="0">
+
+            <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn sm" onclick="patGenerateSchedule()">⚙️ Gerar cronograma</button>
+              <button class="btn sm" onclick="ff.financingFetchIndexes().then(r=>{const ok=r.updated.join(', ')||'nenhum';const errs=(r.errors&&r.errors.length)?(' | Falhou: '+r.errors.join(' / ')):'';toast((errs?'⚠️':'✅')+' Atualizados: '+ok+errs, errs?6000:2500);}).catch(e=>toast('⚠️ '+e.message,6000))">📡 Atualizar índices</button>
+              <span id="fin-schedule-summary-fb" style="font-size:11px;color:var(--text3)"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Preview do cronograma (compartilhado entre construtora e bancário) -->
+        <div id="fin-schedule-preview" style="margin-top:10px;display:none">
+          <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden">
+            <div style="display:grid;grid-template-columns:90px 100px 90px 90px 90px 90px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:6px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
+              <span>Mês</span><span class="right">Parcela</span><span class="right">Principal</span><span class="right">Juros</span><span class="right">Saldo</span><span class="right">Tipo</span>
+            </div>
+            <div id="fin-schedule-body" style="max-height:200px;overflow-y:auto;font-size:11px"></div>
+          </div>
+          <div style="margin-top:6px;font-size:11px;color:#f59e0b;background:#fef3c7;padding:6px 10px;border-radius:6px;border:1px solid #fde68a">
+            ⚠️ As parcelas futuras são uma projeção em valores constantes (sem correção monetária futura), calculada para referência.
+          </div>
+        </div>
+
+        <!-- Histórico de movimentações (sempre visível) -->
         <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
         <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Histórico mensal — Movimentações</div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Coluna de movimentação aceita valores negativos (saída de caixa) e positivos (entrada). Tipos que afetam o valor do ativo atualizam automaticamente a posição. Movimentações com data de hoje ou futura, vinculadas a uma conta, são lançadas automaticamente como não conferidas.</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Coluna de movimentação aceita valores negativos (saída de caixa) e positivos (entrada). Tipos que afetam o valor do ativo atualizam automaticamente a posição.</div>
         <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden;margin-bottom:8px">
           <div style="display:grid;grid-template-columns:110px 1fr 150px 120px 120px 36px;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
-            <span>Data</span>
-            <span>Tipo</span>
-            <span>Conta</span>
+            <span>Data</span><span>Tipo</span><span>Conta</span>
             <span style="text-align:right;padding-right:4px">Valor ativo (R$)</span>
             <span style="text-align:right;padding-right:4px">Movimentação</span>
             <span></span>
@@ -1833,11 +2099,12 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
           <div id="pat-tx-table" style="max-height:320px;overflow-y:auto"></div>
           <div style="padding:8px 10px;border-top:1px solid var(--border);background:var(--bg4);display:flex;gap:8px;align-items:center">
             <button class="btn xs" onclick="patTxAddRow()">+ Adicionar linha</button>
-            <button class="btn xs" onclick="patTxRepeatLast()" title="Repetir último lançamento no mês seguinte">↻ Repetir anterior</button>
+            <button class="btn xs" onclick="patTxRepeatLast()">↻ Repetir anterior</button>
             <span style="font-size:11px;color:var(--text3)">Deixe "Valor ativo" em branco para usar o cálculo automático por IPCA</span>
           </div>
         </div>
 
+        <!-- Venda / Saída -->
         <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
         <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px">Venda / Saída (opcional)</div>
         <div style="display:flex;gap:12px;flex-wrap:wrap">
@@ -1853,7 +2120,6 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
             <input class="inp" id="pat-asset-sold-value" type="number" step="0.01" placeholder="0,00" onchange="patUpdateSaleSection()">
           </div>
         </div>
-
         <div id="pat-sale-payment-section" style="display:none;margin-top:10px">
           <div class="field" style="margin:0;max-width:320px">
             <label class="lbl">Forma de pagamento</label>
@@ -1863,10 +2129,10 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
             </select>
           </div>
           <div id="pat-sale-installments-hint" class="info-box" style="display:none;margin-top:8px;font-size:12px">
-            Adicione as parcelas do recebimento na tabela <strong>"Histórico mensal — Movimentações"</strong> abaixo, usando o tipo <strong>"🔴 Parcela de venda"</strong> — uma linha por mês/valor a receber. O "Valor de venda" acima deve ser o <strong>total</strong> da venda (a soma de todas as parcelas).
+            Adicione as parcelas do recebimento na tabela de Movimentações, usando o tipo <strong>"🔴 Parcela de venda"</strong>.
           </div>
           <div id="pat-sale-vista-hint" class="info-box" style="margin-top:8px;font-size:12px">
-            Ao registrar o recebimento na conta bancária, vincule a transação a este ativo com o tipo <strong>"🔴 Venda"</strong> para marcar como recebido.
+            Ao registrar o recebimento na conta bancária, vincule a transação a este ativo com o tipo <strong>"🔴 Venda"</strong>.
           </div>
         </div>
 
@@ -1874,6 +2140,11 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
           <input type="checkbox" id="pat-asset-hidden">
           Ocultar ativo (ex: já vendido ou não mais relevante)
         </label>
+
+        <!-- Campos ocultos para compatibilidade com código existente -->
+        <input type="hidden" id="pat-financed-check" value="">
+        <input type="hidden" id="pat-initial-value-section" value="">
+        <input type="hidden" id="pat-financing-section" value="">
       </div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('modal-pat-asset')">Cancelar</button>
@@ -2278,6 +2549,7 @@ toast(`✅ Atualizados: ${ok}${err}`); }).catch(e => toast('⚠️ ' + e.message
               <option value="aporte">➕ Aporte de capital</option>
               <option value="reducao">📉 Redução de capital</option>
               <option value="compra">🟢 Compra / Entrada</option>
+              <option value="parcela_compra">🟢 Parcela de compra</option>
               <option value="despesa">📋 Despesa do ativo</option>
               <option value="parcela_financiamento">🏦 Parcela de financiamento</option>
               <option value="venda">🔴 Venda</option>

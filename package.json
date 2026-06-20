@@ -1,7 +1,7 @@
 {
   "name": "cruzeiro",
-  "version": "4.14.0",
-  "description": "Gest\u00e3o financeira pessoal",
+  "version": "4.15.2",
+  "description": "Gestão financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
   "scripts": {
@@ -32,9 +32,11 @@
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
         }
       ],
       "artifactName": "Cruzeiro-Setup-${version}.exe"
@@ -59,9 +61,7 @@
       {
         "from": "assets/",
         "to": "assets/",
-        "filter": [
-          "**/*"
-        ]
+        "filter": ["**/*"]
       }
     ],
     "asar": true,
@@ -86,10 +86,7 @@
       "target": [
         {
           "target": "zip",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "arch": ["x64", "arm64"]
         }
       ],
       "category": "public.app-category.finance",

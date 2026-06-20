@@ -4,7 +4,7 @@ let CATS_RAW = [
   "Alimentação","Alimentação:Restaurante","Alimentação:Supermercado",
   "Casa","Contas","Diversos","Educação","Lazer","Outras Rendas",
   "Presentes","Renda Financeira","Roupas","Salário","Saúde",
-  "Saúde:Farmácia","Saúde:Médicos","Tarifas","Transferência","Transferências",
+  "Saúde:Farmácia","Saúde:Médicos","Tarifas",
   "Transporte","Viagens"
 ];
 
@@ -78,7 +78,7 @@ function openAddCategory(isSub, parentName) {
 }
 
 function openRenameCategory(oldName, currentName) {
-  showCatInputModal(`Renomear "${currentName}"`, currentName, async val => {
+  showCatInputModal(`Renomear "${currentName}"`, currentName, val => {
     if (!val?.trim() || val.trim() === currentName) return;
     const newFull = val.trim();
     for (let i = 0; i < CATS_RAW.length; i++) {
@@ -88,22 +88,7 @@ function openRenameCategory(oldName, currentName) {
     }
     saveCategories();
     refreshCategories();
-    // Propaga o renome para TODAS as transações, orçamentos e recorrências já
-    // cadastrados com a categoria/subcategoria antiga — sem isso, os lançamentos
-    // existentes ficavam órfãos, ainda referenciando o nome antigo.
-    const result = await ff.categoriesRename({ oldName, newName: newFull }).catch(() => null);
-    const counts = [];
-    if (result?.txUpdated)     counts.push(`${result.txUpdated} lançamento(s)`);
-    if (result?.budgetUpdated) counts.push(`${result.budgetUpdated} orçamento(s)`);
-    if (result?.recUpdated)    counts.push(`${result.recUpdated} recorrência(s)`);
-    toast(counts.length
-      ? `✅ Renomeada para "${newFull}" — atualizado em ${counts.join(', ')}`
-      : `✅ Renomeada para "${newFull}"`);
-    // Atualiza as telas que podem estar exibindo a categoria antiga
-    await loadAccounts();
-    if (currentPage === 'account') refreshAccount();
-    if (currentPage === 'overview') await refreshOverview();
-    if (currentPage === 'reports') onReportTypeChange();
+    toast(`✅ Renomeada para "${newFull}"`);
   });
 }
 
@@ -708,11 +693,14 @@ async function maybeShowInsightsCard() {
 // presentes sazonais) que naturalmente variam mês a mês sem indicar problema —
 // a MA12 absorve essa sazonalidade e permite comparação ano a ano de verdade.
 async function buildEvolucaoCategorySeries() {
-  if (!Object.keys(_ev.ipcaMonthly).length) await loadEvolucaoConfig().catch(() => {});
+  if (!Object.keys(_ev.ipca).length) await loadEvolucaoConfig().catch(() => {});
   const excl = [..._excludedCats];
   const catRows = await ff.evolucaoByCat({ excludedCats: excl }).catch(() => []);
 
-  const corr = (v, m) => inflateMonth(v, m, new Date().getFullYear());
+  const currentYear = new Date().getFullYear();
+  const ipcaYears = Object.keys(_ev.ipca).map(Number).filter(y => y < currentYear).sort((a,b)=>a-b);
+  const refYear = ipcaYears.length ? ipcaYears[ipcaYears.length-1] : currentYear;
+  const corr = (v, m) => inflateMonth(v, m, refYear);
 
   const today = todayStr();
   const curM = today.slice(0,7);
@@ -745,7 +733,10 @@ async function buildInsightsSummary(targetMonth, filters) {
   const selectedCats = filters.categories && filters.categories.length ? new Set(filters.categories) : null;
 
   const { allMonths, series } = await buildEvolucaoCategorySeries();
-  const months = allMonths.filter(m => m <= targetMonth).slice(-periodMonths);
+  // 9999 = "desde o início" — usa todos os meses disponíveis
+  const months = periodMonths >= 9999
+    ? allMonths.filter(m => m <= targetMonth)
+    : allMonths.filter(m => m <= targetMonth).slice(-periodMonths);
   if (!months.includes(targetMonth) && allMonths.includes(targetMonth)) months.push(targetMonth);
   const curM = targetMonth;
   const prevMonths = months.filter(m => m !== curM);
@@ -764,8 +755,23 @@ async function buildInsightsSummary(targetMonth, filters) {
     const priorVals = prevMonths.map(m => { const i = idxOf(m); return i>=0 ? s.ma12[i] : 0; }).filter(v => v !== 0);
     const avgPrior = priorVals.length ? priorVals.reduce((a,b)=>a+b,0)/priorVals.length : 0;
     const pctChange = avgPrior !== 0 ? ((cur - avgPrior) / Math.abs(avgPrior)) * 100 : null;
-    return { category: cat, current: Math.round(cur), avgPrior: Math.round(avgPrior),
-             pctChange: pctChange === null ? null : Math.round(pctChange) };
+
+    // Determina se é receita (entradas, valores positivos) ou despesa (saídas)
+    const allVals = s.ma12.filter(v => v !== 0);
+    const avgSign = allVals.length ? allVals.reduce((a,b)=>a+b,0)/allVals.length : cur;
+    const isIncome = avgSign > 0;
+
+    return {
+      category: cat,
+      type: isIncome ? 'receita' : 'despesa',
+      current: Math.round(cur),
+      avgPrior: Math.round(avgPrior),
+      pctChange: pctChange === null ? null : Math.round(pctChange),
+      // Para receitas: subindo = bom; Para despesas: aumentando = ruim
+      trend: isIncome
+        ? (pctChange === null ? 'estável' : pctChange > 5 ? 'subindo' : pctChange < -5 ? 'caindo' : 'estável')
+        : (pctChange === null ? 'estável' : pctChange > 5 ? 'aumentando' : pctChange < -5 ? 'reduzindo' : 'estável'),
+    };
   }).filter(c => c && (c.current !== 0 || c.avgPrior !== 0))
     .sort((a,b) => Math.abs(b.current) - Math.abs(a.current))
     .slice(0, 20);
@@ -2215,6 +2221,18 @@ function onImportPatAssetChange(sel, i) {
   else if (memo.includes('parcel') || memo.includes('financ')) typeInp.value = 'parcela_financiamento';
 }
 
+function toggleImportPatRow(chk, i) {
+  const sub = document.querySelector(`.import-pat-sub-${i}`);
+  if (sub) sub.style.display = chk.checked ? 'flex' : 'none';
+  // Se desmarcou ativo, garante que dívida tb não fique ativa simultaneamente
+  // (não é obrigatório, mas evita confusão)
+}
+
+function toggleImportDebtRow(chk, i) {
+  const sub = document.querySelector(`.import-debt-sub-${i}`);
+  if (sub) sub.style.display = chk.checked ? 'block' : 'none';
+}
+
 function onTxPatAssetChange() {
   // Auto-suggest tx type based on memo content when asset is selected
   const memo  = (G('tx-memo')?.value || '').toLowerCase();
@@ -2381,6 +2399,7 @@ async function saveTx() {
   refreshAccount();
   if (currentPage === 'overview') refreshOverview();
   if (currentPage === 'evolucao') refreshEvolucao();
+  if (currentPage === 'patrimonio') refreshPatrimonio();
 
   // Se este lançamento veio da fila de "Lançar com IA", avança para o próximo item
   if (window._aiQueueActive) {
@@ -2420,6 +2439,7 @@ async function deleteTx(id) {
   }
   await loadAccounts();
   if (currentPage === 'account') refreshAccount();
+  if (currentPage === 'patrimonio') refreshPatrimonio();
 }
 async function toggleCleared(id, val) {
   // Fetch from DB directly (handles future txs not in _lastTxs window)
@@ -3186,10 +3206,6 @@ async function initImportPage() {
   _customBankParsers = all.filter(p => p.id !== '__builtin_overrides__' && p.type !== 'broker');
   renderImportDropdowns();
   await initBrokerDropdown();
-  // Garante que os ativos/dívidas estejam disponíveis para o vínculo na revisão
-  // de importação, mesmo que a aba Patrimônio nunca tenha sido aberta nesta sessão.
-  if (!_pat.assets.length) _pat.assets = await ff.patAssetsList().catch(() => []);
-  if (!_pat.debts.length)  _pat.debts  = await ff.debtList().catch(() => []);
   // Populate broker account selector with investment accounts
   const brokerAccSel = G('broker-account');
   if (brokerAccSel && accounts.length) {
@@ -3990,6 +4006,56 @@ function renderImportEditTable(rows) {
          </td>`
       : '';
     const doneStyle = r._transferDone ? 'background:#f0fdf4;opacity:0.5' : '';
+    // Ativo imobilizado: opções do _pat.assets
+    const assetOptions = '<option value="">—</option>' +
+      (_pat?.assets||[]).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+    // Dívida pessoal: opções do _pat.debts
+    const debtOptions = '<option value="">—</option>' +
+      (_pat?.debts||[]).map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('');
+
+    const patTxOptions = [
+      ['aluguel','🏠 Aluguel recebido'],['dividendo','💰 Dividendo'],['jcp','💵 JCP'],
+      ['aporte','➕ Aporte'],['reducao','📉 Redução'],['compra','🟢 Compra/Entrada'],
+      ['parcela_compra','🟢 Parcela de compra'],['despesa','📋 Despesa'],
+      ['parcela_financiamento','🏦 Parcela financ.'],
+      ['venda','🔴 Venda'],['venda_parcela','🔴 Parcela venda'],
+    ].map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
+
+    const patCell = r._transferDone ? '<td></td><td></td>' : `
+      <td style="padding:2px 4px;vertical-align:middle;min-width:160px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;margin-bottom:3px">
+          <input type="checkbox" class="import-pat-toggle" data-idx="${i}"
+            onchange="toggleImportPatRow(this,${i})"
+            ${r._importPatAssetId ? 'checked' : ''}>
+          Ativo imob.
+        </label>
+        <div class="import-pat-sub-${i}" style="display:${r._importPatAssetId?'flex':'none'};flex-direction:column;gap:2px">
+          <select class="inp import-pat-asset-inp" data-idx="${i}"
+            style="font-size:11px;padding:2px 4px"
+            onchange="onImportPatAssetChange(this,${i})">
+            ${assetOptions}
+          </select>
+          <select class="inp import-pat-type-inp" data-idx="${i}"
+            style="font-size:11px;padding:2px 4px">
+            ${patTxOptions}
+          </select>
+        </div>
+      </td>
+      <td style="padding:2px 4px;vertical-align:middle;min-width:140px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;margin-bottom:3px">
+          <input type="checkbox" class="import-debt-toggle" data-idx="${i}"
+            onchange="toggleImportDebtRow(this,${i})"
+            ${r._importDebtId ? 'checked' : ''}>
+          Dívida pessoal
+        </label>
+        <div class="import-debt-sub-${i}" style="display:${r._importDebtId?'block':'none'}">
+          <select class="inp import-debt-inp" data-idx="${i}"
+            style="font-size:11px;padding:2px 4px;width:100%">
+            ${debtOptions}
+          </select>
+        </div>
+      </td>`;
+
     return `<tr data-row-idx="${i}" style="${doneStyle}">
       <td style="white-space:nowrap;font-size:12px;padding:5px 8px;vertical-align:middle">${r.dateISO}</td>
       <td style="font-size:11px;color:var(--text3);padding:4px 8px;vertical-align:middle;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.desc||r.memo||'')}">${esc(r.desc||r.memo||'')}</td>
@@ -4014,35 +4080,8 @@ function renderImportEditTable(rows) {
             onmousedown="event.preventDefault();openGlobalCatDrop(this.previousElementSibling)">▾</button>
         </div>
       </td>
-      <td style="padding:3px 4px;vertical-align:middle">
-        <select class="inp import-pat-asset-inp" data-idx="${i}" ${r._transferDone?'disabled':''}
-          style="font-size:11px;padding:3px 4px;min-width:90px;max-width:120px"
-          onchange="onImportPatAssetChange(this, ${i})">
-          <option value="">— Nenhum —</option>
-          ${(_pat.assets||[]).filter(a=>!a.hidden).map(a => `<option value="${a.id}" ${r.pat_asset_id===a.id?'selected':''}>${esc(a.name)}</option>`).join('')}
-        </select>
-      </td>
-      <td style="padding:3px 4px;vertical-align:middle">
-        <select class="inp import-pat-type-inp" data-idx="${i}" ${r._transferDone?'disabled':''}
-          style="font-size:11px;padding:3px 4px;min-width:90px;max-width:120px">
-          <option value="aluguel" ${r.pat_tx_type==='aluguel'?'selected':''}>🏠 Aluguel</option>
-          <option value="dividendo" ${r.pat_tx_type==='dividendo'?'selected':''}>💰 Dividendo</option>
-          <option value="jcp" ${r.pat_tx_type==='jcp'?'selected':''}>💵 JCP</option>
-          <option value="aporte" ${r.pat_tx_type==='aporte'?'selected':''}>➕ Aporte</option>
-          <option value="parcela_financiamento" ${r.pat_tx_type==='parcela_financiamento'?'selected':''}>🏦 Parcela financ.</option>
-          <option value="compra" ${r.pat_tx_type==='compra'?'selected':''}>🛒 Compra</option>
-          <option value="venda" ${r.pat_tx_type==='venda'?'selected':''}>🔴 Venda</option>
-          <option value="venda_parcela" ${r.pat_tx_type==='venda_parcela'?'selected':''}>🔴 Parcela de venda</option>
-        </select>
-      </td>
-      <td style="padding:3px 4px;vertical-align:middle">
-        <select class="inp import-debt-inp" data-idx="${i}" ${r._transferDone?'disabled':''}
-          style="font-size:11px;padding:3px 4px;min-width:90px;max-width:120px" title="Vincular a dívida pessoal">
-          <option value="">— Nenhuma —</option>
-          ${(_pat.debts||[]).filter(d=>!d.hidden).map(d => `<option value="${d.id}" ${r.pat_debt_id===d.id?'selected':''}>${esc(d.name)}</option>`).join('')}
-        </select>
-      </td>
       <td class="${amtCls} right" style="font-size:12px;padding:5px 8px;white-space:nowrap;font-family:'DM Mono',monospace;vertical-align:middle">${fmtBRL(r.amount)}</td>
+      ${patCell}
     </tr>`;
   }).join('');
 
@@ -4057,7 +4096,7 @@ function renderImportEditTable(rows) {
       <div class="tbl-outer" style="max-height:calc(100vh - 360px)">
         <table class="ledger">
           <thead><tr>
-            <th>Data</th><th>Descrição original</th>${multiCard ? '<th>Titular → Conta</th>' : ''}<th>Memorando</th><th>Categoria</th><th>Ativo imob.</th><th>Tipo mov.</th><th>Dívida</th><th class="right">Valor</th>
+            <th>Data</th><th>Descrição original</th>${multiCard ? '<th>Titular → Conta</th>' : ''}<th>Memorando</th><th>Categoria</th><th class="right">Valor</th><th>Vinculado a ativo</th><th>Dívida pessoal</th>
           </tr></thead>
           <tbody id="bank-preview-body">${tableRows}</tbody>
         </table>
@@ -4139,31 +4178,26 @@ async function doImportFromTable() {
     };
   });
 
-  // Collect pat asset linkages from the table — usa origIdx (índice na lista
-  // original "rows"), não o índice de finalRows, já que finalRows pode ter
-  // menos elementos que o DOM (linhas de transferência já processadas são
-  // removidas de finalRows mas continuam no DOM até a próxima renderização).
+  // Collect pat asset linkages from the table
   const patAssetInputs = G('bank-preview-body')?.querySelectorAll('.import-pat-asset-inp');
   const patTypeInputs  = G('bank-preview-body')?.querySelectorAll('.import-pat-type-inp');
-  const debtLinkInputs = G('bank-preview-body')?.querySelectorAll('.import-debt-inp');
-  const patLinks = finalRows.map((r) => {
-    const origIdx = rows.indexOf(r);
-    return {
-      assetId:  parseInt(patAssetInputs?.[origIdx]?.value || '0'),
-      txType:   patTypeInputs?.[origIdx]?.value || 'aluguel',
-      month:    (r.dateISO || '').slice(0, 7),
-      amount:   Math.abs(r.amount),
-      memo:     r.memo || '',
-    };
-  }).filter(p => p.assetId && p.month);
-  const debtLinks = finalRows.map((r) => {
-    const origIdx = rows.indexOf(r);
-    return {
-      debtId: parseInt(debtLinkInputs?.[origIdx]?.value || '0'),
-      month:  (r.dateISO || '').slice(0, 7),
-      amount: Math.abs(r.amount),
-    };
-  }).filter(d => d.debtId && d.month);
+  const patDebtInputs  = G('bank-preview-body')?.querySelectorAll('.import-debt-inp');
+  const patDebtToggles = G('bank-preview-body')?.querySelectorAll('.import-debt-toggle');
+
+  const patLinks = finalRows.map((r, i) => ({
+    assetId:  parseInt(patAssetInputs?.[i]?.value || '0'),
+    txType:   patTypeInputs?.[i]?.value || 'aluguel',
+    month:    (r.dateISO || '').slice(0, 7),
+    amount:   Math.abs(r.amount),
+    memo:     r.memo || '',
+  })).filter(p => p.assetId && p.month);
+
+  const debtLinks = finalRows.map((r, i) => ({
+    debtId: patDebtToggles?.[i]?.checked ? parseInt(patDebtInputs?.[i]?.value || '0') : 0,
+    month:  (r.dateISO || '').slice(0, 7),
+    amount: Math.abs(r.amount),
+    rowIdx: i,
+  })).filter(p => p.debtId && p.month);
 
   // ── Round 2: memo+category duplicates (recurring placeholders with variable amount) ──
   try {
@@ -4202,13 +4236,18 @@ async function finishImportWithPatLinks(finalRows, updatedInstallments, accountI
       tx_type: p.txType, total_value: p.amount, notes: p.memo || null,
     }).catch(() => {});
   }
-  for (const d of (debtLinks || [])) {
-    await ff.debtMarkPaid({ debtId: d.debtId, month: d.month, amount: d.amount }).catch(() => {});
-  }
-  if (patLinks?.length || debtLinks?.length) {
+  if (patLinks?.length) {
     _pat.txAll = await ff.patTxAll().catch(() => _pat.txAll);
     if (currentPage === 'patrimonio') refreshPatrimonioTable();
   }
+
+  // Processar vínculos de dívida pessoal
+  for (const d of (debtLinks || [])) {
+    await ff.debtMarkPaid({ debtId: d.debtId, month: d.month, amount: d.amount }).catch(() => {});
+    _pat.debtInstallments = _pat.debtInstallments || {};
+    _pat.debtInstallments[d.debtId] = await ff.debtInstallmentsGet({ debtId: d.debtId }).catch(() => []);
+  }
+  if (debtLinks?.length && currentPage === 'patrimonio') refreshPatrimonioTable();
 }
 
 // ── Round-2 dup resolution UI: same memo+category, variable amount ──
@@ -4409,6 +4448,7 @@ async function doImport(finalRows, parcelInstallments, accountId, checkDailySald
     cancelBankImport();
     await loadAccounts();
     if (currentPage === 'account') refreshAccount();
+    if (currentPage === 'patrimonio') refreshPatrimonio();
     toast(`${(result.inserted||0)+transferCount} lançamentos importados${installCount?` + ${installCount} parcelas`:''}${transferCount?` (${transferCount} transferência(s))`:''}`);
     _pendingImport = null;
     _importEditRows = [];
@@ -5668,7 +5708,12 @@ function renderBrokerPreview(parsed) {
       ? `<span style="color:var(--text3);font-size:10px">${a.maturity_month}</span>` : '—';
     const brokerMap = _brokerMappings[parsed.broker] || {};
     const learned = brokerMap[a.name];
-    const prefill = learned || '';
+    // Sem mapeamento aprendido ainda (1ª vez que esse ativo aparece nessa
+    // corretora) → pré-preenche com o nome oficial dado pela corretora, em
+    // vez de deixar em branco. O usuário pode alterar (e o app memoriza,
+    // como já fazia) ou simplesmente manter o nome oficial sem trabalho.
+    // Deixar em branco fazia o ativo ser pulado silenciosamente na importação.
+    const prefill = learned || a.name || '';
     const borderStyle = learned ? 'border-color:var(--accent)' : '';
     const nameInput = `<div style="display:flex;align-items:center;gap:2px">
       <input class="inp broker-name-inp" data-idx="${i}"
@@ -10688,7 +10733,6 @@ async function exportReportPDF() {
 // ══ EVOLUÇÃO ══
 let _ev = {
   ipca: {},
-  ipcaMonthly: {}, // {"2024-01": 0.0042, ...} — fonte real da correção mensal
   catConfig:     [], // [{cat,mode}] — Resumo
   catConfigCats: [], // [{cat,mode}] — Por Categoria
   allCats: [],
@@ -10710,18 +10754,8 @@ async function saveEvConfig() {
 }
 
 async function loadEvolucaoConfig() {
-  // Usa a MESMA fonte de IPCA mensal já usada pelo Patrimônio (pat:ipca-monthly-get),
-  // em vez do IPCA anual agregado. A correção mensal é mais precisa: um gasto de
-  // dezembro/2024 "perdeu" só 1 mês de inflação até hoje, não o ano inteiro de uma
-  // vez, como a versão anual fazia.
-  _ev.ipcaMonthly = await ff.patIpcaMonthlyGet().catch(() => ({}));
-  // Mantém _ev.ipca (anual) populado a partir do mensal, só para telas/exportações
-  // antigas que ainda possam referenciar o formato anual — calculado por composição.
-  _ev.ipca = {};
-  Object.entries(_ev.ipcaMonthly).forEach(([ym, rate]) => {
-    const y = ym.slice(0,4);
-    _ev.ipca[y] = (1 + (_ev.ipca[y] || 0)) * (1 + (rate||0)) - 1;
-  });
+  const ipca = await ff.evolucaoIpcaGet().catch(()=>({}));
+  _ev.ipca = Object.fromEntries(Object.entries(ipca).filter(([k,v])=>parseInt(k)>=2000&&v>0&&v<1));
   const cfg = await ff.overviewConfigGet().catch(()=>null);
   if (!cfg) return;
   if (cfg.ev_catConfig?.length)      _ev.catConfig     = cfg.ev_catConfig;
@@ -10752,33 +10786,17 @@ function onEvViewChange()    { saveEvConfig(); refreshEvolucao(); }
 function onEvDisplayChange() { saveEvConfig(); refreshEvolucao(); }
 
 // ── IPCA ──
-// Correção monetária mensal: compõe o IPCA mês a mês desde `fromMonth` (YYYY-MM)
-// até o mês de referência mais recente disponível (hoje, ou o último mês com
-// dado de IPCA carregado) — mesma precisão usada na aba Patrimônio. Substitui
-// a versão anterior, que aplicava a taxa do ANO INTEIRO de uma vez só, tratando
-// um gasto de janeiro e um de dezembro do mesmo ano como igualmente desatualizados.
-function inflateToMonth(value, fromMonth, toMonth) {
-  if (!value || !fromMonth || fromMonth >= toMonth) return value || 0;
-  let f = 1, cur = fromMonth;
-  while (cur < toMonth) {
-    const [y, mo] = cur.split('-').map(Number);
-    const next = mo === 12 ? `${y+1}-01` : `${y}-${String(mo+1).padStart(2,'0')}`;
-    const rate = _ev.ipcaMonthly[next] ?? 0;
+function inflateAnnual(value, fromYear, refYear) {
+  if (!value || fromYear > refYear) return value || 0;
+  let f = 1;
+  for (let y = fromYear; y <= refYear; y++) {
+    const rate = _ev.ipca[String(y)] ?? _ev.ipca[y] ?? 0;
     if (rate > 0) f *= (1 + rate);
-    cur = next;
   }
   return value * f;
 }
-function inflateAnnual(value, fromYear, refYear) {
-  // Mantida por compatibilidade com qualquer chamador remanescente — agora
-  // delega para a correção mensal real, usando dezembro do ano de origem.
-  return inflateToMonth(value, `${fromYear}-01`, `${refYear}-12`);
-}
 function inflateMonth(value, fromMonth, refYear) {
-  // refYear aqui é só o ano; usamos o último mês de IPCA carregado como teto real.
-  const months = Object.keys(_ev.ipcaMonthly).sort();
-  const toMonth = months.length ? months[months.length-1] : `${refYear}-12`;
-  return inflateToMonth(value, fromMonth, toMonth);
+  return inflateAnnual(value, parseInt(fromMonth.slice(0,4)), refYear);
 }
 function movAvg12(arr, i) {
   const w = arr.slice(Math.max(0,i-11),i+1).filter(v=>v!==0&&!isNaN(v));
@@ -10892,15 +10910,15 @@ async function refreshEvolucao() {
   const useMA   = G('ev-ma')?.checked    !== false;
   const selYear = G('ev-year')?.value    || 'all';
 
-  // IPCA status — agora baseado no IPCA MENSAL (mais preciso que o anual anterior)
-  const ipcaMonths = Object.keys(_ev.ipcaMonthly).sort();
-  const refMonth   = ipcaMonths.length ? ipcaMonths[ipcaMonths.length-1] : null;
-  const refYear    = refMonth ? parseInt(refMonth.slice(0,4)) : null;
+  // IPCA status
+  const currentYear = new Date().getFullYear();
+  const ipcaYears = Object.keys(_ev.ipca).map(Number).filter(y=>y<currentYear).sort((a,b)=>a-b);
+  const refYear   = ipcaYears.length ? ipcaYears[ipcaYears.length-1] : null;
   const statusEl  = G('ev-ipca-status');
   if (statusEl) {
-    if (ipcaMonths.length) {
+    if (ipcaYears.length) {
       statusEl.style.display='block';
-      statusEl.textContent=`IPCA mensal carregado: ${fmtMonth(ipcaMonths[0])} – ${fmtMonth(refMonth)} — valores corrigidos mês a mês até ${fmtMonth(refMonth)}`;
+      statusEl.textContent=`IPCA carregado: ${ipcaYears[0]}–${refYear} — valores em R$ de dez/${refYear}`;
     } else if (useIPCA) {
       statusEl.style.display='block';
       statusEl.textContent='⚠ IPCA não carregado — clique em "📡 Atualizar IPCA"';
@@ -10908,7 +10926,7 @@ async function refreshEvolucao() {
       statusEl.style.display='none';
     }
   }
-  if (G('ev-ipca-note')) G('ev-ipca-note').textContent = useIPCA&&refMonth ? `R$ de ${fmtMonth(refMonth)}` : '';
+  if (G('ev-ipca-note')) G('ev-ipca-note').textContent = useIPCA&&refYear ? `R$ de ${refYear}` : '';
 
   const { byCategory, byCatFull } = await getEvolucaoData();
   const now2 = new Date();
@@ -11375,22 +11393,15 @@ function openEvCatSelector(context) {
 }
 
 // ── Atualizar IPCA ──
-// Usa a MESMA série mensal do BCB (SGS 433) já compartilhada com o Patrimônio —
-// elimina a duplicação que existia entre o IPCA anual (Evolução) e mensal (Patrimônio).
 async function fetchIPCA() {
-  toast('⏳ Buscando IPCA mensal do Banco Central…');
-  const result = await ff.patIpcaMonthlyFetch();
+  toast('⏳ Buscando IPCA do Banco Central…');
+  const result = await ff.evolucaoIpcaFetch();
   if (result.ok) {
-    _ev.ipcaMonthly = result.data;
-    await ff.patIpcaMonthlySave(result.data);
-    // Recalcula o anual derivado, só para compatibilidade
     _ev.ipca = {};
-    Object.entries(_ev.ipcaMonthly).forEach(([ym, rate]) => {
-      const y = ym.slice(0,4);
-      _ev.ipca[y] = (1 + (_ev.ipca[y] || 0)) * (1 + (rate||0)) - 1;
-    });
-    const months = Object.keys(_ev.ipcaMonthly).sort();
-    toast(`✅ IPCA mensal: ${fmtMonth(months[0])} – ${fmtMonth(months[months.length-1])} (${months.length} meses)`);
+    Object.entries(result.data).forEach(([k,v])=>{const y=parseInt(k);if(y>=2000&&v>0&&v<1)_ev.ipca[y]=v;});
+    await ff.evolucaoIpcaSave(_ev.ipca);
+    const years=Object.keys(_ev.ipca).sort();
+    toast(`✅ IPCA: ${years[0]}–${years[years.length-1]} (${years.length} anos)`);
     refreshEvolucao();
   } else {
     toast(`❌ Erro IPCA: ${result.error}`);
@@ -12151,6 +12162,7 @@ let _pat = {
 // Sign convention for pat_transactions (from investor's cash perspective)
 const PAT_TX_CASH = {
   compra:                 { label: '🟢 Compra',                   sign: -1 },
+  parcela_compra:         { label: '🟢 Parcela de compra',        sign: -1 },
   aporte:                 { label: '➕ Aporte de capital',         sign: -1 },
   despesa:                { label: '📋 Despesa do ativo',          sign: -1 },
   parcela_financiamento:  { label: '🏦 Parcela de financiamento',  sign: -1 },
@@ -13405,6 +13417,8 @@ async function openPatAssetModal(id) {
   G('pat-asset-name').value  = '';
   G('pat-asset-type').value  = 'imovel';
   G('pat-asset-trend').value = 'plus1x';
+  if (G('pat-acquisition-type')) G('pat-acquisition-type').value = 'vista';
+  setTimeout(setupFinancingInputs, 50); // aplica máscaras após render
   G('pat-asset-sold-m').value = '';
   G('pat-asset-sold-y').value = '';
   if (G('pat-asset-ownership-pct')) G('pat-asset-ownership-pct').value = '';
@@ -13470,11 +13484,16 @@ async function openPatAssetModal(id) {
       if (G('pat-sale-payment-type')) G('pat-sale-payment-type').value = hasVendaParcela ? 'parcelado' : 'vista';
       patUpdateSaleSection();
       G('pat-financed-check').checked = !!a.financed;
-      patToggleFinancingSection();
-      if (a.financed) {
-        G('pat-financed-check').checked = true;
-        patToggleFinancingSection();
+      if (a.financed && G('pat-acquisition-type')) {
+        // Detecta tipo pelo contrato ativo (PLANTA = construtora, outros = bancário)
+        const activeContract = (_pat.financingContracts[id] || []).find(c => c.status === 'active') || (_pat.financingContracts[id] || [])[0];
+        if (activeContract?.system === 'PLANTA') {
+          G('pat-acquisition-type').value = 'financiamento_construtora';
+        } else if (a.financed) {
+          G('pat-acquisition-type').value = 'financiamento_bancario';
+        }
       }
+      patAcquisitionTypeChanged();
       const entries = _pat.historyAll
         .filter(h => h.asset_id === id)
         .sort((a,b) => a.month.localeCompare(b.month));
@@ -13555,7 +13574,8 @@ async function savePatAsset() {
   const yr     = parseInt(G('pat-asset-month-y')?.value);
   const month  = (mo >= 1 && mo <= 12 && yr >= 2000) ? `${yr}-${String(mo).padStart(2,'0')}` : null;
   const hidden = G('pat-asset-hidden')?.checked || false;
-  const financed = G('pat-financed-check')?.checked || false;
+  const acqType  = G('pat-acquisition-type')?.value || 'vista';
+  const financed = (acqType === 'financiamento_construtora' || acqType === 'financiamento_bancario');
   // financing_total now comes from fin-principal field
   const financing_total = financed ? (readFinField('fin-principal')||null) : null;
   const financingRows = []; // legacy — no longer used (contract system handles schedule)
@@ -13577,44 +13597,98 @@ async function savePatAsset() {
   // 2a. Save financing installments; set asset value = financing_total at first installment month
   // Save financing contract if financed and contract fields are filled
   if (financed) {
-    const fn = parseInt(G('fin-installments')?.value||'0');
-    const fp = readFinField('fin-principal');
-    const fm2 = parseInt(G('fin-first-m')?.value||'0');
-    const fy2 = parseInt(G('fin-first-y')?.value||'0');
+    const isConstrutoraSave2 = acqType === 'financiamento_construtora';
+    const fn = parseInt((isConstrutoraSave2 ? G('fc-installments') : G('fin-installments'))?.value||'0');
+    const fp = isConstrutoraSave2 ? readFinField('fc-principal') : readFinField('fin-principal');
+    const fm2 = parseInt((isConstrutoraSave2 ? G('fc-first-m') : G('fin-first-m'))?.value||'0');
+    const fy2 = parseInt((isConstrutoraSave2 ? G('fc-first-y') : G('fin-first-y'))?.value||'0');
     if (fn > 0 && fp > 0 && fm2 && fy2) {
+      const isCSave = acqType === 'financiamento_construtora';
       const contract = {
-        label:            G('fin-contract-label')?.value?.trim() || null,
-        system:           G('fin-system')?.value || 'SAC',
-        index_type:       G('fin-index')?.value  || 'none',
-        annual_rate:      readFinField('fin-rate'),
-        principal:        fp,
-        n_installments:   fn,
-        first_month:      `${fy2}-${String(fm2).padStart(2,'0')}`,
-        balloon_at_keys:  readFinField('fin-balloon') || null,
-        keys_balance:        readFinField('fin-keys-balance') || null,
-        keys_balance_month:  (parseInt(G('fin-keys-balance-m')?.value||'0') && parseInt(G('fin-keys-balance-y')?.value||'0'))
-          ? `${G('fin-keys-balance-y').value}-${String(G('fin-keys-balance-m').value).padStart(2,'0')}` : null,
-        extra_annual_month: parseInt(G('fin-extra-month')?.value||'0')||null,
-        extra_annual_value: readFinField('fin-extra-value') || null,
-        sync_account_id:  parseInt(G('fin-sync-account')?.value||'0') || null,
-        sync_day:         parseInt(G('fin-sync-day')?.value||'0') || null,
-        sync_category:    G('fin-sync-category')?.value?.trim() || null,
+        label:              G('fin-contract-label')?.value?.trim() || null,
+        system:             isCSave ? 'PLANTA' : (G('fin-system')?.value || 'SAC'),
+        index_type:         isCSave ? (G('fc-index')?.value || 'INCC') : (G('fin-index')?.value || 'none'),
+        annual_rate:        isCSave ? 0 : readFinField('fin-rate'),
+        principal:          fp,
+        n_installments:     fn,
+        first_month:        `${fy2}-${String(fm2).padStart(2,'0')}`,
+        purchase_month:     (() => {
+          const pmM = parseInt((isCSave ? G('fc-month-m') : G('fb-month-m'))?.value || '0');
+          const pmY = parseInt((isCSave ? G('fc-month-y') : G('fb-month-y'))?.value || '0');
+          return (pmM && pmY) ? `${pmY}-${String(pmM).padStart(2,'0')}` : `${fy2}-${String(fm2).padStart(2,'0')}`;
+        })(),
+        // balloon_at_keys: para construtora deve ser 0 — fc-principal (via
+        // fcUpdateFinanciado) já é líquido de entrada e chaves, então passar
+        // o valor das chaves aqui faz generateSchedule descontá-lo de novo,
+        // zerando o saldo a amortizar (e, com ele, todas as parcelas mensais).
+        // patGenerateSchedule() já fazia isso corretamente; faltava aqui.
+        balloon_at_keys:    isCSave ? null : (readFinField('fin-balloon') || null),
+        keys_balance:       isCSave ? (readFinField('fc-keys-balance') || null) : (readFinField('fin-keys-balance') || null),
+        keys_balance_month: isCSave
+          ? ((G('fc-keys-m')?.value && G('fc-keys-y')?.value) ? (G('fc-keys-y').value + '-' + String(G('fc-keys-m').value).padStart(2,'0')) : null)
+          : ((parseInt(G('fin-keys-balance-m')?.value||'0') && parseInt(G('fin-keys-balance-y')?.value||'0')) ? (G('fin-keys-balance-y').value + '-' + String(G('fin-keys-balance-m').value).padStart(2,'0')) : null),
+        extra_annual_month: parseInt((isCSave ? G('fc-extra-month') : G('fin-extra-month'))?.value||'0')||null,
+        extra_annual_value: isCSave ? (readFinField('fc-extra-value') || null) : (readFinField('fin-extra-value') || null),
+        extra_annual_effect: isCSave ? (G('fc-extra-effect')?.value || 'moment') : (G('fin-extra-effect')?.value || 'moment'),
+        correction_ref_month: isCSave ? (G('fc-correction-ref')?.value || 'minus2') : (G('fb-correction-ref')?.value || 'minus2'),
+        sync_account_id:    parseInt((isCSave ? G('fc-sync-account') : G('fin-sync-account'))?.value||'0') || null,
+        sync_day:           isCSave ? (parseInt(G('fc-due-day')?.value||'0') || null) : (parseInt(G('fin-sync-day')?.value||'0') || null),
+        sync_category:      (isCSave ? G('fc-sync-category') : G('fin-sync-category'))?.value?.trim() || null,
       };
       const finResult = await ff.patFinancingContractSave({ assetId, contractId: _finCurrentContractId, contract });
       _finCurrentContractId = finResult?.contractId || _finCurrentContractId;
 
-      // Register full asset value (pat_history) + purchase transaction.
-      // The "compra" cash outflow should reflect what actually left the buyer's
-      // pocket at signing — the down payment ("entrada/chaves") — not the full
-      // asset price, since the remainder is paid over time via parcela_financiamento.
-      const assetVal   = readFinField('fin-asset-value');
-      const downPayment = readFinField('fin-balloon') || 0;
+      // Register full asset value (pat_history) + purchase transaction(s).
+      // The "compra"/"parcela_compra" cash outflow(s) should reflect what
+      // actually left the buyer's pocket at signing — the down payment
+      // ("entrada/chaves") — not the full asset price, since the remainder
+      // is paid over time via parcela_financiamento.
+      const assetVal   = isCSave ? readFinField('fc-total-value') : readFinField('fb-total-value');
+      const entradaParcelada = !!G(isCSave ? 'fc-entrada-parcelada' : 'fb-entrada-parcelada')?.checked;
+      const downPayment = isCSave ? (readFinField('fc-entrada-total') || 0) : (readFinField('fb-entrada-total') || 0);
       if (assetVal > 0 && contract.first_month) {
         // Set pat_history for first month = full asset value
         await ff.patHistorySet({ assetId, month: contract.first_month, value: assetVal, manual: true });
-        // Create/update a "compra" pat_transaction for the down payment only
+
+        // Existing down-payment movements from a previous save — a single
+        // "compra" (entrada à vista) and/or multiple "parcela_compra" rows
+        // (entrada parcelada). Cleared and recreated below so switching
+        // between the two modes on edit doesn't leave stale movements behind.
         const existingCompra = _pat.txAll.find(t => t.asset_id === assetId && t.tx_type === 'compra');
-        if (downPayment > 0) {
+        const existingParcelasEntrada = _pat.txAll.filter(t => t.asset_id === assetId && t.tx_type === 'parcela_compra');
+
+        if (downPayment > 0 && entradaParcelada) {
+          // Entrada parcelada: uma movimentação "parcela_compra" por parcela
+          // informada no formulário, cada uma em seu próprio mês/valor.
+          if (existingCompra) {
+            await ff.patTxDelete({ id: existingCompra.id, assetId, month: existingCompra.month, tx_type: 'compra', total_value: existingCompra.total_value }).catch(() => {});
+          }
+          for (const t of existingParcelasEntrada) {
+            await ff.patTxDelete({ id: t.id, assetId, month: t.month, tx_type: 'parcela_compra', total_value: t.total_value }).catch(() => {});
+          }
+          const prefix = isCSave ? 'fc' : 'fb';
+          const rows = document.querySelectorAll(`#${prefix}-entrada-parcelas-list .${prefix}-row`);
+          for (const row of rows) {
+            const dateStr = row.querySelector(`.${prefix}-date`)?.value || '';
+            const val2 = _parseInputValue(row.querySelector(`.${prefix}-value`));
+            if (!val2 || !dateStr.match(/^\d{2}\/\d{2}\/\d{4}$/)) continue;
+            const [pd, pm, py] = dateStr.split('/').map(Number);
+            const pMonth = `${py}-${String(pm).padStart(2,'0')}`;
+            const txDate = `${py}-${String(pm).padStart(2,'0')}-${String(pd).padStart(2,'0')}`;
+            await ff.patTxSave({
+              id: null, assetId, month: pMonth,
+              tx_type: 'parcela_compra', total_value: val2,
+              notes: 'Parcela da entrada',
+              tx_date: txDate,
+              skipHistoryEffect: true,
+            });
+          }
+        } else if (downPayment > 0) {
+          // Entrada à vista: remove parcelas antigas (caso a config. anterior
+          // fosse parcelada) e mantém/atualiza a movimentação "compra" única.
+          for (const t of existingParcelasEntrada) {
+            await ff.patTxDelete({ id: t.id, assetId, month: t.month, tx_type: 'parcela_compra', total_value: t.total_value }).catch(() => {});
+          }
           await ff.patTxSave({
             id: existingCompra?.id || null,
             assetId, month: contract.first_month,
@@ -13622,11 +13696,14 @@ async function savePatAsset() {
             notes: 'Entrada / chaves',
             skipHistoryEffect: true,
           });
-        } else if (existingCompra) {
-          // No down payment — remove any previously-registered compra row.
-          // Don't pass tx_type/total_value, so the delete doesn't reverse the
-          // pat_history value we just set above via patHistorySet.
-          await ff.patTxDelete({ id: existingCompra.id, assetId, month: existingCompra.month }).catch(() => {});
+        } else {
+          // Sem entrada — remove qualquer registro anterior (compra única ou parceladas).
+          // Não passa tx_type/total_value, para o delete não reverter o
+          // pat_history que acabamos de fixar acima via patHistorySet.
+          if (existingCompra) await ff.patTxDelete({ id: existingCompra.id, assetId, month: existingCompra.month }).catch(() => {});
+          for (const t of existingParcelasEntrada) {
+            await ff.patTxDelete({ id: t.id, assetId, month: t.month }).catch(() => {});
+          }
         }
       }
     }
@@ -13636,7 +13713,37 @@ async function savePatAsset() {
 
   // 2b. Save purchase value as manual entry (if provided, for non-financed assets)
   // and register a "compra" transaction so the asset has a cost basis for IRR/TWR.
-  if (!financed && !isNaN(val) && val > 0 && month) {
+  // Para opção (i) à vista: val e month vêm dos campos pat-asset-value / pat-asset-month
+  // Para opção (ii) parcelado vendedor: registra o valor total e as parcelas como movimentações
+  if (acqType === 'parcelado_vendedor') {
+    const pvTotal = readFinField('pv-total-value');
+    const pvM = parseInt(G('pv-month-m')?.value || '0');
+    const pvY = parseInt(G('pv-month-y')?.value || '0');
+    const pvMonth = (pvM && pvY) ? `${pvY}-${String(pvM).padStart(2,'0')}` : null;
+    if (pvTotal > 0 && pvMonth) {
+      // Posição do ativo = valor total, seguindo tendência IPCA daqui para frente
+      await ff.patHistorySet({ assetId, month: pvMonth, value: pvTotal, manual: true });
+      // Registra cada parcela como tipo 'parcela_compra' (saldo devedor ao vendedor)
+      const pvRows = document.querySelectorAll('#pv-installments-list .pv-row');
+      const today = new Date().toISOString().slice(0,10);
+      for (const row of pvRows) {
+        const dateStr = row.querySelector('.pv-date')?.value || '';
+        const val2 = parseFloat((row.querySelector('.pv-value')?.value || '').replace(/[R$ .]/g,'').replace(',','.')) || 0;
+        if (!val2 || !dateStr.match(/^\d{2}\/\d{2}\/\d{4}$/)) continue;
+        const [pd, pm, py] = dateStr.split('/').map(Number);
+        const pMonth = `${py}-${String(pm).padStart(2,'0')}`;
+        const txDate = `${py}-${String(pm).padStart(2,'0')}-${String(pd).padStart(2,'0')}`;
+        await ff.patTxSave({
+          id: null, assetId, month: pMonth,
+          tx_type: 'parcela_compra',
+          total_value: val2,
+          notes: 'Parcela ao vendedor',
+          tx_date: txDate,
+        });
+      }
+    }
+  }
+  if (!financed && acqType !== 'parcelado_vendedor' && !isNaN(val) && val > 0 && month) {
     await ff.patHistorySet({ assetId, month, value: val, manual: true });
     const existingCompra = _pat.txAll.find(t => t.asset_id === assetId && t.tx_type === 'compra');
     // Only auto-create/update if there's no manually-edited "compra" row already
@@ -13723,32 +13830,133 @@ async function loadContractIntoForm(contract) {
   const id = _pat.currentAssetId;
   await new Promise(r => setTimeout(r, 20)); // ensure DOM visible
   setupFinancingInputs(); // ensure formatters are attached before setting values
-  if (G('fin-system'))      G('fin-system').value      = contract.system;
-  if (G('fin-index'))       G('fin-index').value       = contract.index_type;
-  if (G('fin-rate'))        { const r = G('fin-rate');        if(r.setValue) r.setValue(contract.annual_rate); else r.value = contract.annual_rate; }
-  if (G('fin-principal'))   { const p = G('fin-principal');   if(p.setValue) p.setValue(contract.principal);   else p.value = contract.principal; }
-  if (G('fin-installments'))G('fin-installments').value= contract.n_installments;
+
+  // Detecta se é contrato de construtora (sistema PLANTA) ou bancário, e
+  // preenche os campos corretos — fc-* para construtora, fin-* para bancário.
+  // Sem isso, ao editar um contrato de construtora os campos fc-* ficam
+  // vazios e salvar novamente gera um cronograma com 0 parcelas.
+  const isConstrutoraContract = contract.system === 'PLANTA';
+
+  const setVal = (elId, value) => {
+    const el = G(elId);
+    if (!el) return;
+    if (el.setValue) el.setValue(value);
+    else el.value = value ?? '';
+  };
+
   const [fy, fm] = (contract.first_month||'').split('-');
-  if (G('fin-first-m'))     G('fin-first-m').value     = parseInt(fm)||'';
-  if (G('fin-first-y'))     G('fin-first-y').value     = parseInt(fy)||'';
-  if (G('fin-balloon'))     { const b = G('fin-balloon');      if(b.setValue) b.setValue(contract.balloon_at_keys||null); else b.value = contract.balloon_at_keys||''; }
-  if (G('fin-keys-balance')) { const kb = G('fin-keys-balance'); if(kb.setValue) kb.setValue(contract.keys_balance||null); else kb.value = contract.keys_balance||''; }
+  const [pmy, pmm] = (contract.purchase_month||contract.first_month||'').split('-');
   const [kby, kbm] = (contract.keys_balance_month||'').split('-');
-  if (G('fin-keys-balance-m')) G('fin-keys-balance-m').value = parseInt(kbm)||'';
-  if (G('fin-keys-balance-y')) G('fin-keys-balance-y').value = parseInt(kby)||'';
-  if (G('fin-extra-month')) G('fin-extra-month').value = contract.extra_annual_month||'';
-  if (G('fin-extra-value')) { const ev = G('fin-extra-value'); if(ev.setValue) ev.setValue(contract.extra_annual_value||null); else ev.value = contract.extra_annual_value||''; }
-  if (G('fin-sync-account')) G('fin-sync-account').value = contract.sync_account_id || '';
-  if (G('fin-sync-day'))     G('fin-sync-day').value     = contract.sync_day || '';
+
+  if (isConstrutoraContract) {
+    if (G('pat-acquisition-type')) { G('pat-acquisition-type').value = 'financiamento_construtora'; patAcquisitionTypeChanged(); }
+    setVal('fc-month-m', parseInt(pmm)||'');
+    setVal('fc-month-y', parseInt(pmy)||'');
+    if (G('fc-index')) G('fc-index').value = contract.index_type || 'INCC';
+    if (G('fc-correction-ref')) G('fc-correction-ref').value = contract.correction_ref_month || 'minus2';
+    setVal('fc-keys-balance', contract.keys_balance || contract.balloon_at_keys || null);
+    setVal('fc-keys-m', parseInt(kbm)||'');
+    setVal('fc-keys-y', parseInt(kby)||'');
+    setVal('fc-principal', contract.principal);
+    if (G('fc-principal')) G('fc-principal').dataset.rawValue = contract.principal;
+    setVal('fc-installments', contract.n_installments);
+    if (G('fc-due-day')) G('fc-due-day').value = contract.sync_day || '';
+    setVal('fc-first-m', parseInt(fm)||'');
+    setVal('fc-first-y', parseInt(fy)||'');
+    if (G('fc-extra-month')) G('fc-extra-month').value = contract.extra_annual_month||'';
+    setVal('fc-extra-value', contract.extra_annual_value||null);
+    if (G('fc-extra-effect')) G('fc-extra-effect').value = contract.extra_annual_effect || 'moment';
+    if (G('fc-sync-account')) G('fc-sync-account').value = contract.sync_account_id || '';
+    populateCategorySelect('fc-sync-category', contract.sync_category || 'Financiamento');
+  } else {
+    if (G('pat-acquisition-type')) { G('pat-acquisition-type').value = 'financiamento_bancario'; patAcquisitionTypeChanged(); }
+    setVal('fb-month-m', parseInt(pmm)||'');
+    setVal('fb-month-y', parseInt(pmy)||'');
+    setVal('fb-total-value', null); // valor total do ativo carregado abaixo via pat_history
+    if (G('fin-system'))      G('fin-system').value      = contract.system;
+    if (G('fin-index'))       G('fin-index').value       = contract.index_type;
+    if (G('fb-correction-ref')) G('fb-correction-ref').value = contract.correction_ref_month || 'minus2';
+    setVal('fin-rate', contract.annual_rate);
+    setVal('fin-principal', contract.principal);
+    if (G('fin-installments'))G('fin-installments').value= contract.n_installments;
+    setVal('fin-first-m', parseInt(fm)||'');
+    setVal('fin-first-y', parseInt(fy)||'');
+    setVal('fin-balloon', contract.balloon_at_keys||null);
+    setVal('fin-keys-balance', contract.keys_balance||null);
+    setVal('fin-keys-balance-m', parseInt(kbm)||'');
+    setVal('fin-keys-balance-y', parseInt(kby)||'');
+    if (G('fin-extra-month')) G('fin-extra-month').value = contract.extra_annual_month||'';
+    setVal('fin-extra-value', contract.extra_annual_value||null);
+    if (G('fin-extra-effect')) G('fin-extra-effect').value = contract.extra_annual_effect || 'moment';
+    if (G('fin-sync-account')) G('fin-sync-account').value = contract.sync_account_id || '';
+    if (G('fin-sync-day'))     G('fin-sync-day').value     = contract.sync_day || '';
+    populateCategorySelect('fin-sync-category', contract.sync_category || 'Financiamento');
+  }
   if (G('fin-contract-label')) G('fin-contract-label').value = contract.label || '';
-  populateCategorySelect('fin-sync-category', contract.sync_category || 'Financiamento');
 
   // Load full asset value from pat_history at the contract's first month
-  // (the "compra" transaction stores only the down payment, not the full price)
+  // (the "compra" transaction stores only the down payment, not the full price).
+  // fin-asset-value is a hidden field (kept only for savePatAsset/readFinField
+  // compatibility) — set .value directly, don't run it through
+  // setupCurrencyInput(), which would flip its type to 'text' and make it
+  // show up as a stray, unlabeled visible input.
   const histEntry = _pat.historyAll.find(h => h.asset_id === id && h.month === contract.first_month);
   if (histEntry && G('fin-asset-value')) {
-    setupCurrencyInput(G('fin-asset-value'));
-    G('fin-asset-value').setValue(histEntry.value);
+    G('fin-asset-value').value = histEntry.value;
+  }
+  if (histEntry) {
+    setVal(isConstrutoraContract ? 'fc-total-value' : 'fb-total-value', histEntry.value);
+  }
+
+  // Restore the "Entrada" (down payment) section — either a single "compra"
+  // movement (entrada à vista) or several "parcela_compra" movements (entrada
+  // parcelada). Without this, reopening the asset always showed this section
+  // blank, and saving again without retyping it would wipe the recorded
+  // down payment down to zero.
+  {
+    const prefix = isConstrutoraContract ? 'fc' : 'fb';
+    const downTxs = _pat.txAll.filter(t => t.asset_id === id && (t.tx_type === 'compra' || t.tx_type === 'parcela_compra'));
+    const compraRow = downTxs.find(t => t.tx_type === 'compra');
+    const parcelaRows = downTxs.filter(t => t.tx_type === 'parcela_compra')
+      .sort((a,b) => (a.tx_date||a.month).localeCompare(b.tx_date||b.month));
+    const checkboxEl = G(`${prefix}-entrada-parcelada`);
+    const listEl = G(`${prefix}-entrada-parcelas-list`);
+    const toggleFn = prefix === 'fc' ? fcToggleEntradaParcelada : fbToggleEntradaParcelada;
+    const checkSumFn = prefix === 'fc' ? fcCheckSum : fbCheckSum;
+    if (parcelaRows.length) {
+      if (checkboxEl) checkboxEl.checked = true;
+      toggleFn();
+      if (listEl) {
+        listEl.innerHTML = '';
+        parcelaRows.forEach(t => {
+          listEl.insertAdjacentHTML('beforeend', _entradaRowHtml(prefix, listEl.children.length));
+          const row = listEl.lastElementChild;
+          const dt = t.tx_date || (t.month.slice(0,7) + '-01');
+          const [py, pm, pd] = dt.split('-').map(Number);
+          const dateInp = row.querySelector(`.${prefix}-date`);
+          if (dateInp) dateInp.value = `${String(pd||1).padStart(2,'0')}/${String(pm).padStart(2,'0')}/${py}`;
+          const valInp = row.querySelector(`.${prefix}-value`);
+          if (valInp) { setupCurrencyInput(valInp); valInp.setValue(t.total_value); }
+        });
+      }
+      setVal(`${prefix}-entrada-total`, parcelaRows.reduce((s,t) => s + t.total_value, 0));
+      checkSumFn();
+    } else if (compraRow) {
+      if (checkboxEl) checkboxEl.checked = false;
+      toggleFn();
+      if (listEl) listEl.innerHTML = '';
+      setVal(`${prefix}-entrada-total`, compraRow.total_value);
+      const dt = compraRow.tx_date || (compraRow.month.slice(0,7) + '-01');
+      const [py, pm, pd] = dt.split('-').map(Number);
+      if (G(`${prefix}-entrada-d`)) G(`${prefix}-entrada-d`).value = pd || '';
+      if (G(`${prefix}-entrada-m`)) G(`${prefix}-entrada-m`).value = pm || '';
+      if (G(`${prefix}-entrada-y`)) G(`${prefix}-entrada-y`).value = py || '';
+    } else {
+      if (checkboxEl) checkboxEl.checked = false;
+      toggleFn();
+      if (listEl) listEl.innerHTML = '';
+      setVal(`${prefix}-entrada-total`, null);
+    }
   }
 
   // Load schedule for preview — only this contract's installments
@@ -13761,13 +13969,22 @@ async function loadContractIntoForm(contract) {
   const closeBtn = G('pat-fin-close-btn');
   if (closeBtn) closeBtn.style.display = isClosed ? 'none' : '';
   if (G('pat-fin-closed-notice')) G('pat-fin-closed-notice').style.display = isClosed ? '' : 'none';
-  ['fin-system','fin-index','fin-rate','fin-principal','fin-installments','fin-first-m','fin-first-y',
-   'fin-balloon','fin-extra-month','fin-extra-value','fin-asset-value','fin-sync-account','fin-sync-day',
-   'fin-sync-category','fin-contract-label'].forEach(elId => {
+  const fieldsToToggle = isConstrutoraContract
+    ? ['fc-month-m','fc-month-y','fc-total-value','fc-entrada-total','fc-index','fc-correction-ref',
+       'fc-keys-balance','fc-keys-m','fc-keys-y','fc-installments','fc-due-day','fc-first-m','fc-first-y',
+       'fc-extra-month','fc-extra-value','fc-extra-effect','fc-sync-account','fc-sync-category']
+    : ['fin-system','fin-index','fin-rate','fin-principal','fin-installments','fin-first-m','fin-first-y',
+       'fin-balloon','fin-extra-month','fin-extra-value','fin-asset-value','fin-sync-account','fin-sync-day',
+       'fin-sync-category','fb-month-m','fb-month-y','fb-total-value'];
+  fieldsToToggle.forEach(elId => {
     const el = G(elId);
     if (el) el.disabled = isClosed;
   });
-  const genBtn = document.querySelector('#pat-financing-section button[onclick="patGenerateSchedule()"]');
+  if (G('fin-contract-label')) G('fin-contract-label').disabled = isClosed;
+  const genBtnSelector = isConstrutoraContract
+    ? '#pat-section-construtora button[onclick="patGenerateSchedule()"]'
+    : '#pat-section-bancario button[onclick="patGenerateSchedule()"]';
+  const genBtn = document.querySelector(genBtnSelector);
   if (genBtn) genBtn.style.display = isClosed ? 'none' : '';
 }
 
@@ -13792,10 +14009,16 @@ async function finNewContract() {
     if (!ok) return;
     await ff.patFinancingContractClose({ contractId: active.id, closedMonth: (()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`})() });
   }
-  // Reset the form to blank values for a new contract
+  // Reset the form to blank values for a new contract — both construtora
+  // (fc-*) and bancário (fin-*/fb-*) fields, since this same flow is shared
+  // between both acquisition types (only the currently-visible section's
+  // fields matter, but clearing both avoids stale data lingering either way).
+  const isConstrutora = G('pat-acquisition-type')?.value === 'financiamento_construtora';
   _finCurrentContractId = null;
   ['fin-system','fin-index','fin-rate','fin-principal','fin-installments','fin-first-m','fin-first-y',
-   'fin-balloon','fin-extra-month','fin-extra-value','fin-sync-account','fin-sync-day','fin-sync-category','fin-contract-label'].forEach(elId => {
+   'fin-balloon','fin-extra-month','fin-extra-value','fin-sync-account','fin-sync-day','fin-sync-category','fin-contract-label',
+   'fc-index','fc-correction-ref','fc-keys-balance','fc-principal','fc-installments','fc-due-day','fc-first-m','fc-first-y',
+   'fc-extra-month','fc-extra-value','fc-extra-effect','fc-sync-account','fc-sync-category'].forEach(elId => {
     const el = G(elId);
     if (!el) return;
     el.disabled = false;
@@ -13804,9 +14027,14 @@ async function finNewContract() {
     else el.value = '';
   });
   populateCategorySelect('fin-sync-category', 'Financiamento');
+  populateCategorySelect('fc-sync-category', 'Financiamento');
   if (G('fin-schedule-preview')) G('fin-schedule-preview').style.display = 'none';
   if (G('fin-schedule-summary')) G('fin-schedule-summary').textContent = '';
-  const genBtn = document.querySelector('#pat-financing-section button[onclick="patGenerateSchedule()"]');
+  if (G('fin-schedule-summary-fb')) G('fin-schedule-summary-fb').textContent = '';
+  const genBtnSelector = isConstrutora
+    ? '#pat-section-construtora button[onclick="patGenerateSchedule()"]'
+    : '#pat-section-bancario button[onclick="patGenerateSchedule()"]';
+  const genBtn = document.querySelector(genBtnSelector);
   if (genBtn) genBtn.style.display = '';
   if (G('pat-fin-close-btn')) G('pat-fin-close-btn').style.display = '';
   if (G('pat-fin-closed-notice')) G('pat-fin-closed-notice').style.display = 'none';
@@ -13890,18 +14118,199 @@ function setupPercentInput(el) {
 }
 
 function setupFinancingInputs() {
-  // Must run AFTER section is visible (offsetParent check)
-  document.querySelectorAll('#pat-financing-section .fin-currency').forEach(el => setupCurrencyInput(el));
-  document.querySelectorAll('#pat-financing-section .fin-percent').forEach(el => setupPercentInput(el));
+  // Aplica máscara em TODOS os campos fin-currency e fin-percent do modal,
+  // independente da seção visível (novos campos fc-* e fb-* incluídos)
+  document.querySelectorAll('#modal-pat-asset .fin-currency').forEach(el => setupCurrencyInput(el));
+  document.querySelectorAll('#modal-pat-asset .fin-percent').forEach(el => setupPercentInput(el));
 }
 
 function patToggleFinancingSection() {
-  const checked = G('pat-financed-check')?.checked;
-  G('pat-financing-section').style.display     = checked ? '' : 'none';
-  G('pat-initial-value-section').style.display = checked ? 'none' : '';
-  // Setup formatters after making section visible
-  if (checked) setTimeout(setupFinancingInputs, 0);
+  // Legacy stub — mantido para compatibilidade com chamadas existentes
+  patAcquisitionTypeChanged();
 }
+
+function patAcquisitionTypeChanged() {
+  const type = G('pat-acquisition-type')?.value || 'vista';
+  const sections = ['pat-section-vista','pat-section-parcelado-vendedor','pat-section-construtora','pat-section-bancario'];
+  const map = {
+    'vista': 'pat-section-vista',
+    'parcelado_vendedor': 'pat-section-parcelado-vendedor',
+    'financiamento_construtora': 'pat-section-construtora',
+    'financiamento_bancario': 'pat-section-bancario',
+  };
+  sections.forEach(s => { const el = G(s); if (el) el.style.display = 'none'; });
+  const target = G(map[type]);
+  if (target) target.style.display = '';
+  // Quando não é "à vista", limpa os campos da seção vista para evitar
+  // que val/month residuais entrem na lógica de compra automática
+  if (type !== 'vista') {
+    const vEl = G('pat-asset-value');
+    if (vEl) { if (vEl.setValue) vEl.setValue(null); else vEl.value = ''; }
+    if (G('pat-asset-month-m')) G('pat-asset-month-m').value = '';
+    if (G('pat-asset-month-y')) G('pat-asset-month-y').value = '';
+  }
+  setTimeout(setupFinancingInputs, 0);
+}
+
+// ── Parcelas manuais: parcelado com vendedor (opção ii) ──
+function _applyDateMask(el) {
+  if (!el || el.dataset.dateMask) return;
+  el.dataset.dateMask = '1';
+  el.maxLength = 10;
+  el.addEventListener('input', () => {
+    let v = el.value.replace(/\D/g,'');
+    if (v.length > 2) v = v.slice(0,2) + '/' + v.slice(2);
+    if (v.length > 5) v = v.slice(0,5) + '/' + v.slice(5);
+    el.value = v.slice(0,10);
+  });
+}
+function pvInstallmentRowHtml(idx) {
+  return `<div class="pv-row" data-idx="${idx}" style="display:flex;gap:6px;align-items:center">
+    <input class="inp pv-date" placeholder="DD/MM/AAAA" style="width:110px;font-size:12px"
+      oninput="patCheckPvSum()" onfocus="this.select()">
+    <input class="inp fin-currency pv-value" placeholder="R$ 0,00" style="width:120px;font-size:12px"
+      oninput="patCheckPvSum()">
+    <button class="btn-icon" onclick="this.closest('.pv-row').remove();patCheckPvSum()" title="Remover">✕</button>
+  </div>`;
+}
+function pvAddInstallmentRow() {
+  const list = G('pv-installments-list');
+  if (!list) return;
+  const idx = list.children.length;
+  list.insertAdjacentHTML('beforeend', pvInstallmentRowHtml(idx));
+  setupFinancingInputs();
+  // Aplica máscara de data na linha recém-adicionada
+  const newRow = list.lastElementChild;
+  if (newRow) _applyDateMask(newRow.querySelector('.pv-date'));
+}
+function pvRepeatLastInstallment() {
+  const list = G('pv-installments-list');
+  if (!list || !list.children.length) { pvAddInstallmentRow(); return; }
+  const last = list.lastElementChild;
+  const lastDate = last.querySelector('.pv-date')?.value || '';
+  const lastVal  = last.querySelector('.pv-value')?.value || '';
+  pvAddInstallmentRow();
+  const newRow = list.lastElementChild;
+  // Avança o mês da data
+  if (lastDate.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+    const [d, m, y] = lastDate.split('/').map(Number);
+    const nd = new Date(y, m-1+1, d);
+    newRow.querySelector('.pv-date').value =
+      `${String(nd.getDate()).padStart(2,'0')}/${String(nd.getMonth()+1).padStart(2,'0')}/${nd.getFullYear()}`;
+  }
+  newRow.querySelector('.pv-value').value = lastVal;
+  patCheckPvSum();
+}
+function _parseInputValue(el) {
+  if (!el) return 0;
+  if (el.rawValue) return el.rawValue() || 0;
+  // Parse valor formatado como moeda (ex: "R$ 250.000,00" ou "250.000,00")
+  return parseFloat((el.value || '').replace(/[R$ \s]/g,'').replace(/\./g,'').replace(',','.')) || 0;
+}
+function patCheckPvSum() {
+  const total = readFinField('pv-total-value');
+  if (!total) return;
+  const rows = document.querySelectorAll('#pv-installments-list .pv-value');
+  let sum = 0;
+  rows.forEach(r => { sum += _parseInputValue(r); });
+  const alertEl = G('pv-sum-alert'); const okEl = G('pv-sum-ok');
+  const diff = Math.abs(sum - total);
+  if (diff < 0.02) {
+    if (alertEl) alertEl.style.display = 'none';
+    if (okEl) { okEl.style.display = ''; okEl.textContent = `✅ Soma das parcelas (${fmtBRL(sum)}) confere com o valor total.`; }
+  } else {
+    if (okEl) okEl.style.display = 'none';
+    if (alertEl) { alertEl.style.display = ''; alertEl.textContent = `⚠️ Soma (${fmtBRL(sum)}) difere do total (${fmtBRL(total)}) em ${fmtBRL(diff)}. Verifique antes de salvar.`; }
+  }
+}
+
+// ── Entrada parcelada: construtora (opção iii) ──
+function fcToggleEntradaParcelada() {
+  const parcelada = G('fc-entrada-parcelada')?.checked;
+  if (G('fc-entrada-vista-row'))    G('fc-entrada-vista-row').style.display    = parcelada ? 'none' : 'flex';
+  if (G('fc-entrada-parcelas-section')) G('fc-entrada-parcelas-section').style.display = parcelada ? '' : 'none';
+}
+function _entradaRowHtml(prefix, idx) {
+  return `<div class="${prefix}-row" data-idx="${idx}" style="display:flex;gap:6px;align-items:center">
+    <input class="inp ${prefix}-date" placeholder="DD/MM/AAAA" style="width:110px;font-size:12px"
+      oninput="_applyDateMask(this);${prefix}CheckSum()" onfocus="this.select()">
+    <input class="inp fin-currency ${prefix}-value" placeholder="R$ 0,00" style="width:120px;font-size:12px"
+      oninput="${prefix}CheckSum()">
+    <button class="btn-icon" onclick="this.closest('.${prefix}-row').remove();${prefix}CheckSum()" title="Remover">✕</button>
+  </div>`;
+}
+function _entradaCheckSum(prefix, totalId, alertId, okId) {
+  const total = readFinField(totalId);
+  if (!total) return;
+  const rows = document.querySelectorAll(`#${prefix}-entrada-parcelas-list .${prefix}-value`);
+  let sum = 0;
+  rows.forEach(r => { sum += _parseInputValue(r); });
+  const diff = Math.abs(sum - total);
+  const alertEl = G(alertId); const okEl = G(okId);
+  if (diff < 0.02) {
+    if (alertEl) alertEl.style.display = 'none';
+    if (okEl) { okEl.style.display = ''; okEl.textContent = `✅ Soma das parcelas (${fmtBRL(sum)}) confere com o total.`; }
+  } else {
+    if (okEl) okEl.style.display = 'none';
+    if (alertEl) { alertEl.style.display = ''; alertEl.textContent = `⚠️ Soma (${fmtBRL(sum)}) difere do total (${fmtBRL(total)}) em ${fmtBRL(diff)}.`; }
+  }
+}
+function _repeatEntradaRow(prefix, listId) {
+  const list = G(listId);
+  if (!list) return;
+  const last = list.lastElementChild;
+  const lastDate = last?.querySelector(`.${prefix}-date`)?.value || '';
+  const lastVal  = last?.querySelector(`.${prefix}-value`)?.value || '';
+  list.insertAdjacentHTML('beforeend', _entradaRowHtml(prefix, list.children.length));
+  setupFinancingInputs();
+  const newRow = list.lastElementChild;
+  if (lastDate.match(/^\d{2}\/\d{2}\/\d{4}$/)) {
+    const [d, m, y] = lastDate.split('/').map(Number);
+    const nd = new Date(y, m-1+1, d);
+    newRow.querySelector(`.${prefix}-date`).value =
+      `${String(nd.getDate()).padStart(2,'0')}/${String(nd.getMonth()+1).padStart(2,'0')}/${nd.getFullYear()}`;
+  }
+  newRow.querySelector(`.${prefix}-value`).value = lastVal;
+}
+function fcAddEntradaRow() {
+  const list = G('fc-entrada-parcelas-list');
+  if (!list) return;
+  list.insertAdjacentHTML('beforeend', _entradaRowHtml('fc', list.children.length));
+  setupFinancingInputs();
+  const newRow = list.lastElementChild;
+  if (newRow) _applyDateMask(newRow.querySelector('.fc-date'));
+}
+function fcRepeatEntradaRow() { _repeatEntradaRow('fc', 'fc-entrada-parcelas-list'); fcCheckSum(); }
+function fcCheckSum() { _entradaCheckSum('fc', 'fc-entrada-total', 'fc-entrada-sum-alert', 'fc-entrada-sum-ok'); }
+function fcUpdateFinanciado() {
+  const total = readFinField('fc-total-value') || 0;
+  const entrada = readFinField('fc-entrada-total') || 0;
+  const chaves = readFinField('fc-keys-balance') || 0;
+  const fin = Math.max(0, total - entrada - chaves);
+  const el = G('fc-principal');
+  if (el) {
+    if (el.setValue) el.setValue(fin);
+    else el.value = fmtBRL(fin);
+    el.dataset.rawValue = fin; // guarda valor numérico para readFinField
+  }
+}
+
+// ── Entrada parcelada: bancário (opção iv) ──
+function fbToggleEntradaParcelada() {
+  const parcelada = G('fb-entrada-parcelada')?.checked;
+  if (G('fb-entrada-vista-row'))    G('fb-entrada-vista-row').style.display    = parcelada ? 'none' : 'flex';
+  if (G('fb-entrada-parcelas-section')) G('fb-entrada-parcelas-section').style.display = parcelada ? '' : 'none';
+}
+function fbAddEntradaRow() {
+  const list = G('fb-entrada-parcelas-list');
+  if (!list) return;
+  list.insertAdjacentHTML('beforeend', _entradaRowHtml('fb', list.children.length));
+  setupFinancingInputs();
+  const newRow = list.lastElementChild;
+  if (newRow) _applyDateMask(newRow.querySelector('.fb-date'));
+}
+function fbRepeatEntradaRow() { _repeatEntradaRow('fb', 'fb-entrada-parcelas-list'); fbCheckSum(); }
+function fbCheckSum() { _entradaCheckSum('fb', 'fb-entrada-total', 'fb-entrada-sum-alert', 'fb-entrada-sum-ok'); }
 
 function patFinancingRowHtml(){}  // legacy stub (replaced by contract system)
 
@@ -13911,12 +14320,13 @@ let _finSchedule = []; // generated schedule for preview
 // Quando o usuário preenche 3 dos 4 campos, calcula o 4º automaticamente.
 // "justEditedId" é o campo que o usuário acabou de editar — nunca sobrescrevemos
 // esse, só os outros (e só se eles ainda estiverem vazios ou já eram auto-preenchidos).
-function finAutoFillTotal(justEditedId) {
+function fbAutoFillTotal(justEditedId) {
   // O campo que o usuário acabou de editar deixa de ser "calculado" — é manual agora
   const editedLbl = G(justEditedId)?.closest('.field')?.querySelector('.lbl .fin-autofill-tag');
   if (editedLbl) editedLbl.remove();
 
-  const FIELDS = ['fin-balloon', 'fin-principal', 'fin-keys-balance', 'fin-asset-value'];
+  // Valor total do ativo = Parcela não financiada (entrada) + Valor financiado
+  const FIELDS = ['fb-total-value', 'fb-entrada-total', 'fin-principal'];
   const vals = {};
   FIELDS.forEach(id => {
     const el = G(id);
@@ -13925,20 +14335,18 @@ function finAutoFillTotal(justEditedId) {
   });
 
   const empty = FIELDS.filter(id => vals[id] === null);
-  // Só calcula quando exatamente 1 dos 4 campos está vazio (os outros 3 preenchidos)
+  // Só calcula quando exatamente 1 dos 3 campos está vazio (os outros 2 preenchidos)
   if (empty.length !== 1) return;
 
-  const target = empty[0];
-  const entrada     = vals['fin-balloon']      ?? 0;
-  const financiado   = vals['fin-principal']    ?? 0;
-  const saldoChaves = vals['fin-keys-balance'] ?? 0;
-  const total       = vals['fin-asset-value']  ?? 0;
+  const target    = empty[0];
+  const total     = vals['fb-total-value']   ?? 0;
+  const entrada   = vals['fb-entrada-total'] ?? 0;
+  const financiado = vals['fin-principal']   ?? 0;
 
   let computed;
-  if (target === 'fin-asset-value') computed = entrada + financiado + saldoChaves;
-  else if (target === 'fin-balloon') computed = total - financiado - saldoChaves;
-  else if (target === 'fin-principal') computed = total - entrada - saldoChaves;
-  else /* fin-keys-balance */ computed = total - entrada - financiado;
+  if (target === 'fb-total-value') computed = entrada + financiado;
+  else if (target === 'fb-entrada-total') computed = total - financiado;
+  else /* fin-principal */ computed = total - entrada;
 
   if (computed < 0) return; // não preenche valores negativos — provavelmente os outros estão errados
 
@@ -13961,29 +14369,52 @@ function readFinField(id) {
   const el = G(id);
   if (!el) return 0;
   if (el.rawValue) return el.rawValue() || 0;
-  return parseFloat(el.value.replace(/[R$\u00a0\s.]/g,'').replace(',','.')) || 0;
+  // Campo readonly com valor numérico salvo em data-rawValue (ex: fc-principal)
+  if (el.dataset.rawValue !== undefined && el.dataset.rawValue !== '') {
+    return parseFloat(el.dataset.rawValue) || 0;
+  }
+  return parseFloat((el.value || '').replace(/[R$ \s.]/g,'').replace(',','.')) || 0;
 }
 
 async function patGenerateSchedule() {
-  const system      = G('fin-system')?.value || 'SAC';
-  const index_type  = G('fin-index')?.value  || 'none';
-  const annual_rate = readFinField('fin-rate');
-  const principal   = readFinField('fin-principal');
-  const n           = parseInt(G('fin-installments')?.value || '0');
-  const fm          = parseInt(G('fin-first-m')?.value || '0');
-  const fy          = parseInt(G('fin-first-y')?.value || '0');
-  const balloon     = readFinField('fin-balloon') || 0;
-  const extraMonth  = parseInt(G('fin-extra-month')?.value || '0') || null;
-  const extraValue  = readFinField('fin-extra-value') || null;
+  const acqType = G('pat-acquisition-type')?.value || 'financiamento_bancario';
+  const isConstrutora = acqType === 'financiamento_construtora';
+
+  // Para construtora: usa campos fc-*, sistema sempre PLANTA
+  const system = isConstrutora ? 'PLANTA' : (G('fin-system')?.value || 'SAC');
+  const index_type = isConstrutora ? (G('fc-index')?.value || 'INCC') : (G('fin-index')?.value || 'none');
+  const annual_rate = isConstrutora ? 0 : readFinField('fin-rate');
+  const principal   = isConstrutora ? readFinField('fc-principal') : readFinField('fin-principal');
+  const n           = parseInt((isConstrutora ? G('fc-installments') : G('fin-installments'))?.value || '0');
+  const fm          = parseInt((isConstrutora ? G('fc-first-m') : G('fin-first-m'))?.value || '0');
+  const fy          = parseInt((isConstrutora ? G('fc-first-y') : G('fin-first-y'))?.value || '0');
+  const balloon     = isConstrutora ? (readFinField('fc-keys-balance') || 0) : (readFinField('fin-balloon') || 0);
+  const extraMonth  = parseInt((isConstrutora ? G('fc-extra-month') : G('fin-extra-month'))?.value || '0') || null;
+  const extraValue  = isConstrutora ? (readFinField('fc-extra-value') || null) : (readFinField('fin-extra-value') || null);
+  const extraEffect = isConstrutora ? (G('fc-extra-effect')?.value || 'moment') : (G('fin-extra-effect')?.value || 'moment');
+  const correctionRef = isConstrutora ? (G('fc-correction-ref')?.value || 'minus2') : (G('fb-correction-ref')?.value || 'minus2');
+  // Mês de aquisição (compra) — base real para a correção monetária,
+  // distinto do mês da primeira parcela (first_month).
+  const pmM = parseInt((isConstrutora ? G('fc-month-m') : G('fb-month-m'))?.value || '0');
+  const pmY = parseInt((isConstrutora ? G('fc-month-y') : G('fb-month-y'))?.value || '0');
+  const purchase_month = (pmM && pmY) ? `${pmY}-${String(pmM).padStart(2,'0')}` : null;
 
   if (!principal || !n || !fm || !fy) { toast('Preencha valor financiado, nº de parcelas e primeira parcela'); return; }
   const first_month = `${fy}-${String(fm).padStart(2,'0')}`;
 
   // Call backend schedule generation
   const assetId = parseInt(G('pat-asset-id')?.value || '0');
-  const contract = { label: G('fin-contract-label')?.value?.trim() || null,
+  const contract = {
+    label: G('fin-contract-label')?.value?.trim() || null,
     system, index_type, annual_rate, principal, n_installments: n,
-    first_month, balloon_at_keys: balloon, extra_annual_month: extraMonth, extra_annual_value: extraValue };
+    first_month,
+    purchase_month: purchase_month || first_month, // fallback se campo vazio
+    // Para construtora: balloon_at_keys = 0 (principal já é líquido de entrada e chaves)
+    // Para bancário: balloon pode existir mas não é usado atualmente neste modal
+    balloon_at_keys: 0,
+    extra_annual_month: extraMonth, extra_annual_value: extraValue,
+    extra_annual_effect: extraEffect, correction_ref_month: correctionRef,
+  };
 
   if (assetId) {
     // Warn if any installments have already been confirmed/reconciled — regenerating
@@ -14003,7 +14434,11 @@ async function patGenerateSchedule() {
     _finSchedule = result?.schedule || [];
   } else {
     // Preview only (asset not yet saved) — use a local calculation
-    _finSchedule = _localGenerateSchedule(contract);
+    // Busca os índices atualizados (cache local) para aplicar correção no preview
+    if (!window._financingIndexesCache) {
+      window._financingIndexesCache = await ff.financingGetIndexes().catch(() => ({}));
+    }
+    _finSchedule = _localGenerateSchedule(contract, window._financingIndexesCache);
   }
 
   patRenderSchedulePreview(_finSchedule);
@@ -14012,45 +14447,130 @@ async function patGenerateSchedule() {
     `${_finSchedule.length} parcelas — Total: ${fmtBRL(totalInstall)} — Saldo final: ${fmtBRL(_finSchedule.at(-1)?.balance_end ?? 0)}`;
 }
 
-function _localGenerateSchedule({ system, annual_rate, principal, n_installments, first_month, balloon_at_keys, extra_annual_month, extra_annual_value }) {
+// Calcula o mês de referência deslocado (espelha _correctionRefMonth do main.js)
+function _localCorrectionRefMonth(purchaseMonth, refMode) {
+  if (!purchaseMonth) return purchaseMonth;
+  const offset = refMode === 'minus1' ? -1 : refMode === 'same' ? 0 : -2;
+  const [y, m] = purchaseMonth.split('-').map(Number);
+  const total = (y * 12 + (m - 1)) + offset;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
+  return `${ny}-${String(nm).padStart(2,'0')}`;
+}
+// Fator de correção acumulado entre o mês-base e o mês alvo (espelha main.js)
+function _localAccumulatedFactor(indexes, indexType, refMode, baseMonth, targetMonth) {
+  if (!indexType || indexType === 'none' || !indexes) return 1;
+  const idx = indexes[indexType];
+  if (!idx) return 1;
+  const refTarget = _localCorrectionRefMonth(targetMonth, refMode);
+  const refBase = _localCorrectionRefMonth(baseMonth, refMode);
+  if (refTarget <= refBase) return 1;
+  let factor = 1;
+  let [y, m] = refBase.split('-').map(Number);
+  let cur = `${y}-${String(m).padStart(2,'0')}`;
+  while (cur < refTarget) {
+    const rate = idx[cur] || 0;
+    factor *= (1 + rate);
+    m++; if (m > 12) { m = 1; y++; }
+    cur = `${y}-${String(m).padStart(2,'0')}`;
+  }
+  return factor;
+}
+
+function _localGenerateSchedule({ system, annual_rate, principal, n_installments, first_month, purchase_month, balloon_at_keys, extra_annual_month, extra_annual_value, extra_annual_effect, index_type, correction_ref_month }, indexes) {
+  // Espelho exato de generateSchedule no main.js — manter sincronizados.
   const r = (annual_rate / 100) / 12;
-  let remaining = principal - (balloon_at_keys || 0);
+  const effect = extra_annual_effect || 'moment';
+  const idxType = index_type || 'none';
+  const refMode = correction_ref_month || 'minus2';
+  let remainingPrincipal = principal - (balloon_at_keys || 0);
+  if (remainingPrincipal < 0) remainingPrincipal = 0;
+
   function priceInstFor(bal, rate, monthsLeft) {
     if (monthsLeft <= 0) return 0;
     return rate > 0 ? bal * rate * Math.pow(1+rate, monthsLeft) / (Math.pow(1+rate, monthsLeft) - 1) : bal / monthsLeft;
   }
-  let balance = remaining;
-  let cur = first_month;
+
   const rows = [];
+
   if (system === 'PLANTA') {
+    let basePrincipal = remainingPrincipal;
+    if (effect === 'origin' && extra_annual_month && extra_annual_value) {
+      let tmpCur = first_month;
+      let nAnuais = 0;
+      for (let i = 0; i < n_installments; i++) {
+        if (parseInt(tmpCur.split('-')[1]) === extra_annual_month) nAnuais++;
+        const [y2, m2] = tmpCur.split('-').map(Number);
+        tmpCur = m2 === 12 ? `${y2+1}-01` : `${y2}-${String(m2+1).padStart(2,'0')}`;
+      }
+      basePrincipal = Math.max(0, remainingPrincipal - nAnuais * extra_annual_value);
+    }
+    let balance = remainingPrincipal;
+    const fixedMonthlyAmort = effect === 'origin' ? basePrincipal / n_installments : 0;
+    let cur = first_month;
+    let prevFactor = 1;
     for (let i = 0; i < n_installments; i++) {
       const monthsRemaining = n_installments - i;
-      const amort = balance / monthsRemaining; // recalculado a cada mês — extras não encurtam o prazo
-      const extra = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month) ? extra_annual_value : 0;
+      const curFactor = _localAccumulatedFactor(indexes, idxType, refMode, purchase_month || first_month, cur);
+      const correctionAmt = balance * (curFactor / prevFactor - 1);
+      balance = balance + correctionAmt;
+      prevFactor = curFactor;
+
+      const amort = effect === 'origin' ? fixedMonthlyAmort * curFactor : balance / monthsRemaining;
+      const isExtraMonth = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month);
+      const extra = isExtraMonth ? (extra_annual_value * curFactor) : 0;
       balance = Math.max(0, balance - amort - extra);
+      // Linha única por mês (mensal + anual somadas) — espelha generateSchedule do main.js
       rows.push({ month: cur, installment: Math.round((amort+extra)*100)/100,
-        principal: Math.round((amort+extra)*100)/100, interest: 0,
-        correction: 0, balance_end: Math.round(balance*100)/100, is_projection: 1 });
+        principal: Math.round((amort+extra)*100)/100, interest: 0, correction: Math.round(correctionAmt*100)/100,
+        balance_end: Math.round(balance*100)/100, is_projection: 1,
+        annual_component: Math.round(extra*100)/100 });
       const [y, m] = cur.split('-').map(Number);
-      cur = m===12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
+      cur = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
     }
     return rows;
   }
+
+  // SAC / PRICE / SAM
+  let baseBalance = remainingPrincipal;
+  if (effect === 'origin' && extra_annual_month && extra_annual_value) {
+    let tmpCur = first_month;
+    let nAnuais = 0;
+    for (let i = 0; i < n_installments; i++) {
+      if (parseInt(tmpCur.split('-')[1]) === extra_annual_month) nAnuais++;
+      const [y2, m2] = tmpCur.split('-').map(Number);
+      tmpCur = m2 === 12 ? `${y2+1}-01` : `${y2}-${String(m2+1).padStart(2,'0')}`;
+    }
+    baseBalance = Math.max(0, remainingPrincipal - nAnuais * extra_annual_value);
+  }
+  let balance = remainingPrincipal;
+  let baseForCalc = baseBalance;
+  let cur = first_month;
+  let prevFactorSac = 1;
   for (let i = 0; i < n_installments; i++) {
     const monthsRemaining = n_installments - i;
-    const interest = balance * r;
+    const curFactorSac = _localAccumulatedFactor(indexes, idxType, refMode, purchase_month || first_month, cur);
+    const factorStep = curFactorSac / prevFactorSac;
+    const correctionAmt = balance * (factorStep - 1);
+    balance = balance * factorStep;
+    baseForCalc = baseForCalc * factorStep;
+    prevFactorSac = curFactorSac;
+
+    const interest = (effect === 'origin' ? baseForCalc : balance) * r;
     let amort, install;
-    if (system === 'SAC') { amort = balance / monthsRemaining; install = amort + interest; }
-    else if (system === 'PRICE') { install = priceInstFor(balance, r, monthsRemaining); amort = install - interest; }
-    else { const sacAm = balance / monthsRemaining; const si = sacAm + interest; const pi = priceInstFor(balance, r, monthsRemaining); install=(si+pi)/2; amort=install-interest; }
-    const extra = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month) ? extra_annual_value : 0;
+    if (system === 'SAC') { amort = (effect === 'origin' ? baseForCalc : balance) / monthsRemaining; install = amort + interest; }
+    else if (system === 'PRICE') { install = priceInstFor(effect === 'origin' ? baseForCalc : balance, r, monthsRemaining); amort = install - interest; }
+    else { const b = effect === 'origin' ? baseForCalc : balance; const sacAm = b/monthsRemaining; const si = sacAm+interest; const pi = priceInstFor(b, r, monthsRemaining); install=(si+pi)/2; amort=install-interest; }
+    const isExtraMonth = (extra_annual_month && extra_annual_value && parseInt(cur.split('-')[1]) === extra_annual_month);
+    const extra = (isExtraMonth && effect !== 'origin') ? (extra_annual_value * curFactorSac) : 0;
     balance = Math.max(0, balance - amort - extra);
+    // Linha única por mês (mensal + anual somadas) — espelha generateSchedule do main.js
     rows.push({ month: cur, installment: Math.round((install+extra)*100)/100,
       principal: Math.round((amort+extra)*100)/100, interest: Math.round(interest*100)/100,
-      correction: 0, balance_end: Math.round(balance*100)/100, is_projection: 1 });
+      correction: Math.round(correctionAmt*100)/100, balance_end: Math.round(balance*100)/100, is_projection: 1,
+      annual_component: Math.round(extra*100)/100 });
     const [y, m] = cur.split('-').map(Number);
-    cur = m===12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
-    // Sem corte antecipado por saldo zerado — sempre gera as N parcelas completas.
+    cur = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
   }
   return rows;
 }
@@ -14314,7 +14834,10 @@ async function debtGenerateSchedule() {
     _debtSchedule = result?.schedule || [];
     _pat.debtInstallments[debtId] = _debtSchedule;
   } else {
-    _debtSchedule = _localGenerateSchedule(contract);
+    if (!window._financingIndexesCache) {
+      window._financingIndexesCache = await ff.financingGetIndexes().catch(() => ({}));
+    }
+    _debtSchedule = _localGenerateSchedule(contract, window._financingIndexesCache);
   }
 
   debtRenderSchedulePreview(_debtSchedule);
@@ -16412,10 +16935,11 @@ async function computeEvMA12LucroData() {
     const allMonths = [...new Set(Object.keys(byCatFull))].filter(m => m <= curM2).sort();
     if (!allMonths.length) return;
 
-    // Determine IPCA ref month (mesma lógica usada na Evolução, agora mensal)
-    if (!Object.keys(_ev.ipcaMonthly).length) await loadEvolucaoConfig().catch(() => {});
+    // Determine IPCA ref year (same logic as refreshEvolucao)
+    const ipcaYears = Object.keys(_ev.ipca||{}).map(Number).filter(y => y < now2.getFullYear()).sort((a,b)=>a-b);
+    const refYear   = ipcaYears.length ? ipcaYears[ipcaYears.length-1] : null;
     const useIPCA   = G('ev-ipca')?.checked !== false;
-    const corr = (v, m) => useIPCA ? inflateMonth(v, m, now2.getFullYear()) : (v || 0);
+    const corr = (v, m) => useIPCA && refYear ? inflateMonth(v, m, refYear) : (v || 0);
 
     const allSummary = computeSummaryFromByCat(allMonths, byCatFull);
     const allInc = allMonths.map(m => corr(allSummary[m]?.income   || 0, m));
