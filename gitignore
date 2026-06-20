@@ -34,3 +34,10 @@ cruzeiro_data_*.json
 backups/
 *.db
 *.db.bak
+
+# Arquivos temporários do Supabase CLI — contêm referências de sessão local,
+# não devem ser versionados (cada máquina gera os seus)
+supabase/.temp/
+
+# Estado de importação em andamento — específico da máquina local
+_import_pending.json
