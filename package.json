@@ -1,6 +1,6 @@
 {
   "name": "cruzeiro",
-  "version": "4.15.5",
+  "version": "4.15.6",
   "description": "Gestão financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
@@ -39,7 +39,7 @@
           "arch": ["x64"]
         }
       ],
-      "artifactName": "Cruzeiro-Setup-${version}.exe"
+      "artifactName": "Cruzeiro-${version}-portable.exe"
     },
     "publish": {
       "provider": "github",
@@ -69,6 +69,7 @@
       "node_modules/sql.js/**/*"
     ],
     "nsis": {
+      "artifactName": "Cruzeiro-Setup-${version}.exe",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
