@@ -472,6 +472,7 @@ async function initDB() {
     UNIQUE(asset_id, month))`); } catch(e) {}
   // v4.5.9 / v4.7.2: late feature columns (also re-applied after DB decryption)
   ensureLateColumns();
+  _backfillMissingFinancingTx();
   save();
 }
 
@@ -545,6 +546,36 @@ function ensureLateColumns() {
     'ALTER TABLE recurring ADD COLUMN pat_debt_id INTEGER',
   ];
   alters.forEach(sql => { try { db.run(sql); } catch(e) {} });
+}
+
+// Cria retroativamente a movimentação "parcela_financiamento" para qualquer
+// parcela de financiamento já marcada como paga (pat_financing.paid=1) que
+// não tenha uma pat_transactions correspondente. Isso acontecia quando a
+// parcela era marcada como paga pela edição inline na tabela (em vez do
+// formulário de lançamento) — faltava criar essa movimentação, fazendo a
+// parcela desaparecer do fluxo de caixa e inflar a TIR do ativo conforme
+// mais parcelas eram pagas por esse caminho. Idempotente — só insere o que
+// realmente falta, seguro de rodar a cada início.
+function _backfillMissingFinancingTx() {
+  try {
+    const missing = all(`
+      SELECT pf.asset_id, pf.month, pf.installment
+      FROM pat_financing pf
+      WHERE pf.paid = 1 AND pf.installment > 0
+        AND NOT EXISTS (
+          SELECT 1 FROM pat_transactions pt
+          WHERE pt.asset_id = pf.asset_id
+            AND substr(pt.month,1,7) = substr(pf.month,1,7)
+            AND pt.tx_type = 'parcela_financiamento'
+        )
+    `);
+    missing.forEach(row => {
+      run(`INSERT INTO pat_transactions (asset_id, month, tx_type, total_value, notes)
+           VALUES (?, ?, 'parcela_financiamento', ?, ?)`,
+        [row.asset_id, row.month.slice(0,7), row.installment, 'Parcela paga (registro retroativo)']);
+    });
+    if (missing.length) console.log(`[financing backfill] ${missing.length} movimentação(ões) de parcela paga restauradas`);
+  } catch(e) { console.warn('[financing backfill] falhou:', e.message); }
 }
 
 // ── DB HELPERS ──
@@ -3365,9 +3396,10 @@ function _syncKeysBalanceToBank({ assetId, contractId, accountId, syncDay, categ
 }
 
 function _syncInstallmentsToBank({ schedule, accountId, syncDay, category, assetId, contractId, debtId, memoPrefix }) {
-  if (!accountId || !syncDay) return { created: 0 };
+  if (!accountId || !syncDay) return { created: 0, updated: 0 };
   const today = new Date().toISOString().slice(0,10);
   let created = 0;
+  let updated = 0;
 
   schedule.forEach(row => {
     const month = row.month.slice(0,7); // "YYYY-MM"
@@ -3391,8 +3423,19 @@ function _syncInstallmentsToBank({ schedule, accountId, syncDay, category, asset
     const whereLink = assetId
       ? 'pat_asset_id=? AND pat_installment_month=?'
       : 'pat_debt_id=? AND pat_installment_month=?';
-    const existing = first(`SELECT id FROM transactions WHERE ${whereLink}`, [assetId || debtId, month]);
-    if (existing) return;
+    const existing = first(`SELECT id, amount, cleared FROM transactions WHERE ${whereLink}`, [assetId || debtId, month]);
+    if (existing) {
+      // Mantém o valor sincronizado com o cronograma recalculado (correção
+      // monetária mensal) — só enquanto a transação ainda não foi conferida
+      // pelo usuário. Uma vez confirmada como realmente paga, o valor nunca
+      // é alterado retroativamente.
+      const newAmount = -Math.abs(row.installment);
+      if (existing.cleared !== 1 && Math.abs((existing.amount ?? 0) - newAmount) > 0.005) {
+        run('UPDATE transactions SET amount=? WHERE id=?', [newAmount, existing.id]);
+        updated++;
+      }
+      return;
+    }
 
     run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_debt_id,pat_installment_month)
          VALUES (?,?,?,?,?,0,?,?,?)`,
@@ -3401,8 +3444,8 @@ function _syncInstallmentsToBank({ schedule, accountId, syncDay, category, asset
     created++;
   });
 
-  if (created) save();
-  return { created };
+  if (created || updated) save();
+  return { created, updated };
 }
 
 // When a synced installment transaction is marked cleared (conferido), mark the
@@ -3943,6 +3986,18 @@ function _regenerateProjectedSchedule(assetId, contractId) {
         [assetId, contractId, row.month, row.installment, row.principal, row.interest, row.correction, row.balance_end]);
     }
   });
+  // Mantém as transações futuras já lançadas na conta sincronizada
+  // atualizadas com o cronograma recém-recalculado (correção monetária
+  // mensal) — sem isso, elas ficavam congeladas no valor de quando foram
+  // criadas, mesmo com o índice (TR/IGP-M/INCC) atualizando todo mês.
+  if (contract.sync_account_id && contract.sync_day) {
+    const asset = first('SELECT name FROM pat_assets WHERE id=?', [assetId]);
+    _syncInstallmentsToBank({
+      schedule, assetId, contractId,
+      accountId: contract.sync_account_id, syncDay: contract.sync_day, category: contract.sync_category,
+      memoPrefix: `Parcela financiamento — ${contract.label ? contract.label+' — ' : ''}${asset?.name || 'ativo'}`,
+    });
+  }
 }
 
 function _regenerateProjectedDebtSchedule(debtId) {
@@ -3958,6 +4013,16 @@ function _regenerateProjectedDebtSchedule(debtId) {
         [debtId, row.month, row.installment, row.principal, row.interest, row.correction, row.balance_end]);
     }
   });
+  // Mesmo motivo do ativo imobilizado acima — mantém as transações futuras
+  // já lançadas sincronizadas com o cronograma recalculado.
+  if (contract.sync_account_id && contract.sync_day) {
+    const debt = first('SELECT name FROM personal_debts WHERE id=?', [debtId]);
+    _syncInstallmentsToBank({
+      schedule, debtId,
+      accountId: contract.sync_account_id, syncDay: contract.sync_day, category: contract.sync_category,
+      memoPrefix: `Parcela dívida — ${debt?.name || 'dívida pessoal'}`,
+    });
+  }
 }
 
 function _rebalanceSchedule(assetId) {
@@ -5460,7 +5525,7 @@ ipcMain.handle('settings:reset-password', async (_, { code, newPassword }) => {
   db = new SQL.Database(plainDB);
   db.run('PRAGMA foreign_keys = ON;');
   _dbPendingDecrypt = false;
-  try { ensureLateColumns(); } catch(e) {}
+  try { ensureLateColumns(); _backfillMissingFinancingTx(); } catch(e) {}
 
   // Save re-encrypted DB
   save();
@@ -5499,7 +5564,7 @@ ipcMain.handle('settings:check-password', (_, pw) => {
       _encryptedDBBuf  = null;
       _dbPendingDecrypt = false;
       // Run deferred startup tasks that were skipped during pending decrypt
-      try { ensureLateColumns(); save(); } catch(e) {}
+      try { ensureLateColumns(); _backfillMissingFinancingTx(); save(); } catch(e) {}
       try { migrateRecurring(); } catch(e) {}
       setImmediate(() => {
         try { const recs = all('SELECT * FROM recurring WHERE active=1'); recs.forEach(rec => syncRecurringTxns(rec)); save(); } catch(e) {}
@@ -5635,7 +5700,7 @@ ipcMain.handle('login:check', (_, pw) => {
       _encryptedDBBuf  = null;
       _dbPendingDecrypt = false;
       // Run deferred startup tasks
-      try { ensureLateColumns(); save(); } catch(e) {}
+      try { ensureLateColumns(); _backfillMissingFinancingTx(); save(); } catch(e) {}
       try { migrateRecurring(); } catch(e) {}
       setImmediate(() => {
         try {

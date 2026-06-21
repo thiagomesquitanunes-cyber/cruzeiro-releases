@@ -51,6 +51,7 @@ async function pushBalances(all, userId) {
   });
 
   await sb.upsert('mobile_balances', rows, 'user_id,account_name');
+  await sb.pruneNotIn('mobile_balances', userId, 'account_name', accounts.map(a => a.name));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -93,11 +94,9 @@ async function pushTransactions(all, userId) {
   }
 
   // Remove transações antigas que saíram da janela de 90 dias
-  // (Supabase: DELETE WHERE user_id=? AND date < fromDate)
-  await sb.remove('mobile_transactions', {
-    user_id: userId,
-    // filtro adicional via query string — feito manualmente abaixo
-  }).catch(() => {}); // ignora erros de limpeza
+  // (qualquer desktop_id que não esteja mais no conjunto atual de 90 dias)
+  await sb.pruneNotIn('mobile_transactions', userId, 'desktop_id', rows.map(r => r.desktop_id))
+    .catch(() => {}); // ignora erros de limpeza para não interromper o sync
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -130,6 +129,8 @@ async function pushBudgets(all, userId) {
   }));
 
   await sb.upsert('mobile_budgets', rows, 'user_id,month,category');
+  await sb.pruneNotIn('mobile_budgets', userId, 'category', budgets.map(b => b.category))
+    .catch(() => {});
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -196,6 +197,7 @@ async function pushGoals(all, userId) {
   });
 
   await sb.upsert('mobile_goals', rows, 'user_id,desktop_id');
+  await sb.pruneNotIn('mobile_goals', userId, 'desktop_id', goals.map(g => String(g.id)));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -220,14 +222,7 @@ async function pushScheduled(all, userId) {
   }));
 
   await sb.upsert('mobile_scheduled', rows, 'user_id,desktop_id');
-
-  // Remove recorrências inativas que ainda estejam no Supabase
-  const activeIds = rows.map(r => r.desktop_id);
-  if (activeIds.length) {
-    // Mantém apenas os IDs ativos — remove os demais via NOT IN
-    // A REST API do Supabase suporta: desktop_id=not.in.(id1,id2,...)
-    const { _rest } = require('./supabase-client'); // não exportado, ignora silenciosamente
-  }
+  await sb.pruneNotIn('mobile_scheduled', userId, 'desktop_id', recurring.map(r => String(r.id)));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -355,10 +350,28 @@ async function pushMlRules(all, userId) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 9. Configuração de IA (provider + chave)
+// Sincroniza a chave que o usuário já colou no desktop,
+// para o mobile não precisar pedir de novo (importante pois
+// o OpenRouter só mostra a chave uma única vez ao gerar).
+// ─────────────────────────────────────────────────────────────
+async function pushAiConfig(getAiConfig, userId) {
+  const { provider, key } = getAiConfig();
+  if (!key) return; // nada para sincronizar — usuário não configurou IA ainda
+
+  await sb.upsert('user_ai_config', [{
+    user_id:   userId,
+    provider:  provider || 'openrouter',
+    api_key:   key,
+    synced_at: new Date().toISOString(),
+  }], 'user_id');
+}
+
+// ─────────────────────────────────────────────────────────────
 // ENTRY POINT — executa todos os pushes em sequência
 // Falhas individuais são logadas mas não interrompem o processo
 // ─────────────────────────────────────────────────────────────
-async function pushAll(all, userId) {
+async function pushAll(all, userId, getAiConfig) {
   const steps = [
     ['balances',     () => pushBalances(all, userId)],
     ['transactions', () => pushTransactions(all, userId)],
@@ -369,6 +382,11 @@ async function pushAll(all, userId) {
     ['evolution',    () => pushEvolution(all, userId)],
     ['ml_rules',     () => pushMlRules(all, userId)],
   ];
+
+  // ai_config só entra se a função foi passada (compatibilidade com chamadas antigas)
+  if (typeof getAiConfig === 'function') {
+    steps.push(['ai_config', () => pushAiConfig(getAiConfig, userId)]);
+  }
 
   const results = {};
   for (const [name, fn] of steps) {

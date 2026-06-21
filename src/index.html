@@ -1247,9 +1247,108 @@ select.inp option{background:var(--bg2);}
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
         <input type="checkbox" id="pat-show-hidden" onchange="refreshPatrimonioTable()"> Mostrar ocultos
       </label>
+      <button class="btn sm" id="pat-filters-toggle-btn" onclick="patToggleFilters()">🔍 Filtros e ordenação</button>
       <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:6px;overflow:hidden">
         <button id="pat-view-table" class="btn sm" onclick="patSetView('table')" style="border-radius:0;border:none;padding:5px 14px">📋 Tabela</button>
         <button id="pat-view-chart" class="btn sm" onclick="patSetView('chart')" style="border-radius:0;border:none;padding:5px 14px;border-left:1px solid var(--border)">📈 Gráficos</button>
+      </div>
+    </div>
+
+    <!-- Filters panel (collapsed by default) -->
+    <div id="pat-filters-panel" style="display:none;margin-bottom:14px;padding:12px 16px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
+      <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start">
+        <div style="min-width:200px">
+          <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:8px">🏠 ATIVOS IMOBILIZADOS</div>
+          <div class="field" style="margin:0 0 8px">
+            <label class="lbl">Tipo</label>
+            <select class="inp sm" id="patf-asset-type" onchange="patFiltersChanged()">
+              <option value="">Todos os tipos</option>
+              <option value="imovel">🏠 Imóvel</option>
+              <option value="veiculo">🚗 Veículo</option>
+              <option value="barco">⛵ Barco</option>
+              <option value="clube">🏌️ Clube</option>
+              <option value="societario">🏢 Societário</option>
+              <option value="outro">📦 Outro</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Ordenar por</label>
+            <select class="inp sm" id="patf-asset-sort" onchange="patFiltersChanged()">
+              <option value="manual">Padrão (manual)</option>
+              <option value="name">Nome (A-Z)</option>
+              <option value="value_desc">Valor atual (maior → menor)</option>
+              <option value="value_asc">Valor atual (menor → maior)</option>
+              <option value="type">Tipo</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="min-width:200px">
+          <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:8px">🏦 CONTAS</div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Ordenar por</label>
+            <select class="inp sm" id="patf-acc-sort" onchange="patFiltersChanged()">
+              <option value="manual">Padrão (manual)</option>
+              <option value="name">Nome (A-Z)</option>
+              <option value="value_desc">Saldo (maior → menor)</option>
+              <option value="value_asc">Saldo (menor → maior)</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="min-width:220px">
+          <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:8px">📈 INVESTIMENTOS</div>
+          <div class="field" style="margin:0 0 8px">
+            <label class="lbl">Corretora</label>
+            <select class="inp sm" id="patf-inv-broker" onchange="patFiltersChanged()">
+              <option value="">Todas</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0 0 8px">
+            <label class="lbl">Categoria</label>
+            <select class="inp sm" id="patf-inv-category" onchange="patFiltersChanged()">
+              <option value="">Todas</option>
+              <option value="renda_fixa">Renda Fixa</option>
+              <option value="tesouro">Tesouro Direto</option>
+              <option value="previdencia">Previdência</option>
+              <option value="fundos">Fundos</option>
+              <option value="renda_variavel">Renda Variável</option>
+              <option value="private_equity">Private Equity</option>
+              <option value="caixa">Valor em Caixa</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0 0 8px">
+            <label class="lbl">Tipo</label>
+            <select class="inp sm" id="patf-inv-type" onchange="patFiltersChanged()">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0 0 8px">
+            <label class="lbl">Liquidez</label>
+            <select class="inp sm" id="patf-inv-liquidity" onchange="patFiltersChanged()">
+              <option value="">Todas</option>
+              <option value="immediate">Imediata (até 30 dias)</option>
+              <option value="short">Curto prazo (31 dias a 1 ano)</option>
+              <option value="long">Longo prazo (mais de 1 ano)</option>
+              <option value="undefined">Sem vencimento definido</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Ordenar por</label>
+            <select class="inp sm" id="patf-inv-sort" onchange="patFiltersChanged()">
+              <option value="manual">Padrão (manual)</option>
+              <option value="name">Nome (A-Z)</option>
+              <option value="value_desc">Valor atual (maior → menor)</option>
+              <option value="value_asc">Valor atual (menor → maior)</option>
+              <option value="liquidity">Liquidez (mais líquido primeiro)</option>
+              <option value="broker">Corretora</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:flex-end;height:100%;padding-top:18px">
+          <button class="btn sm" onclick="patClearFilters()">✕ Limpar filtros</button>
+        </div>
       </div>
     </div>
 

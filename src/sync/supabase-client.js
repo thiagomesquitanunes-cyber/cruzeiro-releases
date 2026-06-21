@@ -143,9 +143,22 @@ async function remove(table, filters) {
   await _rest(`/${table}?${qs}`, { method: 'DELETE' });
 }
 
+// Remove do Supabase tudo que NÃO está mais na lista de valores atuais
+// (usado para limpar contas/metas/recorrentes excluídas no desktop)
+async function pruneNotIn(table, userId, column, currentValues) {
+  if (!currentValues.length) {
+    // Nenhum valor atual: remove tudo do usuário nessa tabela
+    await remove(table, { user_id: userId });
+    return;
+  }
+  const list = currentValues.map(v => `"${String(v).replace(/"/g, '\\"')}"`).join(',');
+  const qs = `user_id=eq.${encodeURIComponent(userId)}&${column}=not.in.(${list})`;
+  await _rest(`/${table}?${qs}`, { method: 'DELETE' });
+}
+
 module.exports = {
   login, logout, refreshSession,
   getSession, getUserId, isLoggedIn,
-  upsert, select, update, remove,
+  upsert, select, update, remove, pruneNotIn,
   SUPABASE_URL,
 };

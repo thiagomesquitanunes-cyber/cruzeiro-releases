@@ -1645,9 +1645,12 @@ function renderCatFilterChips() {
 
 let _allCatsForFilter = [];
 async function openCatFilterModal() {
-  // Get all categories from history
+  // Get all categories from history, UNION'd with the master category list
+  // (CATS_RAW) — relying only on transaction history misses any category
+  // that was created but never actually used in a lançamento yet.
   const allRows = await ff.reportSummary({ excludeTransfers: false });
-  _allCatsForFilter = [...new Set(allRows.map(r => r.category).filter(Boolean))].sort();
+  const usedCats = allRows.map(r => r.category).filter(Boolean);
+  _allCatsForFilter = [...new Set([...CATS_RAW, ...usedCats])].sort((a,b) => a.localeCompare(b,'pt-BR'));
 
   let html = _allCatsForFilter.map((c,i) => {
     const checked = _excludedCats.has(c);
@@ -11488,6 +11491,77 @@ function patSetView(view) {
   }
 }
 
+// ── Filtros e ordenação (Patrimônio) ──
+// Atualiza a visão ativa (tabela ou gráfico) ao mudar um filtro/ordenação —
+// sem isso, mudar um filtro enquanto está na aba "Gráficos" não atualizaria
+// o gráfico até trocar de aba e voltar.
+function patFiltersChanged() {
+  refreshPatrimonioTable();
+  if (_patView === 'chart') refreshPatrimonioChart();
+}
+
+function patToggleFilters() {
+  const panel = G('pat-filters-panel');
+  const btn   = G('pat-filters-toggle-btn');
+  if (!panel) return;
+  const isOpen = panel.style.display !== 'none';
+  panel.style.display = isOpen ? 'none' : '';
+  if (btn) btn.classList.toggle('primary', !isOpen);
+}
+
+function patClearFilters() {
+  ['patf-asset-type','patf-asset-sort','patf-acc-sort','patf-inv-broker','patf-inv-category','patf-inv-type','patf-inv-liquidity','patf-inv-sort']
+    .forEach(id => { const el = G(id); if (el) el.selectedIndex = 0; });
+  patFiltersChanged();
+}
+
+// Repopula as opções de Corretora e Tipo (investimentos) com base nos ativos
+// existentes, preservando a seleção atual quando ainda válida.
+function patPopulateInvFilterOptions() {
+  const brokerSel = G('patf-inv-broker');
+  if (brokerSel) {
+    const cur = brokerSel.value;
+    const brokers = [...new Set((_inv.assets||[]).map(a => a.broker).filter(Boolean))].sort((a,b) => a.localeCompare(b,'pt-BR'));
+    brokerSel.innerHTML = '<option value="">Todas</option>' + brokers.map(b => `<option value="${esc(b)}"${b===cur?' selected':''}>${esc(b)}</option>`).join('');
+  }
+  const typeSel = G('patf-inv-type');
+  if (typeSel) {
+    const cur = typeSel.value;
+    const types = [...new Set((_inv.assets||[]).map(a => a.inv_type).filter(Boolean))].sort((a,b) => a.localeCompare(b,'pt-BR'));
+    typeSel.innerHTML = '<option value="">Todos</option>' + types.map(t => `<option value="${esc(t)}"${t===cur?' selected':''}>${esc(t)}</option>`).join('');
+  }
+}
+
+// Liquidez de um investimento, em dias a partir de hoje (negativo = já venceu).
+// "dias" (D+N) é sempre relativo a hoje; "vencimento" usa o mês de vencimento
+// cadastrado. Sem nenhum dos dois definidos → Infinity (sem vencimento definido).
+function _invLiquidityDays(asset) {
+  if (asset.liquidity === 'dias' && asset.liquidity_days != null && asset.liquidity_days !== '') {
+    return Number(asset.liquidity_days);
+  }
+  if (asset.maturity_month) {
+    const [my, mm] = asset.maturity_month.split('-').map(Number);
+    if (my && mm) {
+      const matDate = new Date(my, mm - 1, 1);
+      return Math.round((matDate - new Date()) / 86400000);
+    }
+  }
+  return Infinity;
+}
+
+// Valor atual de um investimento (última "atualizacao"/cota/etc. até curM) —
+// cálculo independente e mais simples do que o usado na renderização
+// detalhada de buildInvRows, só para fins de ordenação.
+function _invAssetCurrentValue(asset, txByAsset, curM) {
+  const txs = txByAsset[asset.id] || {};
+  const months = Object.keys(txs).filter(m => m <= curM).sort();
+  let lastVal = 0;
+  months.forEach(m => {
+    (txs[m] || []).forEach(t => { if (t.tx_type in INV_TX_VALUATION) lastVal = t.total_value; });
+  });
+  return lastVal;
+}
+
 function patDestroyCharts() {
   Object.values(_patCharts).forEach(c => { try { c.destroy(); } catch(e) {} });
   _patCharts = {};
@@ -11838,7 +11912,29 @@ function refreshPatrimonioChart() {
   // Aggregate: collect all months that have at least one asset with a factor
   const allFactors = {}; // { month -> weighted avg factor across assets }
   const allValByM  = {}; // { month -> total portfolio value }
-  _inv.assets.forEach(a => {
+
+  // Mesmos filtros do painel "🔍 Filtros e ordenação" (corretora/categoria/
+  // tipo/liquidez) — assim o gráfico "Investimentos vs benchmarks" reflete
+  // só o que está sendo exibido na tabela/filtro selecionado.
+  const _chartFBroker = G('patf-inv-broker')?.value || '';
+  const _chartFCat    = G('patf-inv-category')?.value || '';
+  const _chartFType   = G('patf-inv-type')?.value || '';
+  const _chartFLiq    = G('patf-inv-liquidity')?.value || '';
+  const chartInvAssets = _inv.assets.filter(a => {
+    if (_chartFBroker && (a.broker||'') !== _chartFBroker) return false;
+    if (_chartFCat && (a.category||'renda_fixa') !== _chartFCat) return false;
+    if (_chartFType && (a.inv_type||'') !== _chartFType) return false;
+    if (_chartFLiq) {
+      const d = _invLiquidityDays(a);
+      if (_chartFLiq === 'immediate' && !(d <= 30)) return false;
+      if (_chartFLiq === 'short' && !(d > 30 && d <= 365)) return false;
+      if (_chartFLiq === 'long' && !(d > 365 && d !== Infinity)) return false;
+      if (_chartFLiq === 'undefined' && d !== Infinity) return false;
+    }
+    return true;
+  });
+
+  chartInvAssets.forEach(a => {
     _inv.txAll.filter(t => t.asset_id === a.id && t.tx_type === 'atualizacao')
       .forEach(t => {
         const m = t.month.slice(0,7);
@@ -11846,7 +11942,7 @@ function refreshPatrimonioChart() {
       });
   });
 
-  _inv.assets.forEach(a => {
+  chartInvAssets.forEach(a => {
     // Exclude cash accounts from investment performance calculations
     if (a.category === 'valor_em_caixa' || a.category === 'caixa') return;
     const factors = buildAssetTWR(a.id);
@@ -12281,6 +12377,7 @@ function fmtMonth(ym) {
 
 function refreshPatrimonioTable() {
   try {
+  patPopulateInvFilterOptions();
   const now = new Date();
   const curM = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
   const showHidden = G('pat-show-hidden')?.checked;
@@ -12355,7 +12452,18 @@ function refreshPatrimonioTable() {
   </tr>`;
 
   // ── Imobilizado ──
-  const visibleAssets = _pat.assets.filter(a => showHidden || !a.hidden);
+  let visibleAssets = _pat.assets.filter(a => showHidden || !a.hidden);
+  const filterAssetType = G('patf-asset-type')?.value || '';
+  if (filterAssetType) visibleAssets = visibleAssets.filter(a => a.asset_type === filterAssetType);
+  const sortAssetBy = G('patf-asset-sort')?.value || 'manual';
+  if (sortAssetBy === 'name') {
+    visibleAssets = [...visibleAssets].sort((a,b) => a.name.localeCompare(b.name, 'pt-BR'));
+  } else if (sortAssetBy === 'type') {
+    visibleAssets = [...visibleAssets].sort((a,b) => (PAT_ASSET_TYPES[a.asset_type]||a.asset_type||'').localeCompare(PAT_ASSET_TYPES[b.asset_type]||b.asset_type||'', 'pt-BR'));
+  } else if (sortAssetBy === 'value_desc' || sortAssetBy === 'value_asc') {
+    const valOf = a => histMap[a.id]?.[curM]?.value ?? 0;
+    visibleAssets = [...visibleAssets].sort((a,b) => sortAssetBy === 'value_desc' ? valOf(b)-valOf(a) : valOf(a)-valOf(b));
+  } // else 'manual' — mantém a ordem de arrastar-e-soltar (sort_order)
   const assetTotalByMonth = {};
   months.forEach(m => { assetTotalByMonth[m] = 0; });
   // Totals use ALL assets (including hidden)
@@ -12469,18 +12577,19 @@ function refreshPatrimonioTable() {
           const projTip   = isProj ? ' title="Projeção (valor constante, sem correção futura)"' : '';
           return `<td class="amt-exp right"${projTip} style="font-size:11px;padding:4px 10px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">${fmtBRL(v)}${isProj ? '<span style="font-size:8px;margin-left:2px;color:#f59e0b">~</span>' : ''}</td>`;
         }).join('');
-        // Build installment flow cells — show ONLY still-projected (unpaid) installments.
-        // Once a month is paid, it shows in "Fluxo nominal" (via parcela_financiamento
-        // cash flow) instead, to avoid showing the same value in two rows.
+        // Build installment flow cells — shows BOTH projected (unpaid) and paid
+        // installments, styled differently. Paid ones used to be hidden here
+        // (the idea being they'd show in the collapsed "Fluxo nominal" row
+        // instead), but since that row is collapsed by default, a paid
+        // installment would just seem to vanish. Showing both here keeps a
+        // single, always-visible place to see the financing's cash flow.
         const finRows = (_pat.financing[a.id] || []).filter(r => String(r.contract_id ?? 'legacy') === String(cid)).sort((x,y) => x.month.localeCompare(y.month));
         const installByMonth = {};
         const installProjByMonth = {};
         finRows.forEach(r => {
           const m = r.month.slice(0,7);
-          if (r.is_projection === 1 && r.paid !== 1) {
-            installByMonth[m]     = r.installment;
-            installProjByMonth[m] = true;
-          }
+          installByMonth[m]     = r.installment;
+          installProjByMonth[m] = (r.is_projection === 1 && r.paid !== 1);
         });
         const iCells = months.map(m => {
           const v = installByMonth[m];
@@ -12489,8 +12598,9 @@ function refreshPatrimonioTable() {
           const clickable = isClosed ? '' : `onclick="patInstallmentInlineEdit(this,${a.id},'${m}',${v||0},${isProj?1:0})" title="Clique para editar (valor / pago)" style="cursor:pointer"`;
           if (!v) return `<td class="right" ${clickable} style="color:var(--text3);font-size:11px;padding:3px 8px;background:${cellBg}">—</td>`;
           const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
-          const projTip   = isProj ? ' title="Projeção — clique para editar"' : ' title="Parcela registrada — clique para editar"';
-          return `<td class="amt-exp right"${projTip} ${clickable} style="font-size:11px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">-${fmtBRL(v)}${isProj?'<span style="font-size:8px;color:#f59e0b;margin-left:1px">~</span>':''}</td>`;
+          const projTip   = isProj ? ' title="Projeção — clique para editar"' : ' title="Parcela paga — clique para editar"';
+          const marker    = isProj ? '<span style="font-size:8px;color:#f59e0b;margin-left:1px">~</span>' : '<span style="font-size:8px;color:#16a34a;margin-left:1px">✓</span>';
+          return `<td class="amt-exp right"${projTip} ${clickable} style="font-size:11px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">-${fmtBRL(v)}${marker}</td>`;
         }).join('');
 
         const closedTag = isClosed ? `<span style="font-size:9px;color:var(--text3);margin-left:4px">(encerrado${contract?.closed_month?' '+fmtMonth(contract.closed_month):''})</span>` : '';
@@ -12505,7 +12615,7 @@ function refreshPatrimonioTable() {
           <td style="${STICKY};right:0;min-width:60px;background:${bg}"></td>
         </tr>${isClosed ? '' : `
         <tr style="background:${bg}">
-          <td style="${STICKY};left:0;font-size:10px;color:#dc2626;padding:2px 12px 2px 24px;background:${bg}" colspan="4">📅 Parcelas projetadas (não pagas)</td>
+          <td style="${STICKY};left:0;font-size:10px;color:#dc2626;padding:2px 12px 2px 24px;background:${bg}" colspan="4">💳 Parcelas do financiamento</td>
           ${iCells}
           <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
         </tr>`}`;
@@ -12760,8 +12870,17 @@ function refreshPatrimonioTable() {
   const accTotalByMonth = {};
   months.forEach(m => { accTotalByMonth[m] = 0; });
 
+  let sortedAccounts = _pat.accountBalances;
+  const sortAccBy = G('patf-acc-sort')?.value || 'manual';
+  if (sortAccBy === 'name') {
+    sortedAccounts = [...sortedAccounts].sort((a,b) => a.name.localeCompare(b.name, 'pt-BR'));
+  } else if (sortAccBy === 'value_desc' || sortAccBy === 'value_asc') {
+    const balOf = a => { const up = a.history.filter(h => h.month <= curM); return up.length ? up[up.length-1].balance : 0; };
+    sortedAccounts = [...sortedAccounts].sort((a,b) => sortAccBy === 'value_desc' ? balOf(b)-balOf(a) : balOf(a)-balOf(b));
+  } // else 'manual'
+
   let accRows = '';
-  _pat.accountBalances.forEach((a, ri) => {
+  sortedAccounts.forEach((a, ri) => {
     const bg = stripe(ri);
     accRows += `<tr style="background:${bg};height:38px">
       <td style="${STICKY};left:0;min-width:400px;font-size:12px;padding:6px 12px;background:${bg}" colspan="4">
@@ -12803,7 +12922,7 @@ function refreshPatrimonioTable() {
   if (!container) return;
 
   const spacer = `<tbody><tr style="height:12px;background:var(--bg)"><td colspan="${months.length+4}"></td></tr></tbody>`;
-  const { totals: invTotalByMonth, netCashByMonth: invNetCashByMonth, extFlowByMonth: invExtFlowByMonth, incFlowByMonth: invIncFlowByMonth } = calcInvTotalByMonth(months);
+  const { totals: invTotalByMonth, totalsExCash: invTotalExCashByMonth, netCashByMonth: invNetCashByMonth, extFlowByMonth: invExtFlowByMonth, incFlowByMonth: invIncFlowByMonth } = calcInvTotalByMonth(months);
   let totalInv = invTotalByMonth[curM] || 0;
 
   // Total personal debt outstanding as of curM (sum of latest balance_end per debt)
@@ -12826,9 +12945,10 @@ function refreshPatrimonioTable() {
   // Store for use by overview
   window._patGrandTotal = { value: grandTotal, month: curM };
 
-  // Grand TIR for all investments
+  // Grand TIR for all investments (excluindo caixa — sem aporte/resgate
+  // registrado, caixa entraria como "ganho" puro se contasse aqui)
   const hasTotCash = Object.keys(invNetCashByMonth).length > 0;
-  const totLatestVal = invTotalByMonth[curM] || 0;
+  const totLatestVal = invTotalExCashByMonth[curM] || 0;
   let grandIrr = null;
   if (hasTotCash && totLatestVal > 0) {
     const ipcaCum = m => {
@@ -13197,6 +13317,20 @@ async function patInstallmentInlineEdit(td, id, month, currentValue, isProj, isD
       } else {
         await ff.patFinancingInstallmentSet({ assetId: id, month, installment: v, paid });
         _pat.financing[id] = await ff.patFinancingGet({ assetId: id }).catch(() => []);
+        // Mantém a movimentação "parcela_financiamento" em sincronia com o
+        // status pago/pendente — sem isso, a parcela some do fluxo de caixa
+        // e do cálculo de TIR (que leem só pat_transactions, não o cronograma).
+        const existingPatTx = _pat.txAll.find(t => t.asset_id === id && t.month.slice(0,7) === month && t.tx_type === 'parcela_financiamento');
+        if (paid) {
+          await ff.patTxSave({
+            id: existingPatTx?.id || null,
+            assetId: id, month, tx_type: 'parcela_financiamento',
+            total_value: v, notes: existingPatTx?.notes || null,
+          }).catch(() => {});
+        } else if (existingPatTx) {
+          await ff.patTxDelete({ id: existingPatTx.id, assetId: id, month: existingPatTx.month, tx_type: existingPatTx.tx_type, total_value: existingPatTx.total_value }).catch(() => {});
+        }
+        _pat.txAll = await ff.patTxAll().catch(() => _pat.txAll);
       }
       toast(`✅ Parcela de ${fmtMonth(month)} atualizada`);
       refreshPatrimonioTable();
@@ -15967,7 +16101,26 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
   if (!_inv.assets.length) return '';
 
   const showReal = _inv.showRealFlow;
-  const visibleAssets = _inv.assets.filter(a => showHidden || !a.hidden);
+  let visibleAssets = _inv.assets.filter(a => showHidden || !a.hidden);
+
+  // Filtros (corretora / categoria / tipo / liquidez)
+  const fBroker = G('patf-inv-broker')?.value || '';
+  const fCat    = G('patf-inv-category')?.value || '';
+  const fType   = G('patf-inv-type')?.value || '';
+  const fLiq    = G('patf-inv-liquidity')?.value || '';
+  if (fBroker) visibleAssets = visibleAssets.filter(a => (a.broker||'') === fBroker);
+  if (fCat)    visibleAssets = visibleAssets.filter(a => (a.category||'renda_fixa') === fCat);
+  if (fType)   visibleAssets = visibleAssets.filter(a => (a.inv_type||'') === fType);
+  if (fLiq) {
+    visibleAssets = visibleAssets.filter(a => {
+      const d = _invLiquidityDays(a);
+      if (fLiq === 'immediate') return d <= 30;
+      if (fLiq === 'short')     return d > 30 && d <= 365;
+      if (fLiq === 'long')      return d > 365 && d !== Infinity;
+      if (fLiq === 'undefined') return d === Infinity;
+      return true;
+    });
+  }
   if (!visibleAssets.length) return '';
 
   // Group transactions by asset and month
@@ -15978,6 +16131,21 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     if (!txByAsset[t.asset_id][tm]) txByAsset[t.asset_id][tm] = [];
     txByAsset[t.asset_id][tm].push(t);
   });
+
+  // Ordenação — aplicada antes do agrupamento por categoria abaixo, então a
+  // ordem escolhida vale DENTRO de cada categoria (o agrupamento em si não
+  // muda, só a ordem dos ativos dentro de cada grupo).
+  const sortInvBy = G('patf-inv-sort')?.value || 'manual';
+  if (sortInvBy === 'name') {
+    visibleAssets = [...visibleAssets].sort((a,b) => a.name.localeCompare(b.name, 'pt-BR'));
+  } else if (sortInvBy === 'broker') {
+    visibleAssets = [...visibleAssets].sort((a,b) => (a.broker||'').localeCompare(b.broker||'', 'pt-BR'));
+  } else if (sortInvBy === 'liquidity') {
+    visibleAssets = [...visibleAssets].sort((a,b) => _invLiquidityDays(a) - _invLiquidityDays(b));
+  } else if (sortInvBy === 'value_desc' || sortInvBy === 'value_asc') {
+    const valOf = a => _invAssetCurrentValue(a, txByAsset, curM);
+    visibleAssets = [...visibleAssets].sort((a,b) => sortInvBy === 'value_desc' ? valOf(b)-valOf(a) : valOf(a)-valOf(b));
+  } // else 'manual' — mantém sort_order
 
   // IPCA cumulative from a month to curM
   function ipcaCumulative(fromMonth) {
@@ -16393,13 +16561,17 @@ function patToggleCatCollapse(cgk) {
   }
 }
 
-// ── Total investimentos por mês (returns {totals, netCashByMonth}) ──
+// ── Total investimentos por mês (returns {totals, totalsExCash, netCashByMonth}) ──
 function calcInvTotalByMonth(months) {
   const totals          = {};
+  // Mesmo total, mas sem os ativos de categoria "caixa"/"valor_em_caixa" — usado
+  // só para TIR/Ganho-Perda, já que caixa não tem aporte/resgate registrado e
+  // qualquer valor ali apareceria como "ganho" puro se entrasse nessa conta.
+  const totalsExCash    = {};
   const netCashByMonth  = {}; // all cash flows combined (for IRR)
   const extFlowByMonth  = {}; // external capital only (compra/aporte/venda/amortizacao)
   const incFlowByMonth  = {}; // income/cost only (dividendo/juros/taxa etc.)
-  months.forEach(m => { totals[m] = 0; });
+  months.forEach(m => { totals[m] = 0; totalsExCash[m] = 0; });
 
   const txByAsset = {};
   _inv.txAll.forEach(t => {
@@ -16410,8 +16582,6 @@ function calcInvTotalByMonth(months) {
   });
 
   _inv.assets.forEach(a => {
-    // Exclude cash accounts from financial investment totals
-    if (a.category === 'valor_em_caixa' || a.category === 'caixa') return;
     const txs = txByAsset[a.id] || {};
     const txMonths = [...new Set(Object.keys(txs))].sort();
     if (!txMonths.length) return;
@@ -16445,14 +16615,16 @@ function calcInvTotalByMonth(months) {
     if (!valMonthsSorted.length) return; // no valuations = don't include in portfolio total
 
     let lastVal = 0;
+    const isCash = a.category === 'valor_em_caixa' || a.category === 'caixa';
     months
       .filter(m => m >= valMonthsSorted[0] && m <= (a.closed_month || months[months.length-1]))
       .forEach(m => {
         if (valByM[m] !== undefined) lastVal = valByM[m];
         totals[m] += lastVal;
+        if (!isCash) totalsExCash[m] += lastVal;
       });
   });
-  return { totals, netCashByMonth, extFlowByMonth, incFlowByMonth };
+  return { totals, totalsExCash, netCashByMonth, extFlowByMonth, incFlowByMonth };
 }
 
 // ══ APOSENTADORIA ══════════════════════════════════════════════════════════
