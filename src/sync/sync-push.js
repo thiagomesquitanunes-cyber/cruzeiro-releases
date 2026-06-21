@@ -28,9 +28,15 @@ function monthsAgo(n) {
 // ─────────────────────────────────────────────────────────────
 // 1. Saldos por conta
 // ─────────────────────────────────────────────────────────────
-async function pushBalances(all, userId) {
+async function pushBalances(all, userId, syncInvestments) {
   const today    = new Date().toISOString().slice(0, 10);
-  const accounts = all('SELECT * FROM accounts WHERE hidden=0 ORDER BY sort_order');
+  let accounts = all('SELECT * FROM accounts WHERE hidden=0 ORDER BY sort_order');
+
+  // Por padrão, contas de investimento não são enviadas ao mobile —
+  // segurança: o usuário precisa optar explicitamente por isso.
+  if (!syncInvestments) {
+    accounts = accounts.filter(a => a.type !== 'investment');
+  }
 
   const rows = accounts.map(acc => {
     const bal = all(
@@ -51,22 +57,35 @@ async function pushBalances(all, userId) {
   });
 
   await sb.upsert('mobile_balances', rows, 'user_id,account_name');
-  await sb.pruneNotIn('mobile_balances', userId, 'account_name', accounts.map(a => a.name));
+
+  // Se investimentos estão desativados, o prune precisa considerar
+  // que contas de investimento NUNCA devem estar na lista atual —
+  // garante que sejam removidas mesmo que tenham sido sincronizadas
+  // antes do usuário desativar a opção.
+  const allAccountNames = syncInvestments
+    ? accounts.map(a => a.name)
+    : all('SELECT name FROM accounts WHERE hidden=0 AND type != ?', ['investment']).map(a => a.name);
+  await sb.pruneNotIn('mobile_balances', userId, 'account_name', allAccountNames);
 }
 
 // ─────────────────────────────────────────────────────────────
 // 2. Transações recentes (últimos 90 dias)
 // ─────────────────────────────────────────────────────────────
-async function pushTransactions(all, userId) {
+async function pushTransactions(all, userId, syncInvestments) {
   const from = new Date();
   from.setDate(from.getDate() - 90);
   const fromDate = from.toISOString().slice(0, 10);
+
+  // Por padrão, exclui transações de contas de investimento (mesma regra
+  // de pushBalances) — evita vazar extrato de aportes/resgates mesmo que
+  // o saldo da conta já não esteja sendo enviado.
+  const investmentFilter = syncInvestments ? '' : `AND a.type != 'investment'`;
 
   const txns = all(`
     SELECT t.*, a.name as account_name
     FROM transactions t
     JOIN accounts a ON a.id = t.account_id
-    WHERE t.date >= ? AND t.transfer_id IS NULL
+    WHERE t.date >= ? AND t.transfer_id IS NULL ${investmentFilter}
     ORDER BY t.date DESC
   `, [fromDate]);
 
@@ -227,8 +246,13 @@ async function pushScheduled(all, userId) {
 
 // ─────────────────────────────────────────────────────────────
 // 6. Patrimônio (últimos 3 meses)
+// Só sincroniza se o usuário optou por compartilhar dados de
+// investimento com o mobile — patrimônio é fundamentalmente
+// sobre ativos/investimentos, então segue a mesma regra.
 // ─────────────────────────────────────────────────────────────
-async function pushPatrimonio(all, userId) {
+async function pushPatrimonio(all, userId, syncInvestments) {
+  if (!syncInvestments) return;
+
   const months = [];
   for (let i = 0; i < 3; i++) months.push(monthsAgo(i));
 
@@ -383,14 +407,16 @@ async function pushAiConfig(getAiConfig, userId) {
 // ENTRY POINT — executa todos os pushes em sequência
 // Falhas individuais são logadas mas não interrompem o processo
 // ─────────────────────────────────────────────────────────────
-async function pushAll(all, userId, getAiConfig) {
+async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref) {
+  const syncInvestments = typeof getSyncInvestmentsPref === 'function' ? getSyncInvestmentsPref() : false;
+
   const steps = [
-    ['balances',     () => pushBalances(all, userId)],
-    ['transactions', () => pushTransactions(all, userId)],
+    ['balances',     () => pushBalances(all, userId, syncInvestments)],
+    ['transactions', () => pushTransactions(all, userId, syncInvestments)],
     ['budgets',      () => pushBudgets(all, userId)],
     ['goals',        () => pushGoals(all, userId)],
     ['scheduled',    () => pushScheduled(all, userId)],
-    ['patrimonio',   () => pushPatrimonio(all, userId)],
+    ['patrimonio',   () => pushPatrimonio(all, userId, syncInvestments)],
     ['evolution',    () => pushEvolution(all, userId)],
     ['ml_rules',     () => pushMlRules(all, userId)],
   ];

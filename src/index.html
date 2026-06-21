@@ -2442,6 +2442,20 @@ select.inp option{background:var(--bg2);}
             <button class="btn sm" onclick="syncDoLogout()" style="color:var(--red)">Desconectar</button>
           </div>
           <div id="sync-last-result" style="font-size:12px;color:var(--text3);margin-top:8px"></div>
+
+          <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+            <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+              <input type="checkbox" id="sync-investments-toggle" onchange="syncToggleInvestments(this.checked)"
+                style="margin-top:2px;width:16px;height:16px;cursor:pointer">
+              <span style="font-size:13px;color:var(--text2)">
+                <strong>Sincronizar contas de investimento com o mobile</strong><br>
+                <span style="font-size:12px;color:var(--text3)">
+                  Por padrão, dados de investimentos (saldos, patrimônio) não são enviados ao app mobile,
+                  por segurança. Ative apenas se quiser acessar essas informações pelo celular.
+                </span>
+              </span>
+            </label>
+          </div>
         </div>
 
         <!-- Não logado -->

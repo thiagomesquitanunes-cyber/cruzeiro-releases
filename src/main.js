@@ -2181,7 +2181,7 @@ app.whenReady().then(async () => {
   if (!_dbPendingDecrypt) {
     try { migrateRecurring(); } catch(e) {}
     // IMPORTANTE: aguarda (não usa setImmediate solto) para garantir que
-    // termina ANTES do bloco de sync mobile logo abaixo. Antes, os dois
+    // termina ANTES do bloco de sync mobile mais abaixo. Antes, os dois
     // rodavam em paralelo sem ordem garantida: se a reconciliação do
     // mobile chegasse primeiro, ela marcava como conferida uma transação
     // que este passo iria apagar e recriar com outro ID — gerando
@@ -5053,6 +5053,46 @@ ipcMain.handle('settings:save-data', (_, data) => {
   return { ok: true };
 });
 
+// Por padrão, contas de investimento NÃO são sincronizadas com o mobile
+// (segurança: dados de patrimônio financeiro só trafegam/ficam no Supabase
+// se o usuário optar explicitamente por isso).
+function getSyncInvestmentsPref() {
+  const s = loadSettings();
+  return s.syncInvestmentsToMobile === true;
+}
+
+ipcMain.handle('sync:get-investments-pref', () => getSyncInvestmentsPref());
+
+ipcMain.handle('sync:set-investments-pref', async (_, enabled) => {
+  const s = loadSettings();
+  const wasEnabled = s.syncInvestmentsToMobile === true;
+  s.syncInvestmentsToMobile = !!enabled;
+  saveSettings(s);
+
+  // Se o usuário acabou de DESATIVAR, precisa também remover do Supabase
+  // o que já tinha sido enviado anteriormente — não basta parar de enviar
+  // dados novos, é preciso limpar o que já está lá.
+  if (wasEnabled && !enabled && sb.isLoggedIn()) {
+    try {
+      const userId = sb.getUserId();
+      await sb.remove('mobile_balances', { user_id: userId, account_type: 'investment' });
+      await sb.remove('mobile_patrimonio', { user_id: userId });
+
+      // mobile_transactions não tem account_type — remove por nome de conta
+      const investmentAccounts = all("SELECT name FROM accounts WHERE type='investment'");
+      for (const acc of investmentAccounts) {
+        await sb.remove('mobile_transactions', { user_id: userId, account_name: acc.name }).catch(() => {});
+      }
+
+      console.log('[sync] dados de investimento removidos do Supabase (opt-out)');
+    } catch (e) {
+      console.error('[sync] erro ao remover dados de investimento:', e.message);
+    }
+  }
+
+  return { ok: true };
+});
+
 // ── AI: Anthropic API key (stored locally in settings) ──
 // ════════ AI: multi-provider (Gemini grátis / Anthropic / OpenAI) ════════
 // O usuário escolhe o provedor e cola a própria chave. Recomendado: Google Gemini,
@@ -5250,6 +5290,15 @@ naturalmente variam mês a mês sem indicar um problema real — a suavização 
 Trate "pctChange" como uma variação de TENDÊNCIA ano a ano, não como um pico isolado. NÃO descreva
 variações como "neste mês" ou "no mês passado" — descreva como "nos últimos 12 meses" ou "na
 tendência recente", já que é isso que os números representam.
+
+CRÍTICO — cada categoria já vem com "type" ("receita" ou "despesa") e "trend" pré-calculados pelo
+app. SEMPRE confie nesses dois campos para decidir o tom — NUNCA tente adivinhar pelo nome da
+categoria ou pelo sinal dos números se algo é ganho ou gasto. Os valores de "current"/"avgPrior"
+são sempre positivos quando aquilo cresce (mais gasto OU mais ganho), então o sinal por si só NÃO
+diz se é bom ou mau — só o "type" diz. Uma categoria com type="despesa" e trend="aumentando" é uma
+notícia RUIM (gastou mais) e deve ser descrita com linguagem de gasto/custo ("gastos com X
+aumentaram", nunca "ganhos com X aumentaram"). Uma categoria com type="receita" e trend="subindo" é
+uma notícia BOA (ganhou mais) e deve ser descrita com linguagem de receita/ganho.
 
 O resumo também traz: orçamentos, dívidas pessoais cadastradas (com taxa de juros real), juros de
 rotativo/cheque especial detectados recentemente em importações, e o saldo líquido disponível hoje.
@@ -5980,7 +6029,7 @@ async function runMobileSync(trigger = 'manual') {
   try {
     const userId = sb.getUserId();
     const pull   = await syncPull.pullAll(all, run, first, save, userId);
-    const push   = await syncPush.pushAll(all, userId, getAiConfig);
+    const push   = await syncPush.pushAll(all, userId, getAiConfig, getSyncInvestmentsPref);
     const result = { ok: true, trigger, pull, push, at: new Date().toISOString() };
     console.log('[sync] concluído:', result);
 

@@ -13980,6 +13980,14 @@ function patTxUpdateRow(i, field, val) {
   if (field === 'date') {
     row.tx_date = val;
     row.month   = val ? val.slice(0,7) : row.month;
+    // Não reconstrói a tabela aqui: o <input type="date"> do Chromium dispara
+    // "change" tão logo UM segmento (dia/mês/ano) fica completo, não só ao
+    // terminar a data inteira. Recriar o input nesse momento quebra a
+    // digitação em andamento — parecia que só dava pra digitar 1 dígito.
+    // O valor já está correto no modelo (_patTxRows) e será salvo
+    // normalmente; o indicador "🔗 auto" só atualiza no próximo re-render
+    // (ex: ao editar outro campo desta linha).
+    return;
   } else if (field === 'type') {
     row.tx_type = val;
   } else if (field === 'account') {

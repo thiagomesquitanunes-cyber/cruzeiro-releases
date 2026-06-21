@@ -150,7 +150,6 @@ const api = {
   financialImport:     (d)   => ipcRenderer.invoke('financial:import', d),
   categoriesGet:       ()    => ipcRenderer.invoke('categories:get'),
   categoriesSave:      (d)   => ipcRenderer.invoke('categories:save', d),
-  categoriesRename:    (d)   => ipcRenderer.invoke('categories:rename', d),
   brokerMappingsGet:   ()    => ipcRenderer.invoke('broker:mappings-get'),
   brokerAccountPrefGet:(d)   => ipcRenderer.invoke('broker:account-pref-get', d),
   brokerAccountPrefSet:(d)   => ipcRenderer.invoke('broker:account-pref-set', d),
@@ -227,6 +226,8 @@ const api = {
   syncStatus:     ()                => ipcRenderer.invoke('sync:status'),
   syncRunNow:     ()                => ipcRenderer.invoke('sync:run-now'),
   onSyncCompleted:(cb)              => ipcRenderer.on('sync:completed', (_, data) => cb(data)),
+  syncGetInvestmentsPref: ()        => ipcRenderer.invoke('sync:get-investments-pref'),
+  syncSetInvestmentsPref: (enabled) => ipcRenderer.invoke('sync:set-investments-pref', enabled),
 };
 
 contextBridge.exposeInMainWorld('ff', api);
