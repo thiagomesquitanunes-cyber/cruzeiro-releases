@@ -754,18 +754,27 @@ async function buildInsightsSummary(targetMonth, filters) {
     const cur = curIdx >= 0 ? s.ma12[curIdx] : 0;
     const priorVals = prevMonths.map(m => { const i = idxOf(m); return i>=0 ? s.ma12[i] : 0; }).filter(v => v !== 0);
     const avgPrior = priorVals.length ? priorVals.reduce((a,b)=>a+b,0)/priorVals.length : 0;
-    const pctChange = avgPrior !== 0 ? ((cur - avgPrior) / Math.abs(avgPrior)) * 100 : null;
 
-    // Determina se é receita (entradas, valores positivos) ou despesa (saídas)
+    // Determina se é receita ou despesa. A série de buildEvolucaoCategorySeries
+    // é construída como "despesa positiva, receita negativa" (expenses - income)
+    // — por isso receita = valor médio NEGATIVO, não positivo.
     const allVals = s.ma12.filter(v => v !== 0);
     const avgSign = allVals.length ? allVals.reduce((a,b)=>a+b,0)/allVals.length : cur;
-    const isIncome = avgSign > 0;
+    const isIncome = avgSign < 0;
+
+    // Normaliza pra magnitude intuitiva: despesa positiva = gastou mais;
+    // receita positiva = ganhou mais. Sem isso, mesmo com o rótulo certo,
+    // a direção da tendência (subindo/caindo) ainda saía invertida pra
+    // receita, e os números brutos negativos confundiriam a IA.
+    const curNat      = isIncome ? -cur : cur;
+    const avgPriorNat = isIncome ? -avgPrior : avgPrior;
+    const pctChange = avgPriorNat !== 0 ? ((curNat - avgPriorNat) / Math.abs(avgPriorNat)) * 100 : null;
 
     return {
       category: cat,
       type: isIncome ? 'receita' : 'despesa',
-      current: Math.round(cur),
-      avgPrior: Math.round(avgPrior),
+      current: Math.round(curNat),
+      avgPrior: Math.round(avgPriorNat),
       pctChange: pctChange === null ? null : Math.round(pctChange),
       // Para receitas: subindo = bom; Para despesas: aumentando = ruim
       trend: isIncome
@@ -1939,6 +1948,11 @@ function rowClick(e, id) {
   updateSelectionUI();
 }
 function rowKey(e, id) {
+  // Não intercepta espaço se o foco estiver num campo de edição inline —
+  // senão, digitar espaço dentro do campo vira "selecionar linha" em vez de
+  // inserir o caractere.
+  const tag = e.target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
   if (e.key === ' ') {
     e.preventDefault();
     selectedRows.has(id) ? selectedRows.delete(id) : selectedRows.add(id);
@@ -12361,7 +12375,7 @@ function refreshPatrimonioChart() {
   chartInvAssets.forEach(a => {
     // Exclude cash accounts from investment performance calculations
     if (_isCashAsset(a)) return;
-    const factors = buildAssetTWR(a.id);
+    const { factors } = buildAssetTWR(a.id);
     Object.entries(factors).forEach(([m, r]) => {
       const prevM = (() => {
         const [y, mo] = m.split('-').map(Number);
