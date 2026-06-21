@@ -11827,6 +11827,7 @@ function refreshPatrimonioChart() {
     // between the two known endpoints. This handles illiquid/closed-end funds that only
     // have a purchase price and a final sale/mark — e.g. private equity, closed funds.
     const factors = {};
+    const valuesByMonth = {};
     const valMonths = Object.keys(valByM).sort();
 
     // Helper: expand a segment [prevM → curM] with intermediate interpolated values
@@ -11872,7 +11873,13 @@ function refreshPatrimonioChart() {
         const denom = runVal + inflow;
         if (denom > 0) {
           const r = (vCur + outflow + income - runVal - inflow) / denom;
-          if (isFinite(r) && Math.abs(r) < 5) factors[mCur] = r;
+          if (isFinite(r) && Math.abs(r) < 5) {
+            factors[mCur] = r;
+            // Valor do ativo entrando nesse sub-período — usado para ponderar
+            // a média da carteira (sem isso, ativos com histórico esparso de
+            // atualização ficariam com peso quase nulo em todo mês interpolado).
+            valuesByMonth[mCur] = denom;
+          }
         }
         runVal = vCur;
       }
@@ -11894,7 +11901,10 @@ function refreshPatrimonioChart() {
         const denom   = vPrev + inflow;
         if (denom > 0) {
           const r = (vCur + outflow + income - vPrev - inflow) / denom;
-          if (isFinite(r) && Math.abs(r) < 5) factors[m] = r;
+          if (isFinite(r) && Math.abs(r) < 5) {
+            factors[m] = r;
+            valuesByMonth[m] = denom;
+          }
         }
       } else {
         // Gap — interpolate compound growth across the missing months
@@ -11906,7 +11916,7 @@ function refreshPatrimonioChart() {
         }
       }
     }
-    return factors;
+    return { factors, valuesByMonth };
   }
 
   // Aggregate: collect all months that have at least one asset with a factor
@@ -12000,6 +12010,55 @@ function refreshPatrimonioChart() {
   patPopulateAssetSel();
   // Render investment chart with period selector
   patRenderInvChart();
+}
+
+// Procura quedas de valor entre meses consecutivos que não têm uma saída
+// (venda/amortização/resgate) registrada cobrindo a diferença — esse é
+// exatamente o padrão de dado que faz o cálculo de TIR/TWR (Modified Dietz)
+// entender como uma perda real e enorme num único mês, e essa perda fica
+// "presa" no gráfico acumulado pra sempre (cada mês seguinte multiplica a
+// partir desse novo nível mais baixo, daí o platô reto que nunca recupera).
+function patCheckTwrAnomalies() {
+  const out = G('pat-twr-anomalies-result');
+  if (!out) return;
+  const issues = [];
+  _inv.assets.forEach(a => {
+    const txs = _inv.txAll.filter(t => t.asset_id === a.id);
+    const valByM = {};
+    txs.filter(t => t.tx_type === 'atualizacao').forEach(t => { valByM[t.month.slice(0,7)] = t.total_value; });
+    const outflowByM = {};
+    txs.filter(t => t.tx_type in INV_TX_EXTERNAL && (t.tx_type === 'venda' || t.tx_type === 'amortizacao'))
+      .forEach(t => { const m = t.month.slice(0,7); outflowByM[m] = (outflowByM[m]||0) + t.total_value; });
+    const inflowByM = {};
+    txs.filter(t => t.tx_type === 'compra' || t.tx_type === 'aporte')
+      .forEach(t => { const m = t.month.slice(0,7); inflowByM[m] = (inflowByM[m]||0) + t.total_value; });
+    const months = Object.keys(valByM).sort();
+    for (let i = 1; i < months.length; i++) {
+      const prev = months[i-1], cur = months[i];
+      const vPrev = valByM[prev], vCur = valByM[cur];
+      if (vPrev > 0) {
+        const outflow = outflowByM[cur] || 0;
+        const inflow  = inflowByM[cur]  || 0;
+        const adjustedReturn = (vCur + outflow - vPrev - inflow) / vPrev;
+        if (adjustedReturn < -0.4) {
+          issues.push({ asset: a.name, from: prev, to: cur, vPrev, vCur, outflow, inflow, drop: adjustedReturn });
+        }
+      }
+    }
+  });
+
+  if (!issues.length) {
+    out.innerHTML = `<div style="color:#16a34a">✅ Nenhuma queda suspeita encontrada (limite: -40% em um mês sem saída registrada).</div>`;
+    return;
+  }
+  out.innerHTML = `<div style="color:#dc2626;font-weight:600;margin-bottom:6px">⚠️ ${issues.length} queda(s) suspeita(s) encontrada(s):</div>` +
+    issues.map(i => `
+      <div style="padding:6px 10px;background:var(--bg3);border-radius:6px;margin-bottom:4px">
+        <strong>${esc(i.asset)}</strong> — ${fmtMonth(i.from)} → ${fmtMonth(i.to)}:
+        de ${fmtBRL(i.vPrev)} para ${fmtBRL(i.vCur)}
+        (${i.outflow ? 'saída registrada: ' + fmtBRL(i.outflow) + ', ' : 'sem saída registrada, '}
+        queda ajustada: ${(i.drop*100).toFixed(1)}%)
+      </div>`).join('');
 }
 
 function patPopulateAssetSel() {
@@ -12473,6 +12532,12 @@ function refreshPatrimonioTable() {
   // debtByAsset[assetId][month] = remaining debt (negative)
   // Uses balance_end from schedule if available (more accurate: SAC/PRICE breakdown)
   // Falls back to simple: financing_total − sum of installments paid
+  // Also includes the remaining unpaid "entrada parcelada" balance, starting
+  // from the actual acquisition month (purchase_month) — not just from the
+  // first monthly financing installment. Without this, an asset paid via
+  // entrada parcelada showed no debt/value at all during the entrada-only
+  // months, and showed no debt for the financed principal before the first
+  // monthly installment kicked in either.
   const debtByAsset     = {}; // { assetId: { month: value } }
   const debtProjByAsset = {}; // { assetId: { month: bool } } — true = projected
   _pat.assets.forEach(a => {
@@ -12490,31 +12555,51 @@ function refreshPatrimonioTable() {
       });
       debtByAsset[a.id]     = {};
       debtProjByAsset[a.id] = {};
+      const contractsForAsset = _pat.financingContracts[a.id] || [];
+      const entradaTxs = _pat.txAll.filter(t => t.asset_id === a.id && t.tx_type === 'parcela_compra');
+      const totalEntradaParcelada = entradaTxs.reduce((s,t) => s + t.total_value, 0);
+      const entradaRemaining = (m) => {
+        if (!totalEntradaParcelada) return 0;
+        const paidSoFar = entradaTxs.filter(t => t.month.slice(0,7) <= m).reduce((s,t) => s + t.total_value, 0);
+        return Math.max(0, totalEntradaParcelada - paidSoFar);
+      };
       Object.entries(finsByContract).forEach(([cid, fins]) => {
         const firstInstMonth = fins[0].month;
+        const contract = contractsForAsset.find(c => String(c.id) === String(cid));
+        const historyStartMonth = (contract?.purchase_month || contract?.first_month || firstInstMonth).slice(0,7);
         debtByAsset[a.id][cid]     = {};
         debtProjByAsset[a.id][cid] = {};
         months.forEach(m => {
-          if (m < firstInstMonth) return;
-          // Find the last schedule row at or before m
-          const rowsUpTo = fins.filter(r => r.month.slice(0,7) <= m);
-          if (!rowsUpTo.length) return;
-          const lastRow = rowsUpTo[rowsUpTo.length - 1];
-          let balance;
-          if (lastRow.balance_end != null) {
-            // Use balance_end directly — most accurate
-            balance = lastRow.balance_end;
+          if (m < historyStartMonth) return;
+          const entradaBal = entradaRemaining(m);
+          let financingBal = 0;
+          let isProjM = false;
+          if (m >= firstInstMonth.slice(0,7)) {
+            // Find the last schedule row at or before m
+            const rowsUpTo = fins.filter(r => r.month.slice(0,7) <= m);
+            if (rowsUpTo.length) {
+              const lastRow = rowsUpTo[rowsUpTo.length - 1];
+              if (lastRow.balance_end != null) {
+                // Use balance_end directly — most accurate
+                financingBal = lastRow.balance_end;
+              } else {
+                // Fallback: financing_total − paid
+                const total = a.financing_total || 0;
+                const paid  = rowsUpTo.reduce((s, r) => s + r.installment, 0);
+                financingBal = Math.max(0, total - paid);
+              }
+              // Mark as projection if the last real payment before m was projected
+              const lastPaid = rowsUpTo.filter(r => r.is_projection === 0 || r.paid === 1);
+              isProjM = lastRow.is_projection === 1 && m > (lastPaid.at(-1)?.month || '');
+            }
           } else {
-            // Fallback: financing_total − paid
-            const total = a.financing_total || 0;
-            const paid  = rowsUpTo.reduce((s, r) => s + r.installment, 0);
-            balance = Math.max(0, total - paid);
+            // Antes da 1ª parcela mensal — nada foi amortizado ainda, então o
+            // saldo financiado é o principal contratado por inteiro.
+            financingBal = contract?.principal ?? (a.financing_total || 0);
           }
+          const balance = entradaBal + financingBal;
           if (balance > 0.01) {
             debtByAsset[a.id][cid][m]     = -balance;
-            // Mark as projection if the last real payment before m was projected
-            const lastPaid = rowsUpTo.filter(r => r.is_projection === 0 || r.paid === 1);
-            const isProjM  = lastRow.is_projection === 1 && m > (lastPaid.at(-1)?.month || '');
             debtProjByAsset[a.id][cid][m] = isProjM;
           }
         });
@@ -13589,6 +13674,16 @@ async function openPatAssetModal(id) {
   }
   if (G('fin-sync-day')) G('fin-sync-day').value = '';
   populateCategorySelect('fin-sync-category', 'Financiamento');
+  // Mesma população para a seção de construtora — faltava aqui, deixando
+  // "fc-sync-account"/"fc-sync-category" sempre em branco na criação de um
+  // ativo novo (só ficavam preenchidos ao editar um já existente, via
+  // loadContractIntoForm).
+  if (G('fc-sync-account')) {
+    G('fc-sync-account').innerHTML = '<option value="">— Não sincronizar —</option>' +
+      (accounts||[]).filter(a => !a.hidden && (a.type==='bank'||a.type==='cash'))
+        .map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  }
+  populateCategorySelect('fc-sync-category', 'Financiamento');
   if (G('fin-contract-label')) G('fin-contract-label').value = '';
   if (G('pat-fin-contract-selector')) G('pat-fin-contract-selector').style.display = 'none';
   if (G('pat-fin-closed-notice')) G('pat-fin-closed-notice').style.display = 'none';
@@ -13780,9 +13875,13 @@ async function savePatAsset() {
       const assetVal   = isCSave ? readFinField('fc-total-value') : readFinField('fb-total-value');
       const entradaParcelada = !!G(isCSave ? 'fc-entrada-parcelada' : 'fb-entrada-parcelada')?.checked;
       const downPayment = isCSave ? (readFinField('fc-entrada-total') || 0) : (readFinField('fb-entrada-total') || 0);
-      if (assetVal > 0 && contract.first_month) {
-        // Set pat_history for first month = full asset value
-        await ff.patHistorySet({ assetId, month: contract.first_month, value: assetVal, manual: true });
+      // Mês de aquisição real — não o mês da 1ª parcela mensal do
+      // financiamento, que pode vir bem depois (ex: meses de entrada
+      // parcelada antes do financiamento propriamente começar).
+      const historyStartMonth = contract.purchase_month || contract.first_month;
+      if (assetVal > 0 && historyStartMonth) {
+        // Set pat_history for the acquisition month = full asset value
+        await ff.patHistorySet({ assetId, month: historyStartMonth, value: assetVal, manual: true });
 
         // Existing down-payment movements from a previous save — a single
         // "compra" (entrada à vista) and/or multiple "parcela_compra" rows
@@ -13825,7 +13924,7 @@ async function savePatAsset() {
           }
           await ff.patTxSave({
             id: existingCompra?.id || null,
-            assetId, month: contract.first_month,
+            assetId, month: historyStartMonth,
             tx_type: 'compra', total_value: downPayment,
             notes: 'Entrada / chaves',
             skipHistoryEffect: true,
@@ -14034,7 +14133,7 @@ async function loadContractIntoForm(contract) {
   // compatibility) — set .value directly, don't run it through
   // setupCurrencyInput(), which would flip its type to 'text' and make it
   // show up as a stray, unlabeled visible input.
-  const histEntry = _pat.historyAll.find(h => h.asset_id === id && h.month === contract.first_month);
+  const histEntry = _pat.historyAll.find(h => h.asset_id === id && h.month === (contract.purchase_month || contract.first_month));
   if (histEntry && G('fin-asset-value')) {
     G('fin-asset-value').value = histEntry.value;
   }

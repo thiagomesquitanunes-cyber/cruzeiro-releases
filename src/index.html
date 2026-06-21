@@ -1410,6 +1410,10 @@ select.inp option{background:var(--bg2);}
         </div>
         <div style="position:relative;height:240px"><canvas id="pat-chart-inv"></canvas></div>
         <div id="pat-chart-inv-legend" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px"></div>
+        <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">
+          <button class="btn sm" onclick="patCheckTwrAnomalies()">🔍 Verificar quedas suspeitas na rentabilidade</button>
+          <div id="pat-twr-anomalies-result" style="margin-top:8px;font-size:12px"></div>
+        </div>
       </div>
       <!-- 4. Ativos individuais -->
       <div class="tbl-card" style="padding:18px;margin-bottom:16px">

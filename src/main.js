@@ -2590,27 +2590,32 @@ ipcMain.handle('evolucao:ipca-save', (_, data) => {
 // Also computes 2025 if enough months available
 ipcMain.handle('evolucao:ipca-fetch', async () => {
   const https = require('https');
-  const url = 'https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados?formato=json';
+  const todayBr = (() => { const d = new Date(); return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`; })();
+  const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados?formato=json&dataInicial=01/01/2000&dataFinal=${todayBr}`;
   return new Promise((resolve) => {
-    const req = https.get(url, { headers:{'User-Agent':'Cruzeiro/1.0'} }, res => {
+    const req = https.get(url, { headers:{'User-Agent':'Cruzeiro/1.0', 'Accept':'application/json'} }, res => {
       // Follow redirect if needed
       if (res.statusCode === 301 || res.statusCode === 302) {
-        https.get(res.headers.location, { headers:{'User-Agent':'Cruzeiro/1.0'} }, res2 => {
+        https.get(res.headers.location, { headers:{'User-Agent':'Cruzeiro/1.0', 'Accept':'application/json'} }, res2 => {
           let body = '';
           res2.on('data', d => body += d);
-          res2.on('end', () => processBody(body, resolve));
+          res2.on('end', () => processBody(body, res2.statusCode, resolve));
         }).on('error', e => resolve({ ok:false, error:e.message }));
         return;
       }
       let body = '';
       res.on('data', d => body += d);
-      res.on('end', () => processBody(body, resolve));
+      res.on('end', () => processBody(body, res.statusCode, resolve));
     });
     req.on('error', e => resolve({ ok:false, error:e.message }));
     req.setTimeout(20000, () => { req.destroy(); resolve({ ok:false, error:'timeout' }); });
   });
 
-  function processBody(body, resolve) {
+  function processBody(body, statusCode, resolve) {
+    if (statusCode < 200 || statusCode >= 300) {
+      resolve({ ok: false, error: `HTTP ${statusCode}${body ? ' — ' + body.slice(0,200) : ''}` });
+      return;
+    }
     try {
       const arr = JSON.parse(body);
       // arr = [{data:"01/01/2012", valor:"0,86"}, ...]
@@ -3629,6 +3634,7 @@ ipcMain.handle('pat:financing-mark-paid', (_, { assetId, month, amount }) => {
   }
   _rebalanceSchedule(assetId);
   save();
+  _backfillMissingFinancingTx();
   return { ok: true };
 });
 
@@ -3683,6 +3689,7 @@ ipcMain.handle('pat:financing-installment-set', (_, { assetId, month, installmen
   }
   _rebalanceSchedule(assetId);
   save();
+  _backfillMissingFinancingTx();
   return { ok: true };
 });
 
@@ -4429,12 +4436,17 @@ ipcMain.handle('pat:account-balances', () => {
 // Monthly IPCA (série 433 mensal) — separate from annual IPCA used in Evolução
 ipcMain.handle('pat:ipca-monthly-fetch', async () => {
   const https = require('https');
-  const url = 'https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados?formato=json';
+  const todayBr = (() => { const d = new Date(); return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`; })();
+  const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados?formato=json&dataInicial=01/01/2000&dataFinal=${todayBr}`;
   return new Promise((resolve) => {
-    const req = https.get(url, { headers: {'User-Agent':'Cruzeiro/2.0'} }, res => {
+    const req = https.get(url, { headers: {'User-Agent':'Cruzeiro/2.0', 'Accept':'application/json'} }, res => {
       let body = '';
       res.on('data', d => body += d);
       res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          resolve({ ok: false, error: `HTTP ${res.statusCode}${body ? ' — ' + body.slice(0,200) : ''}` });
+          return;
+        }
         try {
           const arr = JSON.parse(body);
           const result = {};
@@ -4446,7 +4458,7 @@ ipcMain.handle('pat:ipca-monthly-fetch', async () => {
             if (!isNaN(rate)) result[month] = rate;
           });
           resolve({ ok: true, data: result });
-        } catch(e) { resolve({ ok: false, error: e.message }); }
+        } catch(e) { resolve({ ok: false, error: `Resposta inesperada do Bacen (não é JSON válido): ${e.message}` }); }
       });
     });
     req.on('error', e => resolve({ ok: false, error: e.message }));

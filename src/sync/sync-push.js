@@ -357,7 +357,12 @@ async function pushMlRules(all, userId) {
 // ─────────────────────────────────────────────────────────────
 async function pushAiConfig(getAiConfig, userId) {
   const { provider, key } = getAiConfig();
-  if (!key) return; // nada para sincronizar — usuário não configurou IA ainda
+  if (!key) {
+    console.log('[sync:ai_config] nenhuma chave configurada no desktop — nada a sincronizar');
+    return;
+  }
+
+  console.log(`[sync:ai_config] enviando chave: provider=${provider}, tamanho=${key.length} caracteres, início="${key.slice(0,6)}", fim="${key.slice(-4)}"`);
 
   await sb.upsert('user_ai_config', [{
     user_id:   userId,
@@ -365,6 +370,8 @@ async function pushAiConfig(getAiConfig, userId) {
     api_key:   key,
     synced_at: new Date().toISOString(),
   }], 'user_id');
+
+  console.log('[sync:ai_config] upsert concluído');
 }
 
 // ─────────────────────────────────────────────────────────────

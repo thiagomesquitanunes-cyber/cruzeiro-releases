@@ -38,6 +38,19 @@ async function pullQuickEntries(all, run, first, save, userId) {
 
   for (const entry of entries) {
     try {
+      const entryType = entry.entry_type || 'expense';
+
+      if (entryType === 'transfer') {
+        const txIds = importTransferEntry(all, run, first, entry);
+        await sb.update('quick_entries', { id: entry.id }, {
+          status:      'imported',
+          imported_at: new Date().toISOString(),
+          desktop_id:  txIds.join(','), // duas pernas — guarda os dois IDs
+        });
+        imported++;
+        continue;
+      }
+
       // Resolve a conta pelo nome (busca ID)
       let accountId = null;
       if (entry.account_name) {
@@ -100,6 +113,35 @@ async function pullQuickEntries(all, run, first, save, userId) {
   if (imported > 0) save();
 
   return { imported, errors };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 1b. Importa uma transferência (duas pernas) — espelha
+// exatamente a lógica do handler tx:transfer do desktop.
+// ─────────────────────────────────────────────────────────────
+function importTransferEntry(all, run, first, entry) {
+  const fromAcc = first('SELECT id FROM accounts WHERE name=?', [entry.account_name]);
+  const toAcc   = first('SELECT id FROM accounts WHERE name=?', [entry.to_account_name]);
+
+  if (!fromAcc) throw new Error(`Conta de origem não encontrada: ${entry.account_name}`);
+  if (!toAcc)   throw new Error(`Conta de destino não encontrada: ${entry.to_account_name}`);
+
+  const maxRow = first('SELECT COALESCE(MAX(transfer_id),0) as m FROM transactions');
+  const tid    = (maxRow?.m || 0) + 1;
+  const date   = entry.date || new Date().toISOString().slice(0, 10);
+  const amount = Math.abs(entry.amount) / 100;
+  const memo   = entry.memo || 'Transferência';
+
+  const fromTxId = run(
+    'INSERT INTO transactions (account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,0,?)',
+    [fromAcc.id, date, 'Transferência', memo, -amount, tid]
+  );
+  const toTxId = run(
+    'INSERT INTO transactions (account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,0,?)',
+    [toAcc.id, date, 'Transferência', memo, amount, tid]
+  );
+
+  return [fromTxId, toTxId];
 }
 
 // ─────────────────────────────────────────────────────────────
