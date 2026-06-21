@@ -5894,6 +5894,12 @@ ipcMain.handle('inv:bulk-import-history', (_, { assets }) => {
     if (existing) {
       assetId = existing.id;
       updatedAssets++;
+      // Preenche categoria/tipo se estiverem vazios — não sobrescreve uma
+      // escolha já feita manualmente, só corrige o caso de ter ficado em
+      // branco (ex: ativo criado sem categoria antes desta importação).
+      run("UPDATE inv_assets SET category = CASE WHEN category IS NULL OR category = '' THEN ? ELSE category END, " +
+          "inv_type = CASE WHEN inv_type IS NULL OR inv_type = '' THEN ? ELSE inv_type END WHERE id = ?",
+          [categoria, inv_type, assetId]);
     } else {
       db.run(
         'INSERT INTO inv_assets (name, category, inv_type, sort_order, broker, maturity_month, liquidity) VALUES (?,?,?,0,?,?,?)',

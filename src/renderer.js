@@ -11932,7 +11932,7 @@ function refreshPatrimonioChart() {
   const _chartFLiq    = G('patf-inv-liquidity')?.value || '';
   const chartInvAssets = _inv.assets.filter(a => {
     if (_chartFBroker && (a.broker||'') !== _chartFBroker) return false;
-    if (_chartFCat && (a.category||'renda_fixa') !== _chartFCat) return false;
+    if (_chartFCat && (_isCashAsset(a) ? 'valor_em_caixa' : (a.category||'renda_fixa')) !== _chartFCat) return false;
     if (_chartFType && (a.inv_type||'') !== _chartFType) return false;
     if (_chartFLiq) {
       const d = _invLiquidityDays(a);
@@ -11954,7 +11954,7 @@ function refreshPatrimonioChart() {
 
   chartInvAssets.forEach(a => {
     // Exclude cash accounts from investment performance calculations
-    if (a.category === 'valor_em_caixa' || a.category === 'caixa') return;
+    if (_isCashAsset(a)) return;
     const factors = buildAssetTWR(a.id);
     Object.entries(factors).forEach(([m, r]) => {
       const prevM = (() => {
@@ -12023,15 +12023,23 @@ function patCheckTwrAnomalies() {
   if (!out) return;
   const issues = [];
   _inv.assets.forEach(a => {
+    if (_isCashAsset(a)) return; // caixa já é excluído do cálculo de rentabilidade — não é uma anomalia
     const txs = _inv.txAll.filter(t => t.asset_id === a.id);
     const valByM = {};
     txs.filter(t => t.tx_type === 'atualizacao').forEach(t => { valByM[t.month.slice(0,7)] = t.total_value; });
     const outflowByM = {};
-    txs.filter(t => t.tx_type in INV_TX_EXTERNAL && (t.tx_type === 'venda' || t.tx_type === 'amortizacao'))
+    txs.filter(t => t.tx_type === 'venda' || t.tx_type === 'amortizacao')
       .forEach(t => { const m = t.month.slice(0,7); outflowByM[m] = (outflowByM[m]||0) + t.total_value; });
     const inflowByM = {};
     txs.filter(t => t.tx_type === 'compra' || t.tx_type === 'aporte')
       .forEach(t => { const m = t.month.slice(0,7); inflowByM[m] = (inflowByM[m]||0) + t.total_value; });
+    // "Rendimento/custo" (dividendo/juros/jcp/cupom/taxa) também entra na
+    // fórmula real (Modified Dietz) com o mesmo papel de uma saída — sem
+    // contar isso aqui, qualquer resgate lançado como "dividendo" (em vez de
+    // "amortização") aparece como falsa anomalia.
+    const incomeByM = {};
+    txs.filter(t => t.tx_type in INV_TX_INCOME)
+      .forEach(t => { const m = t.month.slice(0,7); const sign = INV_TX_INCOME[t.tx_type]?.sign ?? 1; incomeByM[m] = (incomeByM[m]||0) + sign*t.total_value; });
     const months = Object.keys(valByM).sort();
     for (let i = 1; i < months.length; i++) {
       const prev = months[i-1], cur = months[i];
@@ -12039,16 +12047,17 @@ function patCheckTwrAnomalies() {
       if (vPrev > 0) {
         const outflow = outflowByM[cur] || 0;
         const inflow  = inflowByM[cur]  || 0;
-        const adjustedReturn = (vCur + outflow - vPrev - inflow) / vPrev;
+        const income  = incomeByM[cur]  || 0;
+        const adjustedReturn = (vCur + outflow + income - vPrev - inflow) / vPrev;
         if (adjustedReturn < -0.4) {
-          issues.push({ asset: a.name, from: prev, to: cur, vPrev, vCur, outflow, inflow, drop: adjustedReturn });
+          issues.push({ asset: a.name, from: prev, to: cur, vPrev, vCur, outflow, inflow, income, drop: adjustedReturn });
         }
       }
     }
   });
 
   if (!issues.length) {
-    out.innerHTML = `<div style="color:#16a34a">✅ Nenhuma queda suspeita encontrada (limite: -40% em um mês sem saída registrada).</div>`;
+    out.innerHTML = `<div style="color:#16a34a">✅ Nenhuma queda suspeita encontrada (limite: -40% em um mês sem saída/rendimento registrado cobrindo a diferença).</div>`;
     return;
   }
   out.innerHTML = `<div style="color:#dc2626;font-weight:600;margin-bottom:6px">⚠️ ${issues.length} queda(s) suspeita(s) encontrada(s):</div>` +
@@ -12056,7 +12065,7 @@ function patCheckTwrAnomalies() {
       <div style="padding:6px 10px;background:var(--bg3);border-radius:6px;margin-bottom:4px">
         <strong>${esc(i.asset)}</strong> — ${fmtMonth(i.from)} → ${fmtMonth(i.to)}:
         de ${fmtBRL(i.vPrev)} para ${fmtBRL(i.vCur)}
-        (${i.outflow ? 'saída registrada: ' + fmtBRL(i.outflow) + ', ' : 'sem saída registrada, '}
+        (${i.outflow ? 'saída: ' + fmtBRL(i.outflow) + ', ' : ''}${i.income ? 'rendimento/custo: ' + fmtBRL(i.income) + ', ' : ''}${!i.outflow && !i.income ? 'sem saída nem rendimento registrado, ' : ''}
         queda ajustada: ${(i.drop*100).toFixed(1)}%)
       </div>`).join('');
 }
@@ -15393,6 +15402,20 @@ const INV_CATEGORIES = {
 // Canonical category order for display (valor_em_caixa always last)
 const INV_CAT_ORDER = ['renda_fixa','tesouro','previdencia','fundos','renda_variavel','private_equity','caixa','valor_em_caixa'];
 
+// Identifica um ativo de "Valor em Caixa" de forma resiliente — não confia só
+// no campo category, que pode ficar vazio/inconsistente (ex: ativo criado
+// manualmente sem categoria, ou reimportado por um script que não atualiza
+// a categoria de um ativo já existente). Sem esse fallback por nome/tipo, um
+// ativo de caixa com category='' passa batido em toda checagem de exclusão
+// (entra na conta de TIR/TWR como se fosse um investimento de verdade, e some
+// dentro do grupo "Renda Fixa" na tabela, já que category||'renda_fixa'
+// também cai nesse default para string vazia).
+function _isCashAsset(a) {
+  return a.category === 'valor_em_caixa' || a.category === 'caixa'
+      || a.inv_type === 'Caixa'
+      || a.name === 'Valores em Caixa';
+}
+
 // Cash transactions — affect the cash flow line
 // External capital flows — money in/out of the portfolio (distort TWR if not separated)
 const INV_TX_EXTERNAL = {
@@ -16208,7 +16231,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
   const fType   = G('patf-inv-type')?.value || '';
   const fLiq    = G('patf-inv-liquidity')?.value || '';
   if (fBroker) visibleAssets = visibleAssets.filter(a => (a.broker||'') === fBroker);
-  if (fCat)    visibleAssets = visibleAssets.filter(a => (a.category||'renda_fixa') === fCat);
+  if (fCat)    visibleAssets = visibleAssets.filter(a => (_isCashAsset(a) ? 'valor_em_caixa' : (a.category||'renda_fixa')) === fCat);
   if (fType)   visibleAssets = visibleAssets.filter(a => (a.inv_type||'') === fType);
   if (fLiq) {
     visibleAssets = visibleAssets.filter(a => {
@@ -16269,14 +16292,14 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
   // Group visible assets by category (for rendering rows)
   const byCategory = {};
   visibleAssets.forEach(a => {
-    const cat = a.category || 'renda_fixa';
+    const cat = _isCashAsset(a) ? 'valor_em_caixa' : (a.category || 'renda_fixa');
     if (!byCategory[cat]) byCategory[cat] = [];
     byCategory[cat].push(a);
   });
   // Group ALL assets by category (including hidden) — for correct subtotal P&L
   const byCategoryAll = {};
   _inv.assets.forEach(a => {
-    const cat = a.category || 'renda_fixa';
+    const cat = _isCashAsset(a) ? 'valor_em_caixa' : (a.category || 'renda_fixa');
     if (!byCategoryAll[cat]) byCategoryAll[cat] = [];
     byCategoryAll[cat].push(a);
   });
@@ -16412,7 +16435,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
   catKeys.forEach(catKey => {
     const catAssets = byCategory[catKey];
     catAssets.forEach(a => {
-    const isCashAsset = a.category === 'valor_em_caixa' || a.category === 'caixa';
+    const isCashAsset = _isCashAsset(a);
     const bg = stripe(globalRi);
     globalRi++;
     const cat = INV_CATEGORIES[a.category]?.label || a.category;
@@ -16497,7 +16520,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
 
     // P&L = soma simples do fluxo nominal + valor atual (os sinais já estão corretos)
     let pnlLabel = '', pnlColor = 'var(--text3)';
-    if (hasCashFlows) {
+    if (hasCashFlows && !isCashAsset) {
       const pnl = Object.values(monthlyNetCash).reduce((s, v) => s + v, 0) + latestVal;
       pnlLabel = pnl >= 0 ? `▲ ${fmtBRL(pnl)}` : `▼ ${fmtBRL(Math.abs(pnl))}`;
       pnlColor = pnl >= 0 ? '#16a34a' : '#dc2626';
@@ -16505,7 +16528,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
 
     // Benchmark label: compare nominal TIR vs CDI/IBOV (same nominal base)
     let bmkLabel = '';
-    if (a.benchmark && a.benchmark !== 'nenhum' && irrNominal !== null && txMonths.length) {
+    if (!isCashAsset && a.benchmark && a.benchmark !== 'nenhum' && irrNominal !== null && txMonths.length) {
       const bmkData = a.benchmark === 'ibov' ? _benchmarks.ibov : _benchmarks.cdi;
       const firstCashM = txMonths[0];
       // Accumulate monthly benchmark rates over the asset's active period
@@ -16531,7 +16554,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     // nomRetLabel: annualized nominal return (CAGR) shown next to "Fluxo nominal" row
     // Uses the already-computed nominal IRR for consistency
     function nomRetLabel(netCash, latVal, cM) {
-      if (irrNominal === null) return '';
+      if (irrNominal === null || isCashAsset) return '';
       const col = irrNominal >= 0 ? '#16a34a' : '#dc2626';
       const sign = irrNominal >= 0 ? '+' : '';
       return ` <span style="color:${col};font-size:9px">(${sign}${(irrNominal*100).toFixed(1)}% a.a. nominal)</span>`;
@@ -16625,10 +16648,10 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
         <td style="${STICKY};left:0;font-size:10px;color:var(--accent);padding:2px 12px;background:${bg}" colspan="4">📥 Aporte/Resgate</td>
         ${extFlowCells}${projFlowCell}${editCellSub}
       </tr>
-      <tr data-group="${_cgk}" style="background:${bg};${_cgh}">
+      ${isCashAsset ? '' : `<tr data-group="${_cgk}" style="background:${bg};${_cgh}">
         <td style="${STICKY};left:0;font-size:10px;color:var(--green);padding:2px 12px;background:${bg}" colspan="4">💰 Rendimento/Custo${nomRetLabel(monthlyNetCash, latestVal, curM)}</td>
         ${incFlowCells}${projFlowCell}${editCellSub}
-      </tr>
+      </tr>`}
       ${showReal ? `<tr data-group="${_cgk}" style="background:${bg};${_cgh}">
         <td style="${STICKY};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${bg}" colspan="4">📈 Fluxo real total (IPCA)</td>
         ${realFlowCells}${projRealCell}${editCellSub}
@@ -16714,7 +16737,7 @@ function calcInvTotalByMonth(months) {
     if (!valMonthsSorted.length) return; // no valuations = don't include in portfolio total
 
     let lastVal = 0;
-    const isCash = a.category === 'valor_em_caixa' || a.category === 'caixa';
+    const isCash = _isCashAsset(a);
     months
       .filter(m => m >= valMonthsSorted[0] && m <= (a.closed_month || months[months.length-1]))
       .forEach(m => {
