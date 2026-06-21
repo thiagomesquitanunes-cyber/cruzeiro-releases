@@ -286,25 +286,26 @@ async function pushPatrimonio(all, userId) {
 // 7. Evolução mensal (últimos 6 meses)
 // ─────────────────────────────────────────────────────────────
 async function pushEvolution(all, userId) {
-  const from = monthsAgo(6) + '-01';
+  const from  = monthsAgo(6) + '-01';
+  const today = new Date().toISOString().slice(0, 10);
 
   const monthly = all(`
     SELECT substr(date,1,7) as month,
       SUM(CASE WHEN amount>0 THEN amount ELSE 0 END)        as income,
       SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END)   as expenses
     FROM transactions
-    WHERE date>=? AND transfer_id IS NULL
+    WHERE date>=? AND date<=? AND transfer_id IS NULL
     GROUP BY month ORDER BY month
-  `, [from]);
+  `, [from, today]);
 
   const byCategory = all(`
     SELECT substr(date,1,7) as month, category,
       SUM(ABS(amount)) as total
     FROM transactions
-    WHERE date>=? AND amount<0 AND transfer_id IS NULL
+    WHERE date>=? AND date<=? AND amount<0 AND transfer_id IS NULL
       AND category NOT IN ('Transferência','Transferências')
     GROUP BY month, category
-  `, [from]);
+  `, [from, today]);
 
   // Agrupa by_category por mês
   const catByMonth = {};
@@ -324,6 +325,10 @@ async function pushEvolution(all, userId) {
   }));
 
   await sb.upsert('mobile_evolution', rows, 'user_id,month');
+  // Remove meses fora da janela atual de 6 meses, ou que zeraram
+  // por exclusão de todas as transações daquele mês no desktop.
+  await sb.pruneNotIn('mobile_evolution', userId, 'month', rows.map(r => r.month))
+    .catch(() => {});
 }
 
 // ─────────────────────────────────────────────────────────────

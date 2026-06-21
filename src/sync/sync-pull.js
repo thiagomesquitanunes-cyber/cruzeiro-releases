@@ -231,6 +231,61 @@ async function pullMlRules(all, run, first, save, userId) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 4. Aplica alterações de conferência (cleared) feitas no mobile
+// ─────────────────────────────────────────────────────────────
+async function pullReconcileUpdates(all, run, first, save, userId) {
+  const updates = await sb.select('mobile_reconcile_updates',
+    { user_id: userId, status: 'pending' }
+  );
+
+  if (!updates.length) return { applied: 0, errors: 0 };
+
+  let applied = 0;
+  let errors  = 0;
+
+  for (const upd of updates) {
+    try {
+      // desktop_id pode conter múltiplos ids separados por vírgula (transferências)
+      const ids = String(upd.desktop_id).split(',').map(s => s.trim()).filter(Boolean);
+      let anyFound = false;
+      for (const id of ids) {
+        const exists = first('SELECT id FROM transactions WHERE id=?', [id]);
+        if (!exists) {
+          console.log(`[sync:pull] reconciliação ${upd.id}: transação ${id} não encontrada (pode ter sido recriada por recorrência) — pulando`);
+          continue;
+        }
+        anyFound = true;
+        run('UPDATE transactions SET cleared=? WHERE id=?', [upd.is_reconciled ? 1 : 0, id]);
+      }
+
+      if (!anyFound) {
+        // Nenhuma das transações referenciadas existe mais — provavelmente foi
+        // recriada por syncRecurringTxns com outro ID. Marca como rejeitada
+        // (em vez de applied) para deixar claro que não foi efetivamente aplicada.
+        await sb.update('mobile_reconcile_updates', { id: upd.id }, {
+          status: 'rejected',
+        });
+        errors++;
+        continue;
+      }
+
+      await sb.update('mobile_reconcile_updates', { id: upd.id }, {
+        status: 'applied',
+        applied_at: new Date().toISOString(),
+      });
+      applied++;
+    } catch (e) {
+      console.error(`[sync:pull] Erro ao aplicar reconciliação ${upd.id}:`, e.message);
+      await sb.update('mobile_reconcile_updates', { id: upd.id }, { status: 'rejected' }).catch(() => {});
+      errors++;
+    }
+  }
+
+  if (applied > 0) save();
+  return { applied, errors };
+}
+
+// ─────────────────────────────────────────────────────────────
 // ENTRY POINT
 // ─────────────────────────────────────────────────────────────
 async function pullAll(all, run, first, save, userId) {
@@ -248,6 +303,13 @@ async function pullAll(all, run, first, save, userId) {
   } catch (e) {
     console.error('[sync:pull] mlRules falhou:', e.message);
     results.mlRules = { error: e.message };
+  }
+
+  try {
+    results.reconcile = await pullReconcileUpdates(all, run, first, save, userId);
+  } catch (e) {
+    console.error('[sync:pull] reconcile falhou:', e.message);
+    results.reconcile = { error: e.message };
   }
 
   console.log('[sync:pull] concluído:', results);

@@ -4959,7 +4959,7 @@ function parseBTGBroker(buffer) {
   }
   if (!month) throw new Error('Não foi possível identificar o mês do extrato na aba Capa.');
 
-  const result = { month, assets: [], caixaValue: null, broker: 'BTG' };
+  const result = { month, assets: [], caixaValue: null, broker: 'BTG', unresolvedMovements: [] };
 
   // ── Flow-type classifier ──
   // Returns: 'external' | 'income' | 'ignore' | null
@@ -5070,7 +5070,15 @@ function parseBTGBroker(buffer) {
           const txDesc = String(colC||'');
           const flowType = classifyBTGFlow(txDesc);
           if (flowType === 'ignore') continue;
-          const target = result.assets.find(a => norm(a.name).startsWith(norm(mvAsset).slice(0,15)));
+          let target = result.assets.find(a => norm(a.name).startsWith(norm(mvAsset).slice(0,15)));
+          if (!target) {
+            const existingMatch = (_invAssetsList||[]).find(a => norm(a.name).startsWith(norm(mvAsset).slice(0,15)) || norm(mvAsset).startsWith(norm(a.name).slice(0,15)));
+            if (existingMatch) {
+              target = { name: existingMatch.name, category: existingMatch.category, inv_type: existingMatch.inv_type,
+                broker: 'BTG', valor: 0, movimentacoes: [], liquidacaoTotal: true };
+              result.assets.push(target);
+            }
+          }
           if (target) {
             // Fundos: col I is always the value (positive). Direction from flow_type.
             // External outflow (resgate = money back to investor = positive)
@@ -5087,6 +5095,8 @@ function parseBTGBroker(buffer) {
               amount = isResgate ? colI : -colI;
             }
             target.movimentacoes.push({ amount, type: txDesc, flow_type: flowType || 'external' });
+          } else {
+            result.unresolvedMovements.push({ date: month, desc: `${mvAsset} — ${txDesc}`, amount: colI, suggestedFlowType: flowType });
           }
         }
       }
@@ -5151,12 +5161,23 @@ function parseBTGBroker(buffer) {
         // Extract asset code from "Emissor / CODE" format
         const emAsset = String(colC||'');
         const codePart = emAsset.includes('/') ? emAsset.split('/').pop().trim() : emAsset.trim();
-        const target = result.assets.find(a => a.code===codePart || norm(a.name).includes(norm(codePart)));
-        if (!target) continue;
         const valJ = typeof colJ==='number' ? colJ : (colJ==='-'?null:toNum(colJ));
         if (!valJ) continue;
         const flowType = classifyBTGFlow(String(colD||''));
         if (flowType === 'ignore') continue;
+        let target = result.assets.find(a => a.code===codePart || norm(a.name).includes(norm(codePart)));
+        if (!target) {
+          const existingMatch = (_invAssetsList||[]).find(a => a.code===codePart || norm(a.name).includes(norm(codePart)));
+          if (existingMatch) {
+            target = { name: existingMatch.name, category: existingMatch.category, inv_type: existingMatch.inv_type, code: existingMatch.code,
+              broker: 'BTG', valor: 0, movimentacoes: [], liquidacaoTotal: true };
+            result.assets.push(target);
+          }
+        }
+        if (!target) {
+          result.unresolvedMovements.push({ date: month, desc: `${emAsset} — ${colD}`, amount: valJ, suggestedFlowType: flowType });
+          continue;
+        }
         // Renda Fixa: juros/cupom = income (positive); compra/amortização = external
         let amount;
         if (flowType === 'income') {
@@ -5279,10 +5300,21 @@ function parseBTGBroker(buffer) {
         const descN = norm(String(colC||''));
         if (descN.includes('come')) continue;
         const code = String(colD||'').trim();
-        const target = result.assets.find(a => a.code===code);
-        if (!target) continue;
         const flowType = classifyBTGFlow(String(colC||''));
         if (flowType === 'ignore') continue;
+        let target = result.assets.find(a => a.code===code);
+        if (!target) {
+          const existingMatch = (_invAssetsList||[]).find(a => a.code===code);
+          if (existingMatch) {
+            target = { name: existingMatch.name, category: existingMatch.category, inv_type: existingMatch.inv_type, code: existingMatch.code,
+              broker: 'BTG', valor: 0, movimentacoes: [], liquidacaoTotal: true };
+            result.assets.push(target);
+          }
+        }
+        if (!target) {
+          result.unresolvedMovements.push({ date: month, desc: `${code} — ${colC}`, amount: colJ, suggestedFlowType: flowType });
+          continue;
+        }
         // RV: RENDIMENTO/DIVIDENDOS/PROVENTOS = income; COMPRA/VENDA = external
         let amount;
         if (flowType === 'income') {
@@ -5416,50 +5448,115 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
     return isNaN(n) ? null : n;
   };
 
-  // Section category mapping
-  const CAT_MAP = {
-    'alternativo': 'fundos',   'multimercado': 'fundos',
-    'pos-fixado': 'fundos',    'pre-fixado': 'renda_fixa',
-    'renda fixa': 'renda_fixa','acoes': 'renda_variavel',
-    'listado': 'fundos',       'fii': 'fundos',
-    'acoesfundos': 'fundos',   'cdi': 'fundos',
+  // Normaliza um texto (minúsculas, sem acento, espaços colapsados) — usado
+  // tanto pra identificar cabeçalhos de seção quanto títulos de coluna.
+  const norm2 = s => (s||'').toString().toLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+
+  // Seções de nível 1 (linhas de total da categoria, ex: "Ações" com o total
+  // na coluna G) — mapeiam pra uma "seção" interna usada na classificação.
+  // Essas linhas nunca são ativos — são só o cabeçalho/total da categoria.
+  const TOP_SECTIONS = {
+    'acoes': 'acoes',
+    'derivativos de balcao': 'derivativos',
+    'fundos de investimentos': 'fundos',
+    'tesouro direto': 'tesouro_direto',
+    'renda fixa': 'renda_fixa',
+    'posicao de fundos imobiliarios': 'fii',
   };
-  const TYPE_MAP = {
-    'alternativo': 'FIP', 'multimercado': 'Fundo Multimercado',
-    'pos-fixado': 'Fundo de Renda Fixa', 'listado': 'FII',
-    'pre-fixado': 'Fundo de Renda Fixa',
-  };
+
+  // Decide a categoria/tipo de um ativo combinando a seção (sinal principal,
+  // conforme pedido) com o nome do ativo (pra refinar o tipo, e também pra
+  // corrigir os casos inequívocos onde o nome identifica o título com mais
+  // precisão do que a seção em que a XP o listou — ex: um NTN-B é sempre
+  // Tesouro IPCA+, esteja ele listado na aba "Renda Fixa" ou "Tesouro Direto").
+  function classifyXPAsset(topSection, subLabel, name) {
+    const n = (name||'').toUpperCase();
+    const sub = norm2(subLabel);
+
+    if (/^NTN-?B|TESOURO IPCA/.test(n))            return { category:'tesouro', inv_type:'Tesouro IPCA+' };
+    if (/^NTN-?F|^LTN\b|TESOURO PREFIXADO/.test(n)) return { category:'tesouro', inv_type:'Tesouro Prefixado' };
+    if (/^LFT\b|TESOURO SELIC/.test(n))            return { category:'tesouro', inv_type:'Tesouro SELIC' };
+    if (/TESOURO RENDA\+/.test(n))                 return { category:'tesouro', inv_type:'Renda+' };
+    if (/TESOURO EDUCA\+/.test(n))                 return { category:'tesouro', inv_type:'Tesouro Educa+' };
+    if (/\bFIP\b/.test(n))                         return { category:'private_equity', inv_type:'Private Equity' };
+
+    switch (topSection) {
+      case 'acoes':         return { category:'renda_variavel', inv_type:'Ações' };
+      case 'derivativos':    return { category:'renda_variavel', inv_type:'Contrato Futuro' };
+      case 'tesouro_direto': return { category:'tesouro', inv_type:'Tesouro SELIC' };
+      case 'fii':            return { category:'fundos', inv_type:'FII' };
+      case 'renda_fixa': {
+        if (/^CRA\b/.test(n))   return { category:'renda_fixa', inv_type:'CRA' };
+        if (/^CRI\b/.test(n))   return { category:'renda_fixa', inv_type:'CRI' };
+        if (/^DEB\b/.test(n))   return { category:'renda_fixa', inv_type:'Debênture' };
+        if (/^CDB\b/.test(n))   return { category:'renda_fixa', inv_type:'CDB' };
+        if (/^LCI\b/.test(n))   return { category:'renda_fixa', inv_type:'LCI' };
+        if (/^LCA\b/.test(n))   return { category:'renda_fixa', inv_type:'LCA' };
+        if (/^LF\b/.test(n))    return { category:'renda_fixa', inv_type:'LF' };
+        if (/POUPAN/.test(n))   return { category:'renda_fixa', inv_type:'Poupança' };
+        return { category:'renda_fixa', inv_type:'Debênture' }; // fallback genérico p/ títulos não identificados
+      }
+      case 'fundos':
+      default: {
+        // Ticker de fundo listado (4 letras + 11/12/13), ex: TGRE11, XPAG11, VCRI11
+        const firstTok = n.split(/[\s\-]/)[0];
+        if (/^[A-Z]{4}1[123]$/.test(firstTok)) return { category:'fundos', inv_type:'FII' };
+        if (n.includes('ETF'))                 return { category:'fundos', inv_type:'ETF' };
+        if (sub.includes('multimercado'))      return { category:'fundos', inv_type:'Fundo Multimercado' };
+        if (sub.includes('acoes') || sub.includes('ações')) return { category:'fundos', inv_type:'Fundo de Ações' };
+        if (sub.includes('cambial'))           return { category:'fundos', inv_type:'Fundo Cambial' };
+        return { category:'fundos', inv_type:'Fundo Renda Fixa' }; // pós-fixado, inflação, alternativos etc.
+      }
+    }
+  }
 
   const assets = [];
-  let currentCat = 'fundos', currentType = 'Fundo de Renda Fixa';
-
-  const SKIP = ['fundos de investimentos','seu patrimônio','posição','% alocação',
-    'valor aplicado','valor líquido','rentabilidade'];
+  let topSection = null;   // seção de nível 1 atual (Ações, Renda Fixa, etc.)
+  let subLabel   = '';     // sub-rótulo da seção (ex: "Alternativos", "Inflação")
+  let valueColIdx = 6;     // coluna a usar pro valor — recalculada a cada cabeçalho de subseção
 
   for (const row of posRows) {
     const colA = row[0] ? String(row[0]).trim() : '';
-    const colG = row[6];
     if (!colA) continue;
+    const nA = norm2(colA);
 
-    const nA = colA.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
-
-    // Section header: contains "% |"
-    if (colA.includes('%') && colA.includes('|')) {
-      const label = nA.split('|').pop().trim();
-      for (const [k, v] of Object.entries(CAT_MAP)) {
-        if (label.includes(k)) { currentCat = v; currentType = TYPE_MAP[k] || currentType; break; }
-      }
+    // Linha de total de categoria (nível 1) — ex: "Ações" ... total na col G.
+    // Nunca é um ativo: só atualiza a seção atual e é ignorada.
+    if (TOP_SECTIONS[nA]) {
+      topSection = TOP_SECTIONS[nA];
+      subLabel = '';
+      valueColIdx = 6; // será recalculado no próximo cabeçalho de subseção
       continue;
     }
 
-    // Skip header/total rows
-    if (SKIP.some(s => nA.startsWith(s.normalize('NFD').replace(/[̀-ͯ]/g,'')))) continue;
+    // Cabeçalho de subseção: "X% | Y" na coluna A, com os títulos das outras
+    // colunas (Posição, Valor líquido, etc.) nas colunas seguintes da MESMA
+    // linha. Detecta dinamicamente qual coluna usar pro valor: prioriza
+    // "Valor líquido"; se não existir nessa subseção, usa "Posição"/"Posição
+    // a mercado". As colunas variam de seção pra seção, então isso precisa
+    // ser recalculado a cada cabeçalho — nunca fixar numa coluna fixa (G).
+    if (colA.includes('%') && colA.includes('|')) {
+      subLabel = colA.split('|').pop().trim();
+      let liquidoIdx = -1, posicaoIdx = -1;
+      for (let ci = 1; ci < row.length; ci++) {
+        const h = norm2(row[ci]);
+        if (!h) continue;
+        if (h.includes('valor liquido') && liquidoIdx < 0) liquidoIdx = ci;
+        else if (h.startsWith('posicao') && posicaoIdx < 0) posicaoIdx = ci;
+      }
+      valueColIdx = liquidoIdx >= 0 ? liquidoIdx : (posicaoIdx >= 0 ? posicaoIdx : 6);
+      continue;
+    }
 
-    const valor = parseBRL(colG);
-    if (valor == null || valor <= 0) continue;
+    if (!topSection) continue; // ainda não viu nenhuma seção reconhecida — ignora (cabeçalho do relatório, etc.)
 
+    const valor = parseBRL(row[valueColIdx]);
+    if (valor == null) continue;
+
+    const { category, inv_type } = classifyXPAsset(topSection, subLabel, colA);
     assets.push({
-      name: colA, category: currentCat, inv_type: currentType,
+      name: colA, category, inv_type,
       broker: 'XP', valor, movimentacoes:[],
     });
   }
@@ -5484,12 +5581,64 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
     return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;
   };
 
-  // Find header row (col B = 'Movimentação')
-  let dataStart = 14;
+  // Find header row and the actual column where "Movimentação" lives — não
+  // assume índice fixo, porque essa aba às vezes começa na coluna B (não A),
+  // o que deslocaria todas as leituras por índice em 1 e fazia a data cair
+  // onde se esperava a descrição, e a descrição onde se esperava o valor.
+  // As colunas seguintes (Liquidação, Lançamento, [vazia], Valor) sempre
+  // aparecem nessa ordem relativa à coluna de "Movimentação".
+  let dataStart = 14, movColIdx = 1;
   for (let i = 0; i < Math.min(extRows.length, 20); i++) {
-    if (normA(String(extRows[i][1]||'')).includes('movimenta')) { dataStart = i + 1; break; }
+    const r = extRows[i] || [];
+    const foundIdx = r.findIndex(c => normA(String(c||'')).includes('movimenta'));
+    if (foundIdx >= 0) { dataStart = i + 1; movColIdx = foundIdx; break; }
+  }
+  const dateColIdx = movColIdx;
+  const descColIdx = movColIdx + 2;
+  const valColIdx  = movColIdx + 4;
+
+  // Classificador de fluxo das movimentações da XP — definido aqui dentro
+  // (não depende de uma função de outro parser, que não fica acessível
+  // neste escopo). 'tax' reduz o valor líquido do resgate correspondente.
+  // 'unresolved' = movimentação real, mas que o parser não tenta adivinhar
+  // a qual ativo atribuir (ex: nota de corretagem agregada) — vai pra
+  // revisão manual em vez de simplesmente desaparecer.
+  function classifyXPFlowLocal(desc) {
+    const d = normA(desc);
+    if (d.includes('ted bco') && d.includes('retirada em c/c')) return { flow:'ignore' }; // saída de caixa pro banco — fora do escopo de ativos
+    if (d.startsWith('ted ter bco'))                             return { flow:'external', sign:-1 }; // TED aplicação fundos
+    if (d.trim() === 'lancamento')                                return { flow:'ignore' };
+    if (d.includes('come cota') || d.includes('come-cota'))       return { flow:'ignore' };
+    if (d.includes('estorno'))                                    return { flow:'unresolved' };
+    if (d.includes('operacoes em bolsa'))                         return { flow:'unresolved' }; // nota de corretagem agregada, não atribuível a 1 ativo automaticamente
+    if (d.includes('liquidacao tesouro direto'))                  return { flow:'unresolved' };
+    if (d.includes('venda de cessao de cotas'))                   return { flow:'unresolved' };
+    if (d.includes('compra de oferta de acoes'))                  return { flow:'unresolved' };
+
+    if (d.startsWith('ir - pgto juros') || d.startsWith('ir -pgto juros')) return { flow:'tax', sign:-1 };
+    if (d.includes('irrf') && d.includes('resgate'))              return { flow:'tax', sign:-1 };
+    if (d.includes('iof')  && d.includes('resgate'))               return { flow:'tax', sign:-1 };
+    if (d.includes('irrf') && d.includes('titulos tesouro'))       return { flow:'unresolved' };
+
+    if (d.startsWith('rendimento fundo fechado balcao'))           return { flow:'income', sign:+1 };
+    if (d.startsWith('devolucao tx de distr'))                     return { flow:'income', sign:+1 };
+    if (d.startsWith('pgto juros'))                                return { flow:'income', sign:+1 };
+    if (d.startsWith('pgto premio'))                                return { flow:'income', sign:+1 };
+    if (d.startsWith('dividendos de clientes'))                    return { flow:'income', sign:+1 };
+    if (d.startsWith('juros s/ capital de clientes'))               return { flow:'income', sign:+1 };
+    if (d.startsWith('rendimentos de clientes'))                    return { flow:'income', sign:+1 };
+
+    if (d.startsWith('pgto amortizacao'))                          return { flow:'external', sign:+1 };
+    if (d.startsWith('amortizacao de fundo'))                      return { flow:'external', sign:+1 };
+    if (d.startsWith('integralizacao de cotas'))                   return { flow:'external', sign:-1 };
+    if (d.startsWith('adiantamento resgate'))                      return { flow:'external', sign:+1 };
+    if (d.startsWith('resgate'))                                   return { flow:'external', sign:+1 };
+
+    return { flow:null, sign:null };
   }
 
+  // Prefixos cuja parte ÚTIL pro nome do ativo vem DEPOIS deles — tentados em
+  // ordem (do mais específico pro mais genérico) antes do formato "X | Y".
   const PREFIXES_XP = [
     'RENDIMENTO FUNDO FECHADO BALCÃO',
     'Devolução Tx de Distr',
@@ -5500,52 +5649,103 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
     'IOF S/RESGATE FUNDOS',
     'RESGATE',
   ];
+  // "TED TER BCO ... TED APLICAÇÃO FUNDOS <nome>" — o nome vem depois de um
+  // trecho de roteamento bancário de tamanho variável, então busca o marcador
+  // "TED APLICAÇÃO FUNDOS" em qualquer posição, não só no início da string.
+  const TED_APLIC_MARK = 'TED APLICAÇÃO FUNDOS';
+  // "DIVIDENDOS DE CLIENTES <TICKER> S/ ..." / "JUROS S/ CAPITAL DE CLIENTES <TICKER> S/ ..." / "RENDIMENTOS DE CLIENTES <TICKER> S/ ..."
+  const TICKER_RE = /^(DIVIDENDOS DE CLIENTES|JUROS S\/\s*CAPITAL DE CLIENTES|RENDIMENTOS DE CLIENTES)\s+(\S+)\s+S\//i;
+
+  function extractXPAssetName(desc) {
+    // Formato "Pgto Juros/Amortização/Prêmio <código> | <nome do título>"
+    if (desc.includes(' | ')) return desc.split(' | ').pop().trim();
+    const tickerM = desc.match(TICKER_RE);
+    if (tickerM) return tickerM[2].trim();
+    const tedIdx = desc.toUpperCase().indexOf(TED_APLIC_MARK);
+    if (tedIdx >= 0) return desc.slice(tedIdx + TED_APLIC_MARK.length).trim();
+    for (const prefix of PREFIXES_XP) {
+      if (desc.toUpperCase().startsWith(prefix.toUpperCase())) {
+        return desc.slice(prefix.length).replace(/^\s+/, '').trim();
+      }
+    }
+    return desc;
+  }
+
+  // Casamento por nome entre a descrição do extrato e os ativos da posição —
+  // a XP usa nomes bem diferentes nos dois relatórios pro mesmo ativo (ex:
+  // "Riza Domus FII" no extrato vs "RZDS11 - Riza Domus FII" na posição), por
+  // isso usa contenção (um nome aparece dentro do outro) e, se isso falhar,
+  // sobreposição de palavras — não só prefixo estrito.
+  function fuzzyMatchXPAsset(rawName, candidates) {
+    const nExt = normA(rawName).replace(/\s+\d[\d.,]*$/,'').trim(); // remove código numérico final, se houver
+    if (!nExt) return null;
+    let best = null, bestScore = 0;
+    for (const a of candidates) {
+      const nA = normA(a.name);
+      if (!nA) continue;
+      if (nA.includes(nExt) || nExt.includes(nA)) return a; // contenção direta — match forte, retorna já
+      const extTok = nExt.split(' ').filter(t => t.length >= 3);
+      const aTok   = nA.split(' ').filter(t => t.length >= 3);
+      if (!extTok.length || !aTok.length) continue;
+      const overlap = extTok.filter(t => aTok.some(at => at === t || at.startsWith(t) || t.startsWith(at))).length;
+      const score = overlap / Math.max(extTok.length, aTok.length);
+      if (score > bestScore) { bestScore = score; best = a; }
+    }
+    return bestScore >= 0.6 ? best : null;
+  }
+
+  const unresolvedMovements = [];
 
   for (let ri = dataStart; ri < extRows.length; ri++) {
     const row = extRows[ri];
 
-    // Col B (index 1) = date as Excel serial number
-    const rowMonth = serialToMonth(row[1]);
+    const rowMonth = serialToMonth(row[dateColIdx]);
     if (!rowMonth) continue;
     if (rowMonth !== month) continue; // filter to posição month only
 
-    const descVal = row[3];  // col D = description
-    const amtVal  = row[5];  // col F = value
+    const descVal = row[descColIdx];
+    const amtVal  = row[valColIdx];
     if (!descVal || amtVal == null) continue;
 
     const desc  = String(descVal).trim();
 
-    const cls = classifyXPFlow(desc);
+    const cls = classifyXPFlowLocal(desc);
     if (cls.flow === 'ignore') continue;
-
-    // Extract asset name after transaction type prefix
-    let assetName = desc;
-    for (const prefix of PREFIXES_XP) {
-      if (desc.toUpperCase().startsWith(prefix.toUpperCase())) {
-        assetName = desc.slice(prefix.length).replace(/^\s+/, '').trim();
-        break;
-      }
-    }
-    // IRRF/IOF lines often have a leading "- " or extra spaces after the prefix
-    assetName = assetName.replace(/^-\s*/, '').trim();
 
     const rawVal = typeof amtVal === 'number' ? amtVal
       : parseFloat(String(amtVal).replace(',','.'));
     if (isNaN(rawVal) || rawVal === 0) continue;
 
-    // Fuzzy name match against posição assets
-    const nExt = normA(assetName);
-    let target = null;
-    for (const len of [35, 25, 15, 10]) {
-      const pfx = nExt.slice(0, len).trim();
-      if (!pfx) continue;
-      target = assets.find(a => {
-        const nA = normA(a.name);
-        return nA.startsWith(pfx) || pfx.startsWith(nA.slice(0, Math.max(len-5, 8)));
-      });
-      if (target) break;
+    // Movimentação real, mas que o parser sabe de antemão que não consegue
+    // atribuir com segurança (ex: nota de corretagem agregada) — direto pra
+    // revisão manual, nem tenta casar nome.
+    if (cls.flow === 'unresolved') {
+      unresolvedMovements.push({ date: rowMonth, desc, amount: rawVal, suggestedFlowType: null });
+      continue;
     }
-    if (!target) continue;
+
+    const assetName = extractXPAssetName(desc).replace(/^-\s*/, '').trim();
+    let target = fuzzyMatchXPAsset(assetName, assets);
+    if (!target) {
+      // Ativo pode ter sido total/parcialmente vendido durante o mês e por
+      // isso não aparece mais na posição — busca entre os ativos JÁ
+      // CADASTRADOS no app antes de desistir. Se achar, cria a entrada deste
+      // mês com posição zerada (em vez de simplesmente não aparecer mais).
+      const existingMatch = fuzzyMatchXPAsset(assetName, _invAssetsList || []);
+      if (existingMatch) {
+        target = {
+          name: existingMatch.name, category: existingMatch.category, inv_type: existingMatch.inv_type,
+          broker: 'XP', valor: 0, movimentacoes: [], liquidacaoTotal: true,
+        };
+        assets.push(target);
+      }
+    }
+    if (!target) {
+      // Tinha uma classificação de fluxo, mas não achou o ativo correspondente
+      // na posição — também vai pra revisão manual, em vez de desaparecer.
+      unresolvedMovements.push({ date: rowMonth, desc, amount: rawVal, suggestedFlowType: cls.flow === 'tax' ? 'external' : cls.flow });
+      continue;
+    }
 
     if (cls.flow === 'tax') {
       // IRRF/IOF on resgate — reduce the resgate amount (net of tax)
@@ -5561,7 +5761,7 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
       const amount = Math.abs(rawVal); // income always positive
       target.movimentacoes.push({ amount, type: desc, flow_type: 'income' });
     } else if (cls.flow === 'external') {
-      // sign from classifyXPFlow: -1 = compra (money out of pocket), +1 = venda (money back)
+      // sign from classifyXPFlowLocal: -1 = compra (money out of pocket), +1 = venda (money back)
       const amount = cls.sign * Math.abs(rawVal);
       target.movimentacoes.push({ amount, type: desc, flow_type: 'external' });
 
@@ -5572,12 +5772,14 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
         }
       }
     } else {
-      // Unknown term — fall back to memorized classification (handled later) or default external
+      // Tipo de movimentação não reconhecido — mantém na lista sem flow_type
+      // definido, pra aparecer como "❓" na pré-visualização e o usuário
+      // poder classificar manualmente (e o app memoriza a escolha).
       target.movimentacoes.push({ amount: rawVal, type: desc });
     }
   }
 
-  return { month, assets, caixaValue: null, broker: 'XP' };
+  return { month, assets, caixaValue: null, broker: 'XP', unresolvedMovements };
 }
 
 function parseCustomBroker(buffer, config) {
@@ -5702,8 +5904,29 @@ function renderBrokerPreview(parsed) {
     });
 
     const hasMovs = allMovs.length > 0;
-    return { extCell: fmtV(extTotal || 0), incCell: fmtV(incTotal || 0), unkHtml: hasMovs ? movHtml : '' };
+    return { extCell: fmtV(extTotal || 0), incCell: fmtV(incTotal || 0), extTotal, incTotal, unkHtml: hasMovs ? movHtml : '' };
   }
+
+  // Opções de "Tipo" por categoria — mesma fonte usada no cadastro manual de
+  // investimentos, pra manter os dois fluxos consistentes.
+  window._brokerTypeOptions = (cat, current) => {
+    const types = (INV_CATEGORIES[cat]?.types || []).slice();
+    if (current && !types.includes(current)) types.unshift(current); // preserva um tipo já reconhecido fora da lista padrão
+    return types.map(t => `<option value="${esc(t)}" ${t===current?'selected':''}>${esc(t)}</option>`).join('');
+  };
+  // Repopula o dropdown de Tipo quando a Categoria muda ao lado dele
+  window._brokerCatChanged = (catSel) => {
+    const row = catSel.closest('tr');
+    const typeSel = row?.querySelector('.broker-type-sel');
+    if (typeSel) typeSel.innerHTML = window._brokerTypeOptions(catSel.value, null);
+  };
+  // Parser de moeda simples para os campos editáveis desta tela (Valor/Ext/Rend)
+  window._brokerParseBRL = v => {
+    if (v == null || v === '') return null;
+    const s = String(v).replace(/R\$\s*/i,'').replace(/\./g,'').replace(',','.').trim();
+    const n = parseFloat(s);
+    return isNaN(n) ? null : n;
+  };
 
   let rows = assets.map((a, i) => {
     const liqLabel = a.liquidacaoTotal ? ' 🔴' : '';
@@ -5729,30 +5952,41 @@ function renderBrokerPreview(parsed) {
     </div>`;
     const CAT_OPTIONS = ['fundos','renda_fixa','tesouro','previdencia','renda_variavel','valor_em_caixa']
       .map(c => `<option value="${c}" ${a.category===c?'selected':''}>${catLabel(c)}</option>`).join('');
-    const { extCell, incCell, unkHtml } = buildFlowCells(a, i);
+    const { extCell, incCell, extTotal, incTotal, unkHtml } = buildFlowCells(a, i);
     const unkRow = unkHtml ? `<tr style="background:var(--bg3)">
       <td colspan="6" style="padding:0 4px"></td>
       <td style="padding:3px 8px 5px 8px">${unkHtml}</td>
     </tr>` : '';
+    const unclassifiedCount = (a.movimentacoes||[]).filter(m => !m.flow_type).length;
     return `<tr>
       <td style="font-size:11px;padding:4px 6px;min-width:150px">
         <div style="font-size:10px;color:var(--text3);margin-bottom:2px">${esc(a.name)}</div>
         ${nameInput}
       </td>
       <td style="padding:3px 4px">
-        <select class="broker-cat-sel inp" data-idx="${i}" style="font-size:11px;padding:2px 4px;min-width:90px">
+        <select class="broker-cat-sel inp" data-idx="${i}" style="font-size:11px;padding:2px 4px;min-width:90px" onchange="window._brokerCatChanged(this)">
           ${CAT_OPTIONS}
         </select>
       </td>
       <td style="padding:3px 4px">
-        <input class="broker-type-inp inp" data-idx="${i}" value="${esc(a.inv_type||'')}"
-          style="font-size:11px;padding:2px 5px;min-width:70px">
+        <select class="broker-type-sel inp" data-idx="${i}" style="font-size:11px;padding:2px 4px;min-width:110px">
+          ${window._brokerTypeOptions(a.category, a.inv_type||'')}
+        </select>
       </td>
       <td style="font-size:11px;padding:4px 6px;text-align:center">${vencLabel}</td>
-      <td style="text-align:center;font-size:11px;padding:4px 8px;font-family:'DM Mono',monospace;white-space:nowrap;color:var(--green)">${a.valor!=null?fmtBRL(a.valor):'—'}</td>
-      <td style="text-align:center;font-size:11px;padding:4px 8px">${extCell}</td>
-      <td style="text-align:center;font-size:11px;padding:4px 8px">${incCell}</td>
-      <td style="font-size:11px;padding:4px 8px;text-align:right">${incCell}</td>
+      <td style="text-align:center;padding:4px 6px">
+        <input class="broker-valor-inp inp" data-idx="${i}" value="${a.valor!=null?fmtBRL(a.valor):''}"
+          style="font-size:11px;padding:2px 5px;min-width:90px;text-align:right;font-family:'DM Mono',monospace;color:var(--green)">
+      </td>
+      <td style="text-align:center;padding:4px 6px">
+        <input class="broker-ext-inp inp" data-idx="${i}" value="${extTotal?fmtBRL(extTotal):''}"
+          style="font-size:11px;padding:2px 5px;min-width:80px;text-align:right;font-family:'DM Mono',monospace;color:var(--accent)">
+      </td>
+      <td style="text-align:center;padding:4px 6px">
+        <input class="broker-inc-inp inp" data-idx="${i}" value="${incTotal?fmtBRL(incTotal):''}"
+          style="font-size:11px;padding:2px 5px;min-width:80px;text-align:right;font-family:'DM Mono',monospace;color:var(--green)">
+      </td>
+      <td style="font-size:11px;padding:4px 8px;text-align:center;color:#d97706">${unclassifiedCount ? `❓ ${unclassifiedCount}` : ''}</td>
     </tr>${unkRow}`;
   }).join('');
 
@@ -5769,6 +6003,137 @@ function renderBrokerPreview(parsed) {
     ? `<div style="background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:8px 12px;font-size:12px;color:#92400e;margin-bottom:8px">
         ⚠️ Movimentações com tipo não identificado (❓) precisam ser classificadas. Sua escolha será lembrada automaticamente nas próximas importações.
        </div>` : '';
+
+  // ── Movimentações não atribuídas a nenhum ativo ──
+  // Nunca somem silenciosamente: ficam aqui até o usuário decidir atribuir
+  // (a um ativo, ou dividir entre vários) ou marcar como ignorada de propósito.
+  window._unresolvedAssignSingle = (i, val) => {
+    const p = G('broker-preview')._parsed;
+    const m = p.unresolvedMovements[i];
+    if (!val) return;
+    const asset = p.assets[parseInt(val)];
+    if (!asset) return;
+    asset.movimentacoes = asset.movimentacoes || [];
+    asset.movimentacoes.push({ amount: m.amount, type: m.desc, flow_type: m.suggestedFlowType || null });
+    p.unresolvedMovements.splice(i, 1);
+    renderBrokerPreview(p);
+  };
+  window._unresolvedToggleSplit = (i) => {
+    const p = G('broker-preview')._parsed;
+    const m = p.unresolvedMovements[i];
+    m._split = m._split ? null : [{ assetIdx: null, amount: null }, { assetIdx: null, amount: null }];
+    renderBrokerPreview(p);
+  };
+  window._unresolvedSplitAddRow = (i) => {
+    const p = G('broker-preview')._parsed;
+    p.unresolvedMovements[i]._split.push({ assetIdx: null, amount: null });
+    renderBrokerPreview(p);
+  };
+  window._unresolvedSplitRemoveRow = (i, ji) => {
+    const p = G('broker-preview')._parsed;
+    p.unresolvedMovements[i]._split.splice(ji, 1);
+    renderBrokerPreview(p);
+  };
+  window._unresolvedSplitSetAsset = (i, ji, val) => {
+    const p = G('broker-preview')._parsed;
+    p.unresolvedMovements[i]._split[ji].assetIdx = val ? parseInt(val) : null;
+    renderBrokerPreview(p);
+  };
+  window._unresolvedSplitSetAmount = (i, ji, val) => {
+    const p = G('broker-preview')._parsed;
+    p.unresolvedMovements[i]._split[ji].amount = window._brokerParseBRL(val);
+    renderBrokerPreview(p);
+  };
+  window._unresolvedSplitConfirm = (i) => {
+    const p = G('broker-preview')._parsed;
+    const m = p.unresolvedMovements[i];
+    const allocs = (m._split || []).filter(al => al.assetIdx != null && al.amount);
+    const sum = allocs.reduce((s,al) => s + al.amount, 0);
+    if (!allocs.length || Math.abs(Math.abs(sum) - Math.abs(m.amount)) > 0.01) return; // botão fica desabilitado nesse caso, mas reforça aqui
+    allocs.forEach(al => {
+      const asset = p.assets[al.assetIdx];
+      if (!asset) return;
+      asset.movimentacoes = asset.movimentacoes || [];
+      asset.movimentacoes.push({ amount: al.amount, type: m.desc + ' (dividido)', flow_type: m.suggestedFlowType || null });
+    });
+    p.unresolvedMovements.splice(i, 1);
+    renderBrokerPreview(p);
+  };
+  window._unresolvedIgnore = (i) => {
+    const p = G('broker-preview')._parsed;
+    p.unresolvedMovements.splice(i, 1);
+    p._ignoredUnresolvedCount = (p._ignoredUnresolvedCount || 0) + 1;
+    renderBrokerPreview(p);
+  };
+
+  function buildUnresolvedHtml() {
+    const unresolved = parsed.unresolvedMovements || [];
+    if (!unresolved.length) return '';
+    const assetOptions = selectedIdx => assets.map((a, ai) =>
+      `<option value="${ai}" ${ai===selectedIdx?'selected':''}>${esc(a.name)}</option>`).join('');
+
+    const rowsHtml = unresolved.map((m, i) => {
+      const splitMode = !!m._split;
+      let splitHtml = '';
+      if (splitMode) {
+        const sum = m._split.reduce((s,al) => s + (al.amount||0), 0);
+        const target = Math.abs(m.amount);
+        const matchOk = Math.abs(Math.abs(sum) - target) < 0.01;
+        splitHtml = `
+          <div style="margin-top:6px;padding-left:4px;border-left:2px solid var(--border)">
+            ${m._split.map((al, ji) => `
+              <div style="display:flex;gap:4px;align-items:center;margin-bottom:3px">
+                <select class="inp" style="font-size:11px;padding:2px 4px;flex:1" onchange="window._unresolvedSplitSetAsset(${i},${ji},this.value)">
+                  <option value="">— selecionar ativo —</option>
+                  ${assetOptions(al.assetIdx)}
+                </select>
+                <input class="inp" style="font-size:11px;padding:2px 4px;width:100px;text-align:right" value="${al.amount?fmtBRL(al.amount):''}"
+                  placeholder="0,00" onchange="window._unresolvedSplitSetAmount(${i},${ji},this.value)">
+                <button class="btn xs" type="button" onclick="window._unresolvedSplitRemoveRow(${i},${ji})">✕</button>
+              </div>`).join('')}
+            <div style="display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap">
+              <button class="btn xs" type="button" onclick="window._unresolvedSplitAddRow(${i})">+ linha</button>
+              <span style="font-size:11px;color:${matchOk?'#16a34a':'#dc2626'}">
+                ${matchOk ? '✅ a soma bate com o valor do extrato' : `soma atual: ${fmtBRL(sum)} de ${fmtBRL(m.amount)}`}
+              </span>
+              <button class="btn xs primary" type="button" ${matchOk?'':'disabled'} onclick="window._unresolvedSplitConfirm(${i})">✓ Confirmar divisão</button>
+            </div>
+          </div>`;
+      }
+      return `
+        <div style="padding:8px 10px;border:1px solid #fde68a;background:#fffbeb;border-radius:6px;margin-bottom:6px">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span style="font-size:11px;color:var(--text3);white-space:nowrap">${fmtMonth(m.date)}</span>
+            <span style="font-size:12px;flex:1;min-width:200px" title="${esc(m.desc)}">${esc(m.desc.slice(0,80))}</span>
+            <span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:600">${fmtBRL(m.amount)}</span>
+          </div>
+          ${!splitMode ? `
+          <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
+            <select class="inp" style="font-size:11px;padding:2px 4px;flex:1;min-width:160px" onchange="window._unresolvedAssignSingle(${i},this.value)">
+              <option value="">— selecionar ativo —</option>
+              ${assetOptions(null)}
+            </select>
+            <button class="btn xs" type="button" onclick="window._unresolvedToggleSplit(${i})">↔ Dividir entre vários ativos</button>
+            <button class="btn xs" type="button" style="border-color:var(--red);color:var(--red)" onclick="window._unresolvedIgnore(${i})">🚫 Ignorar</button>
+          </div>` : `
+          <div style="margin-top:4px">
+            <button class="btn xs" type="button" onclick="window._unresolvedToggleSplit(${i})">↩ Cancelar divisão</button>
+          </div>`}
+          ${splitHtml}
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="tbl-card" style="margin-top:14px;border-color:#f59e0b">
+        <div class="tbl-header"><h3>⚠️ ${unresolved.length} movimentação(ões) não identificada(s) automaticamente</h3></div>
+        <p style="font-size:12px;color:var(--text3);margin:0 0 10px">
+          O importador encontrou essas movimentações no extrato, mas não conseguiu atribuí-las a um ativo com segurança.
+          Escolha o ativo (ou divida entre vários) — nenhuma é importada sem uma decisão sua.
+        </p>
+        ${rowsHtml}
+      </div>`;
+  }
+  const unresolvedHtml = buildUnresolvedHtml();
 
   preview.innerHTML = `
     <div class="tbl-card">
@@ -5796,6 +6161,7 @@ function renderBrokerPreview(parsed) {
         </table>
       </div>
     </div>
+    ${unresolvedHtml}
     <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
       <button class="btn primary" onclick="confirmBrokerImport()">✓ Importar para Patrimônio</button>
       <button class="btn" onclick="cancelBrokerImport()">Cancelar</button>
@@ -5826,10 +6192,22 @@ async function confirmBrokerImport() {
   const parsed = preview?._parsed;
   if (!parsed) return;
 
+  const pendingUnresolved = (parsed.unresolvedMovements || []).length;
+  if (pendingUnresolved > 0) {
+    const ok = await showConfirmDialog(
+      'Movimentações não atribuídas',
+      `Ainda há ${pendingUnresolved} movimentação(ões) não atribuídas a nenhum ativo (veja a seção "⚠️" acima). Se continuar agora, elas serão descartadas e não entrarão na importação. Quer voltar e resolvê-las antes?`,
+      'Importar mesmo assim', false);
+    if (!ok) return;
+  }
+
   // Read edited names from preview table — user may have remapped assets
-  const nameInputs = preview.querySelectorAll('.broker-name-inp');
+  const nameInputs  = preview.querySelectorAll('.broker-name-inp');
   const catSelects  = preview.querySelectorAll('.broker-cat-sel');
-  const typeInputs  = preview.querySelectorAll('.broker-type-inp');
+  const typeSelects = preview.querySelectorAll('.broker-type-sel');
+  const valorInputs = preview.querySelectorAll('.broker-valor-inp');
+  const extInputs   = preview.querySelectorAll('.broker-ext-inp');
+  const incInputs    = preview.querySelectorAll('.broker-inc-inp');
 
   nameInputs.forEach((inp, i) => {
     if (parsed.assets[i]) {
@@ -5842,8 +6220,36 @@ async function confirmBrokerImport() {
         parsed.assets[i]._skip = true;
       }
       // Read edited category and type
-      if (catSelects[i]) parsed.assets[i]._editedCategory = catSelects[i].value || null;
-      if (typeInputs[i]) parsed.assets[i]._editedType = typeInputs[i].value.trim() || null;
+      if (catSelects[i])  parsed.assets[i]._editedCategory = catSelects[i].value || null;
+      if (typeSelects[i]) parsed.assets[i]._editedType     = typeSelects[i].value.trim() || null;
+
+      // Valor (saldo líquido) — sobrescreve direto o valor usado na importação
+      if (valorInputs[i]) {
+        const v = window._brokerParseBRL(valorInputs[i].value);
+        if (v != null) parsed.assets[i].valor = v;
+      }
+      // Ext/Rend — se o usuário alterou o total exibido (em relação ao que
+      // foi calculado a partir das movimentações detectadas), substitui as
+      // movimentações daquele tipo por um único lançamento sintético com o
+      // valor editado, preservando as movimentações do OUTRO tipo intactas.
+      const a = parsed.assets[i];
+      const movs = a.movimentacoes || [];
+      const origExtTotal = movs.filter(m => m.flow_type === 'external').reduce((s,m) => s+m.amount, 0);
+      const origIncTotal = movs.filter(m => m.flow_type === 'income').reduce((s,m) => s+m.amount, 0);
+      if (extInputs[i]) {
+        const editedExt = window._brokerParseBRL(extInputs[i].value) || 0;
+        if (Math.abs(editedExt - origExtTotal) > 0.005) {
+          a.movimentacoes = movs.filter(m => m.flow_type !== 'external');
+          if (editedExt) a.movimentacoes.push({ amount: editedExt, type: 'Ajuste manual (Ext)', flow_type: 'external' });
+        }
+      }
+      if (incInputs[i]) {
+        const editedInc = window._brokerParseBRL(incInputs[i].value) || 0;
+        if (Math.abs(editedInc - origIncTotal) > 0.005) {
+          a.movimentacoes = (a.movimentacoes||movs).filter(m => m.flow_type !== 'income');
+          if (editedInc) a.movimentacoes.push({ amount: editedInc, type: 'Ajuste manual (Rend)', flow_type: 'income' });
+        }
+      }
     }
   });
   parsed.assets = parsed.assets.filter(a => !a._skip);

@@ -2180,8 +2180,17 @@ app.whenReady().then(async () => {
   // Only run these if DB is fully loaded (not pending decryption)
   if (!_dbPendingDecrypt) {
     try { migrateRecurring(); } catch(e) {}
-    setImmediate(() => {
-      try { const recs = all('SELECT * FROM recurring WHERE active=1'); recs.forEach(rec => syncRecurringTxns(rec)); save(); } catch(e) { console.error('syncRecurring startup:', e); }
+    // IMPORTANTE: aguarda (não usa setImmediate solto) para garantir que
+    // termina ANTES do bloco de sync mobile logo abaixo. Antes, os dois
+    // rodavam em paralelo sem ordem garantida: se a reconciliação do
+    // mobile chegasse primeiro, ela marcava como conferida uma transação
+    // que este passo iria apagar e recriar com outro ID — gerando
+    // duplicatas (uma órfã conferida + uma nova não conferida).
+    await new Promise(resolve => {
+      setImmediate(() => {
+        try { const recs = all('SELECT * FROM recurring WHERE active=1'); recs.forEach(rec => syncRecurringTxns(rec)); save(); } catch(e) { console.error('syncRecurring startup:', e); }
+        resolve();
+      });
     });
     // Carrega índices de financiamento já salvos localmente (cache offline)
     // e dispara atualização em background — igual ao padrão usado para o IPCA.
