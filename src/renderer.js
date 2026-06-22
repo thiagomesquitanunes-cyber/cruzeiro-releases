@@ -3346,7 +3346,9 @@ async function deleteCustomParser(id) {
   if (!await showConfirmDialog('Remover configuração?', '', 'Remover', true)) return;
   await ff.bankParserDelete({ id });
   _customBankParsers = _customBankParsers.filter(p => p.id !== id);
+  _customBrokerParsers = (_customBrokerParsers||[]).filter(p => p.id !== id);
   renderImportDropdowns();
+  renderBrokerDropdown();
 }
 
 // ── Edit dialog for built-in and custom banks ──
@@ -3356,6 +3358,15 @@ function openBankEdit(id, type, isBuiltin) {
     const dd = G(`import-dd-${t}`); if (dd) dd.style.display = 'none';
     const ar = G(`import-dd-${t}-arrow`); if (ar) ar.textContent = '▾';
   });
+
+  // Corretora customizada (genérica) — abre o assistente sequencial na tela
+  // de resumo, em vez do diálogo simples de renomear/reordenar, já que ela
+  // tem uma configuração por categoria que precisa do fluxo dedicado pra
+  // ser editada (e pra permitir adicionar categorias novas mais tarde).
+  if (!isBuiltin && type === 'broker') {
+    const existing = (_customBrokerParsers||[]).find(p => p.id === id);
+    if (existing) { openBrokerWizard(existing); return; }
+  }
 
   let current;
   if (isBuiltin) {
@@ -4977,7 +4988,7 @@ async function onBrokerFileSelected(event) {
       parsed = { month, assets, caixaValue: null, broker: 'Itaú', unresolvedMovements: [] };
     } else {
       const custom = _customBrokerParsers.find(p => p.id === _selectedBroker);
-      if (custom) parsed = parseCustomBroker(_brokerBuffer, custom.config);
+      if (custom) parsed = parseGenericBroker(_brokerBuffer, custom.config);
       else throw new Error('Corretora não reconhecida');
     }
 
@@ -5831,8 +5842,613 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
   return { month, assets, caixaValue: null, broker: 'XP', unresolvedMovements };
 }
 
-function parseCustomBroker(buffer, config) {
-  throw new Error('Parser personalizado ainda não configurado para esta corretora.');
+// ── Motor do importador genérico de corretoras ──
+// Lê um extrato (CSV/XLSX) de QUALQUER corretora usando uma configuração
+// criada pelo usuário no assistente (categoria por categoria: onde fica a
+// aba/seção, qual coluna tem o nome do ativo, qual tem o valor, e
+// opcionalmente onde estão as movimentações). Cada categoria é lida de
+// forma independente — se uma categoria configurada não existir neste mês
+// específico (ex: o usuário ainda não tinha esse tipo de investimento),
+// simplesmente não aparece no resultado, sem dar erro.
+
+// Acha o índice de uma coluna numa linha de cabeçalho, preferindo casar pelo
+// TEXTO do título (mais robusto a mudanças de posição no extrato) e só
+// caindo pra letra de coluna (A, B, AB...) se não achar nenhum título igual.
+function _gbColIndex(headerRowArr, ref) {
+  if (!ref) return null;
+  const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+  const refN = norm(ref);
+  if (!refN) return null;
+  for (let i = 0; i < headerRowArr.length; i++) {
+    const cellN = norm(headerRowArr[i]);
+    if (cellN && (cellN === refN || cellN.includes(refN) || refN.includes(cellN))) return i;
+  }
+  if (/^[A-Za-z]{1,2}$/.test(ref.trim())) return colLetterToIndex(ref.trim().toUpperCase());
+  return null;
+}
+
+// Acha a linha de cabeçalho de uma tabela escaneando pra frente até achar
+// uma linha que tenha AMBOS os títulos configurados (nome + valor) — assim
+// não depende de um número de linha fixo, que quebraria se o extrato ganhar
+// uma linha de aviso/nota no topo num mês futuro.
+function _gbFindHeaderRow(rows, nameRef, valueRef, startIdx, maxScan) {
+  const end = Math.min(rows.length, startIdx + (maxScan||40));
+  for (let r = startIdx; r < end; r++) {
+    const row = rows[r] || [];
+    if (_gbColIndex(row, nameRef) != null && _gbColIndex(row, valueRef) != null) return r;
+  }
+  return null;
+}
+
+// Acha a linha onde um texto-marcador de seção aparece (usado quando todas
+// as categorias estão na MESMA aba, distinguidas por um cabeçalho de seção
+// como "Renda Fixa" ou "% | Fundos de Investimento").
+function _gbFindMarkerRow(rows, marker, startIdx) {
+  if (!marker) return null;
+  const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+  const markerN = norm(marker);
+  for (let r = startIdx||0; r < rows.length; r++) {
+    const cells = rows[r]||[];
+    const rowText = norm(cells.join(' '));
+    if (!rowText.includes(markerN)) continue;
+    // Uma linha de cabeçalho de seção de verdade é só texto — se a linha já
+    // tem um valor numérico, é provavelmente uma linha de ATIVO cujo nome só
+    // por coincidência contém o texto do marcador (ex: "Fundo ABC Renda
+    // Fixa" combinando com o marcador "Renda Fixa").
+    const hasNumber = cells.some(c => _gbParseNumber(c) != null);
+    if (hasNumber) continue;
+    return r;
+  }
+  return null;
+}
+
+function _gbParseNumber(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return v;
+  let s = v.toString().trim();
+  if (s === '-' || s === '—') return null;
+  const neg = /^-/.test(s) || /-$/.test(s) || /^\(.*\)$/.test(s);
+  s = s.replace(/^-|-$/g,'').replace(/[R$\s()]/g,'');
+  // aceita tanto formato BR (1.234,56) quanto US (1,234.56) detectando o
+  // último separador como decimal
+  if (/,\d{1,2}$/.test(s)) s = s.replace(/\./g,'').replace(',','.');
+  else s = s.replace(/,/g,'');
+  const n = parseFloat(s);
+  return isNaN(n) ? null : (neg ? -n : n);
+}
+
+// Classifica categoria/tipo interno do app a partir da chave de categoria
+// escolhida pelo usuário no assistente + nome do ativo (+ tipo declarado no
+// extrato, se houver coluna pra isso) — mesmo princípio já usado pra
+// XP/Itaú/BTG.
+function _gbClassify(catKey, name, typeRaw) {
+  const n = (name||'').toUpperCase();
+  const t = (typeRaw||'').toUpperCase();
+  if (/\bFIP\b/.test(n)) return { category:'private_equity', inv_type:'Private Equity' };
+  const info = INV_CATEGORIES[catKey];
+  const knownTypes = info?.types || [];
+  // Se o extrato já declara o tipo explicitamente e ele bate com um tipo
+  // conhecido da categoria, usa direto.
+  if (typeRaw) {
+    const match = knownTypes.find(kt => t.includes(kt.toUpperCase()) || kt.toUpperCase().includes(t));
+    if (match) return { category: catKey === 'valor_em_caixa' ? 'valor_em_caixa' : catKey, inv_type: match };
+  }
+  switch (catKey) {
+    case 'renda_fixa':
+      if (/^CRI\b/.test(n)) return { category:'renda_fixa', inv_type:'CRI' };
+      if (/^CRA\b/.test(n)) return { category:'renda_fixa', inv_type:'CRA' };
+      if (/^CDB\b/.test(n)) return { category:'renda_fixa', inv_type:'CDB' };
+      if (/^LCI\b/.test(n)) return { category:'renda_fixa', inv_type:'LCI' };
+      if (/^LCA\b/.test(n)) return { category:'renda_fixa', inv_type:'LCA' };
+      if (n.includes('POUPANCA')||n.includes('POUPANÇA')) return { category:'renda_fixa', inv_type:'Poupança' };
+      return { category:'renda_fixa', inv_type:'Debênture' };
+    case 'tesouro':
+      if (/IPCA/.test(n)) return { category:'tesouro', inv_type:'Tesouro IPCA+' };
+      if (/PREFIXADO/.test(n)) return { category:'tesouro', inv_type:'Tesouro Prefixado' };
+      if (/EDUCA/.test(n)) return { category:'tesouro', inv_type:'Tesouro Educa+' };
+      if (/RENDA\+/.test(n)) return { category:'tesouro', inv_type:'Renda+' };
+      return { category:'tesouro', inv_type:'Tesouro SELIC' };
+    case 'fundos':
+      if (n.includes('MULTIMERCADO')) return { category:'fundos', inv_type:'Fundo Multimercado' };
+      if (n.includes('ACOES')||n.includes('AÇÕES')) return { category:'fundos', inv_type:'Fundo de Ações' };
+      if (n.includes('CAMBIAL')) return { category:'fundos', inv_type:'Fundo Cambial' };
+      if (n.includes('IMOBILIARIO')||n.includes('IMOBILIÁRIO')||/^[A-Z]{4}1[123]\b/.test(n)) return { category:'fundos', inv_type:'FII' };
+      return { category:'fundos', inv_type:'Fundo Renda Fixa' };
+    case 'previdencia':
+      return { category:'previdencia', inv_type: n.includes('PGBL') ? 'PGBL' : 'VGBL' };
+    case 'renda_variavel':
+      if (n.includes('BDR')) return { category:'renda_variavel', inv_type:'BDR' };
+      if (n.includes('ETF')) return { category:'renda_variavel', inv_type:'ETF' };
+      return { category:'renda_variavel', inv_type:'Ações' };
+    case 'private_equity':
+      return { category:'private_equity', inv_type:'Private Equity' };
+    case 'valor_em_caixa': case 'caixa':
+      return { category:'valor_em_caixa', inv_type:'Conta Remunerada' };
+    default:
+      return { category: catKey, inv_type: knownTypes[0] || 'Outro' };
+  }
+}
+
+function parseGenericBroker(buffer, config) {
+  let wb;
+  if (config.fileType === 'CSV') {
+    const text = new TextDecoder('utf-8').decode(buffer);
+    wb = XLSX.read(text, { type: 'string' });
+  } else {
+    wb = XLSX.read(buffer, { type: 'array', cellDates: true });
+  }
+
+  const assets = [];
+  const unresolvedMovements = [];
+  const catKeys = Object.keys(config.categories || {});
+
+  for (const catKey of catKeys) {
+    const catCfg = config.categories[catKey];
+    let sheet, rows, scanStart = 0, sectionEnd = Infinity;
+
+    if (config.sheetMode === 'perCategory') {
+      const sheetName = wb.SheetNames.find(sn => sn === catCfg.sheetName) ||
+        wb.SheetNames.find(sn => sn.toLowerCase().includes((catCfg.sheetName||'').toLowerCase()));
+      if (!sheetName) continue; // esta categoria não existe neste arquivo — sem problema, pula
+      sheet = wb.Sheets[sheetName];
+      rows = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:true });
+    } else {
+      sheet = wb.Sheets[wb.SheetNames[0]];
+      rows = XLSX.utils.sheet_to_json(sheet, { header:1, defval:'', raw:true });
+      if (catCfg.sectionMarker) {
+        const markerRow = _gbFindMarkerRow(rows, catCfg.sectionMarker, 0);
+        if (markerRow == null) continue; // categoria não encontrada neste mês — pula
+        scanStart = markerRow + 1;
+      }
+    }
+
+    const headerRow = _gbFindHeaderRow(rows, catCfg.nameCol, catCfg.valueCol, scanStart, 40);
+    if (headerRow == null) continue;
+    const header = rows[headerRow];
+    const nameIdx = _gbColIndex(header, catCfg.nameCol);
+    const valIdx  = _gbColIndex(header, catCfg.valueCol);
+    const typeIdx = catCfg.typeCol ? _gbColIndex(header, catCfg.typeCol) : null;
+    if (nameIdx == null || valIdx == null) continue;
+
+    if (config.sheetMode === 'single') {
+      // Limite de onde esta seção termina = início da PRÓXIMA categoria
+      // configurada que apareça depois (ou fim da aba).
+      for (const otherKey of catKeys) {
+        if (otherKey === catKey) continue;
+        const otherMarker = config.categories[otherKey].sectionMarker;
+        if (!otherMarker) continue;
+        const otherRow = _gbFindMarkerRow(rows, otherMarker, headerRow + 1);
+        if (otherRow != null && otherRow < sectionEnd) sectionEnd = otherRow;
+      }
+    }
+
+    const catAssets = [];
+    for (let r = headerRow + 1; r < Math.min(rows.length, sectionEnd); r++) {
+      const row = rows[r] || [];
+      const name = (row[nameIdx] ?? '').toString().trim();
+      if (!name) continue;
+      const valor = _gbParseNumber(row[valIdx]);
+      if (valor == null) continue;
+      const typeRaw = typeIdx != null ? (row[typeIdx] ?? '').toString().trim() : null;
+      const { category, inv_type } = _gbClassify(catKey, name, typeRaw);
+      catAssets.push({ name, category, inv_type, broker: config.brokerName || 'Importado', valor, movimentacoes: [] });
+    }
+    assets.push(...catAssets);
+
+    // ── Movimentações (opcional, só quando estão no MESMO arquivo) ──
+    const mv = catCfg.movements;
+    if (mv?.enabled && !config.filesSeparate) {
+      let mvRows = rows, mvScanStart = scanStart, mvSectionEnd = sectionEnd;
+      if (mv.sheetName) {
+        const mvSheetName = wb.SheetNames.find(sn => sn === mv.sheetName) ||
+          wb.SheetNames.find(sn => sn.toLowerCase().includes((mv.sheetName||'').toLowerCase()));
+        if (mvSheetName) {
+          mvRows = XLSX.utils.sheet_to_json(wb.Sheets[mvSheetName], { header:1, defval:'', raw:true });
+          mvScanStart = 0; mvSectionEnd = Infinity;
+        }
+      }
+      const mvHeaderRow = _gbFindHeaderRow(mvRows, mv.dateCol, mv.valueCol, mvScanStart, 40);
+      if (mvHeaderRow != null) {
+        const mvHeader = mvRows[mvHeaderRow];
+        const dateIdx  = _gbColIndex(mvHeader, mv.dateCol);
+        const typeColI = _gbColIndex(mvHeader, mv.typeCol);
+        const valColI  = _gbColIndex(mvHeader, mv.valueCol);
+        const assetColI = mv.assetCol ? _gbColIndex(mvHeader, mv.assetCol) : null;
+        for (let r = mvHeaderRow + 1; r < Math.min(mvRows.length, mvSectionEnd); r++) {
+          const row = mvRows[r] || [];
+          const amount = valColI != null ? _gbParseNumber(row[valColI]) : null;
+          if (amount == null || amount === 0) continue;
+          const desc = typeColI != null ? (row[typeColI] ?? '').toString().trim() : 'Movimentação';
+          const assetNameRaw = assetColI != null ? (row[assetColI] ?? '').toString().trim() : null;
+          let target = null;
+          if (assetNameRaw) {
+            const an = assetNameRaw.toLowerCase();
+            target = catAssets.find(a => a.name.toLowerCase().includes(an) || an.includes(a.name.toLowerCase()));
+          } else if (catAssets.length === 1) {
+            target = catAssets[0]; // só um ativo nessa categoria — sem ambiguidade
+          }
+          if (target) {
+            target.movimentacoes.push({ amount, type: desc, flow_type: null });
+          } else {
+            unresolvedMovements.push({ date: null, desc: `${assetNameRaw||''} ${desc}`.trim(), amount, suggestedFlowType: null });
+          }
+        }
+      }
+    }
+  }
+
+  return { month: null, assets, caixaValue: null, broker: config.brokerName || 'Importado', unresolvedMovements };
+}
+
+// ── Assistente sequencial do importador genérico de corretoras ──
+// Uma tela por vez (formato → organização das abas → quais categorias →
+// configuração de cada categoria → nome/teste/salvar). Pensado desde o
+// início pra ser reaberto depois em modo edição: a tela de resumo mostra o
+// que já está configurado e permite adicionar categorias novas (ex: o
+// usuário começou só com Renda Fixa e meses depois passou a ter Fundos)
+// sem precisar recriar o importador do zero.
+let _bw = null;
+
+function _bwHelpIcon(tip) {
+  return `<span title="${esc(tip)}" style="cursor:help;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:1px solid var(--border);border-radius:50%;font-size:10px;color:var(--text3);margin-left:4px;flex-shrink:0">?</span>`;
+}
+
+function openBrokerWizard(existing) {
+  _bw = {
+    fileType: 'XLSX',
+    filesSeparate: false,
+    sheetMode: 'perCategory',
+    selectedCategories: [],
+    categoryIdx: 0,
+    categories: {},
+    brokerName: '',
+    editingId: null,
+    returnToSummary: false,
+  };
+  if (existing) {
+    _bw.editingId = existing.id;
+    _bw.brokerName = existing.name;
+    _bw.fileType = existing.config.fileType || 'XLSX';
+    _bw.filesSeparate = !!existing.config.filesSeparate;
+    _bw.sheetMode = existing.config.sheetMode || 'perCategory';
+    _bw.categories = JSON.parse(JSON.stringify(existing.config.categories || {}));
+  }
+  G('custom-parser-title').textContent = existing ? `✎ Editar — ${esc(existing.name)}` : '➕ Configurar nova corretora';
+  openModal('modal-custom-parser');
+  if (existing) renderBrokerWizardSummary();
+  else renderBrokerWizardStep1();
+}
+
+function renderBrokerWizardStep1() {
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:12px;color:var(--text3);margin-bottom:14px">Passo 1 — Formato do arquivo</div>
+    <div class="field">
+      <label class="lbl">Qual o formato do extrato desta corretora?</label>
+      <select class="inp" id="bw-filetype" onchange="window._bwToggleFiletypeNote()">
+        <option value="XLSX" ${_bw.fileType==='XLSX'?'selected':''}>Excel (XLSX/XLS)</option>
+        <option value="CSV" ${_bw.fileType==='CSV'?'selected':''}>CSV</option>
+        <option value="PDF" ${_bw.fileType==='PDF'?'selected':''}>PDF</option>
+      </select>
+    </div>
+    <div class="field">
+      <label class="lbl">A posição (saldo atual) e as movimentações (aportes, resgates, rendimentos)…${_bwHelpIcon('Algumas corretoras juntam tudo em um único arquivo (ex: BTG, Itaú). Outras exigem dois arquivos separados — um com a posição atual e outro com o histórico de movimentações (ex: XP).')}</label>
+      <select class="inp" id="bw-files-separate">
+        <option value="0" ${!_bw.filesSeparate?'selected':''}>…estão no mesmo arquivo</option>
+        <option value="1" ${_bw.filesSeparate?'selected':''}>…estão em arquivos separados</option>
+      </select>
+    </div>
+    <div id="bw-pdf-note" class="warn-box" style="display:${_bw.fileType==='PDF'?'':'none'}">
+      ⚠️ Este assistente ainda não cobre extratos em PDF — funciona pra CSV e Excel. Se for um PDF, me avise direto na conversa que eu configuro manualmente, do mesmo jeito que fizemos pro Itaú.
+    </div>`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="closeModal('modal-custom-parser')">Cancelar</button>
+    <button class="btn primary" onclick="_bwStep1Next()">Continuar →</button>`;
+}
+window._bwToggleFiletypeNote = () => {
+  const note = G('bw-pdf-note');
+  if (note) note.style.display = G('bw-filetype').value === 'PDF' ? '' : 'none';
+};
+function _bwStep1Next() {
+  _bw.fileType = G('bw-filetype').value;
+  _bw.filesSeparate = G('bw-files-separate').value === '1';
+  if (_bw.fileType === 'PDF') {
+    toast('PDF ainda não é suportado neste assistente — me avise na conversa que eu configuro manualmente.');
+    return;
+  }
+  if (_bw.fileType === 'CSV') { _bw.sheetMode = 'single'; renderBrokerWizardStep3(); return; }
+  renderBrokerWizardStep2();
+}
+
+function renderBrokerWizardStep2() {
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:12px;color:var(--text3);margin-bottom:14px">Passo 2 — Organização das categorias</div>
+    <div class="field">
+      <label class="lbl">Como as categorias de investimento estão organizadas no arquivo?</label>
+      <select class="inp" id="bw-sheetmode">
+        <option value="perCategory" ${_bw.sheetMode==='perCategory'?'selected':''}>Uma aba por categoria (ex: uma aba "Renda Fixa", outra "Fundos"…)</option>
+        <option value="single" ${_bw.sheetMode==='single'?'selected':''}>Todas as categorias juntas na mesma aba, separadas por um título de seção</option>
+      </select>
+    </div>`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="renderBrokerWizardStep1()">← Voltar</button>
+    <button class="btn primary" onclick="_bwStep2Next()">Continuar →</button>`;
+}
+function _bwStep2Next() {
+  _bw.sheetMode = G('bw-sheetmode').value;
+  renderBrokerWizardStep3();
+}
+
+function renderBrokerWizardStep3() {
+  const opts = INV_CAT_ORDER.filter(k => k !== 'caixa');
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:12px;color:var(--text3);margin-bottom:14px">Passo 3 — Quais categorias aparecem neste extrato?</div>
+    <p style="font-size:13px;color:var(--text2);margin:0 0 12px">Marque as categorias que você tem hoje. Se um mês futuro trouxer uma categoria nova, você pode editar esta configuração depois pra ensinar o app a achá-la — não precisa recomeçar do zero.</p>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${opts.map(k => `
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
+          <input type="checkbox" class="bw-cat-chk" value="${k}" ${_bw.selectedCategories.includes(k)?'checked':''}>
+          ${esc(INV_CATEGORIES[k].label)}
+        </label>`).join('')}
+    </div>`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="${_bw.fileType==='CSV'?'renderBrokerWizardStep1()':'renderBrokerWizardStep2()'}">← Voltar</button>
+    <button class="btn primary" onclick="_bwStep3Next()">Continuar →</button>`;
+}
+function _bwStep3Next() {
+  const checked = Array.from(document.querySelectorAll('.bw-cat-chk:checked')).map(c => c.value);
+  if (!checked.length) { toast('Marque ao menos uma categoria'); return; }
+  _bw.selectedCategories = checked;
+  _bw.categoryIdx = 0;
+  _bw.returnToSummary = false;
+  renderBrokerWizardCategoryScreen();
+}
+
+function renderBrokerWizardCategoryScreen() {
+  const catKey = _bw.selectedCategories[_bw.categoryIdx];
+  const label = INV_CATEGORIES[catKey].label;
+  const existing = _bw.categories[catKey] || {};
+  const n = _bw.selectedCategories.length;
+  const idx = _bw.categoryIdx + 1;
+
+  const locationField = _bw.sheetMode === 'perCategory' ? `
+    <div class="field">
+      <label class="lbl">Nome da aba desta categoria${_bwHelpIcon('O nome exato da aba (planilha) onde está "'+label+'" — confira nas abas na parte de baixo do Excel.')}</label>
+      <input class="inp" id="bw-cat-location" value="${esc(existing.sheetName||'')}" placeholder="Ex: Renda Fixa">
+    </div>` : `
+    <div class="field">
+      <label class="lbl">Que texto marca o início desta categoria na aba?${_bwHelpIcon('Um texto que só aparece uma vez, logo antes da lista de ativos dessa categoria — ex: o título da seção "Renda Fixa", ou uma linha como "% | Renda Fixa".')}</label>
+      <input class="inp" id="bw-cat-location" value="${esc(existing.sectionMarker||'')}" placeholder="Ex: Renda Fixa">
+    </div>`;
+
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:12px;color:var(--text3);margin-bottom:14px">Categoria ${idx} de ${n} — <strong>${esc(label)}</strong></div>
+    ${locationField}
+    <div class="field">
+      <label class="lbl">Título da coluna com o NOME do ativo${_bwHelpIcon('Prefira o título da coluna (ex: "Produto", "Ativo") em vez da letra — assim o importador continua funcionando mesmo se a corretora reordenar as colunas num mês futuro.')}</label>
+      <input class="inp" id="bw-cat-namecol" value="${esc(existing.nameCol||'')}" placeholder="Ex: Produto">
+    </div>
+    <div class="field">
+      <label class="lbl">Título da coluna com o VALOR da posição atual</label>
+      <input class="inp" id="bw-cat-valuecol" value="${esc(existing.valueCol||'')}" placeholder="Ex: Saldo Bruto, Valor Líquido">
+    </div>
+    <div class="field">
+      <label class="lbl">Título da coluna com o TIPO do ativo (opcional)${_bwHelpIcon('Se o extrato já indicar o tipo exato (ex: "CDB", "LCA", "Fundo Multimercado") numa coluna própria, informe aqui — ajuda a classificar com mais precisão. Deixe em branco se não houver essa coluna.')}</label>
+      <input class="inp" id="bw-cat-typecol" value="${esc(existing.typeCol||'')}" placeholder="Opcional">
+    </div>
+    <div style="margin-top:8px;padding-top:14px;border-top:1px solid var(--border)">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600">
+        <input type="checkbox" id="bw-cat-mov-enabled" onchange="window._bwToggleMov()" ${existing.movements?.enabled?'checked':''} ${_bw.filesSeparate?'disabled':''}>
+        Tem movimentações (aportes, resgates, rendimentos) pra esta categoria?
+      </label>
+      ${_bw.filesSeparate ? '<div style="font-size:12px;color:var(--text3);margin-top:4px">⚠️ Movimentações em arquivo separado ainda não são suportadas neste assistente — por enquanto importo só a posição.</div>' : ''}
+      <div id="bw-cat-mov-fields" style="display:${existing.movements?.enabled?'':'none'};margin-top:10px">
+        <div class="field">
+          <label class="lbl">Aba das movimentações (deixe em branco se for a mesma aba/seção da posição)</label>
+          <input class="inp" id="bw-cat-mov-sheet" value="${esc(existing.movements?.sheetName||'')}">
+        </div>
+        <div class="field">
+          <label class="lbl">Título da coluna de DATA</label>
+          <input class="inp" id="bw-cat-mov-date" value="${esc(existing.movements?.dateCol||'')}" placeholder="Ex: Data">
+        </div>
+        <div class="field">
+          <label class="lbl">Título da coluna de TIPO/descrição da movimentação</label>
+          <input class="inp" id="bw-cat-mov-type" value="${esc(existing.movements?.typeCol||'')}" placeholder="Ex: Histórico, Tipo">
+        </div>
+        <div class="field">
+          <label class="lbl">Título da coluna de VALOR da movimentação</label>
+          <input class="inp" id="bw-cat-mov-value" value="${esc(existing.movements?.valueCol||'')}" placeholder="Ex: Valor">
+        </div>
+        <div class="field">
+          <label class="lbl">Título da coluna que identifica o ATIVO da movimentação (opcional, só se houver mais de um ativo nesta categoria)</label>
+          <input class="inp" id="bw-cat-mov-asset" value="${esc(existing.movements?.assetCol||'')}" placeholder="Opcional">
+        </div>
+      </div>
+    </div>`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="_bwCategoryBack()">← Voltar</button>
+    <button class="btn primary" onclick="_bwCategoryNext()">Continuar →</button>`;
+}
+window._bwToggleMov = () => {
+  const chk = G('bw-cat-mov-enabled');
+  const fields = G('bw-cat-mov-fields');
+  if (chk && fields) fields.style.display = chk.checked ? '' : 'none';
+};
+
+function _bwSaveCurrentCategoryScreen() {
+  const catKey = _bw.selectedCategories[_bw.categoryIdx];
+  const cfg = {
+    nameCol: G('bw-cat-namecol').value.trim(),
+    valueCol: G('bw-cat-valuecol').value.trim(),
+    typeCol: G('bw-cat-typecol').value.trim() || null,
+  };
+  if (_bw.sheetMode === 'perCategory') cfg.sheetName = G('bw-cat-location').value.trim();
+  else cfg.sectionMarker = G('bw-cat-location').value.trim();
+
+  const movEnabled = G('bw-cat-mov-enabled').checked && !_bw.filesSeparate;
+  cfg.movements = movEnabled ? {
+    enabled: true,
+    sheetName: G('bw-cat-mov-sheet').value.trim() || null,
+    dateCol: G('bw-cat-mov-date').value.trim(),
+    typeCol: G('bw-cat-mov-type').value.trim(),
+    valueCol: G('bw-cat-mov-value').value.trim(),
+    assetCol: G('bw-cat-mov-asset').value.trim() || null,
+  } : { enabled: false };
+
+  _bw.categories[catKey] = cfg;
+}
+function _bwCategoryNext() {
+  if (!G('bw-cat-namecol').value.trim() || !G('bw-cat-valuecol').value.trim() || !G('bw-cat-location').value.trim()) {
+    toast('Preencha os campos obrigatórios desta categoria (localização, nome e valor)');
+    return;
+  }
+  _bwSaveCurrentCategoryScreen();
+  if (_bw.categoryIdx < _bw.selectedCategories.length - 1) {
+    _bw.categoryIdx++;
+    renderBrokerWizardCategoryScreen();
+  } else if (_bw.returnToSummary) {
+    renderBrokerWizardSummary();
+  } else {
+    renderBrokerWizardFinal();
+  }
+}
+function _bwCategoryBack() {
+  _bwSaveCurrentCategoryScreen();
+  if (_bw.categoryIdx > 0) {
+    _bw.categoryIdx--;
+    renderBrokerWizardCategoryScreen();
+  } else if (_bw.returnToSummary) {
+    renderBrokerWizardSummary();
+  } else {
+    renderBrokerWizardStep3();
+  }
+}
+
+function renderBrokerWizardFinal() {
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:12px;color:var(--text3);margin-bottom:14px">Último passo</div>
+    <div class="field">
+      <label class="lbl">Nome desta corretora</label>
+      <input class="inp" id="bw-broker-name" value="${esc(_bw.brokerName||'')}" placeholder="Ex: Banco XYZ Investimentos">
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin:14px 0">
+      <button class="btn" onclick="document.getElementById('bw-test-file-input').click()">📂 Selecionar arquivo pra testar</button>
+      <span id="bw-test-file-name" style="font-size:12px;color:var(--text3)"></span>
+    </div>
+    <input type="file" id="bw-test-file-input" style="display:none" accept=".csv,.CSV,.xls,.xlsx,.XLS,.XLSX" onchange="_bwTestFile(event)">
+    <div id="bw-test-result"></div>`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="_bwBackFromFinal()">← Voltar</button>
+    <button class="btn primary" id="bw-save-btn" style="display:none" onclick="_bwSave()">✓ Salvar corretora</button>`;
+}
+function _bwBackFromFinal() {
+  if (_bw.selectedCategories.length) {
+    _bw.categoryIdx = _bw.selectedCategories.length - 1;
+    renderBrokerWizardCategoryScreen();
+  } else {
+    renderBrokerWizardStep3();
+  }
+}
+
+async function _bwTestFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  G('bw-test-file-name').textContent = file.name;
+  const result = G('bw-test-result');
+  result.innerHTML = '<div class="info-box">⏳ Lendo arquivo…</div>';
+  if (typeof XLSX === 'undefined') {
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+      s.onload = res; s.onerror = rej; document.head.appendChild(s);
+    });
+  }
+  const buffer = await file.arrayBuffer();
+  try {
+    const config = { fileType: _bw.fileType, filesSeparate: _bw.filesSeparate, sheetMode: _bw.sheetMode,
+      categories: _bw.categories, brokerName: (G('bw-broker-name').value||'').trim() };
+    const parsed = parseGenericBroker(buffer, config);
+    _bw._lastTestConfig = config;
+    if (!parsed.assets.length) {
+      result.innerHTML = '<div class="warn-box">⚠️ Nenhum ativo encontrado. Confira se os títulos de coluna/abas/marcadores estão exatamente como aparecem no arquivo.</div>';
+      G('bw-save-btn').style.display = 'none';
+      return;
+    }
+    const rows = parsed.assets.slice(0,10).map(a =>
+      `<tr><td>${esc(a.name)}</td><td>${esc(INV_CATEGORIES[a.category]?.label||a.category)}</td><td>${esc(a.inv_type)}</td><td class="right">${fmtBRL(a.valor)}</td></tr>`).join('');
+    result.innerHTML = `
+      <div class="info-box" style="margin-bottom:8px">✅ ${parsed.assets.length} ativo(s) encontrado(s)${parsed.unresolvedMovements.length ? ` · ⚠️ ${parsed.unresolvedMovements.length} movimentação(ões) não vinculada(s) a um ativo` : ''}:</div>
+      <div class="tbl-outer" style="max-height:220px">
+        <table class="ledger"><thead><tr><th>Nome</th><th>Categoria</th><th>Tipo</th><th class="right">Valor</th></tr></thead>
+        <tbody>${rows}</tbody></table>
+      </div>`;
+    G('bw-save-btn').style.display = '';
+  } catch(e) {
+    result.innerHTML = `<div class="warn-box">❌ Erro: ${esc(e.message)}</div>`;
+    G('bw-save-btn').style.display = 'none';
+  }
+  event.target.value = '';
+}
+
+async function _bwSave() {
+  const nameInput = G('bw-broker-name');
+  const name = (nameInput ? nameInput.value : _bw.brokerName || '').trim();
+  if (!name) { toast('Dê um nome a esta corretora'); return; }
+  const config = _bw._lastTestConfig || {
+    fileType: _bw.fileType, filesSeparate: _bw.filesSeparate, sheetMode: _bw.sheetMode, categories: _bw.categories,
+  };
+  config.brokerName = name;
+  const id = _bw.editingId || ('custom_broker_' + Date.now());
+  await ff.bankParserSave({ id, name, type: 'broker', config });
+  await initBrokerDropdown();
+  closeModal('modal-custom-parser');
+  toast(`✅ "${name}" salva`);
+  pickBroker(id);
+}
+
+// ── Tela de resumo (modo edição) ──
+// Mostra o que já está configurado e deixa adicionar categorias novas (ou
+// editar uma já existente) sem afetar as demais — é isso que permite, por
+// exemplo, ensinar o app sobre "Fundos" num mês em que esse investimento
+// passou a existir, sem recriar a corretora do zero.
+function renderBrokerWizardSummary() {
+  const configured = Object.keys(_bw.categories);
+  const available = INV_CAT_ORDER.filter(k => k !== 'caixa' && !configured.includes(k));
+  G('custom-parser-body').innerHTML = `
+    <p style="font-size:13px;color:var(--text2);margin:0 0 14px">Categorias já configuradas pra <strong>${esc(_bw.brokerName)}</strong>:</p>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:18px">
+      ${configured.length ? configured.map(k => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--bg2);border-radius:6px">
+          <span style="font-size:13px">✅ ${esc(INV_CATEGORIES[k]?.label||k)}</span>
+          <button class="btn xs" onclick="_bwEditCategory('${k}')">✎ Editar</button>
+        </div>`).join('') : '<div style="color:var(--text3);font-size:13px">Nenhuma categoria configurada ainda.</div>'}
+    </div>
+    ${available.length ? `
+      <p style="font-size:13px;color:var(--text2);margin:0 0 8px">Categorias que ainda não foram ensinadas (marque se algum mês passou a ter um investimento novo):</p>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${available.map(k => `
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:14px">
+            <input type="checkbox" class="bw-add-cat-chk" value="${k}">
+            ${esc(INV_CATEGORIES[k].label)}
+          </label>`).join('')}
+      </div>` : ''}`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="closeModal('modal-custom-parser')">Fechar</button>
+    ${available.length ? '<button class="btn" onclick="_bwSummaryAddSelected()">+ Adicionar categorias marcadas</button>' : ''}
+    <button class="btn primary" onclick="renderBrokerWizardFinal()">Nome / testar / salvar →</button>`;
+}
+function _bwEditCategory(catKey) {
+  _bw.selectedCategories = [catKey];
+  _bw.categoryIdx = 0;
+  _bw.returnToSummary = true;
+  renderBrokerWizardCategoryScreen();
+}
+function _bwSummaryAddSelected() {
+  const checked = Array.from(document.querySelectorAll('.bw-add-cat-chk:checked')).map(c => c.value);
+  if (!checked.length) { toast('Marque ao menos uma categoria nova'); return; }
+  _bw.selectedCategories = checked;
+  _bw.categoryIdx = 0;
+  _bw.returnToSummary = true;
+  renderBrokerWizardCategoryScreen();
 }
 
 // Load existing inv_assets for name mapping dropdown
@@ -6452,6 +7068,11 @@ async function openCustomParserWizard(type) {
   _wizardBuffer = null;
   _wizardParsed = [];
 
+  if (type === 'broker') {
+    openBrokerWizard(null);
+    return;
+  }
+
   const isCard = type === 'card';
   G('custom-parser-title').textContent = isCard ? '➕ Configurar novo cartão de crédito' : '➕ Configurar novo banco';
   openModal('modal-custom-parser');
@@ -6699,6 +7320,186 @@ async function parseSantanderPDF(buffer) {
   }
 
   return result;
+}
+
+// ── Santander — investment position (PDF, embedded in the same "Extrato
+// Consolidado Inteligente" used for the checking-account parser) ──
+// Real quirks this works around (confirmed against an actual statement with
+// two different PDF text-extraction libraries):
+// 1) The per-asset "Movimentação" sub-tables (with literal SALDO ANTERIOR /
+//    SALDO ATUAL rows) are NOT present in the PDF's text layer at all — only
+//    visually, likely rendered as an image. The "Resumo" table (for CDB/LCA)
+//    and the numeric rows right after "Conta Fundo N" (for funds) ARE real
+//    text, and land on the exact same current-value numbers, so those are
+//    used instead.
+// 2) Column HEADER rows ("Produto", "Data da Aplicação" etc.) also don't
+//    extract — only the data row below them does. The asset's name is
+//    recovered by scanning that data row for the first date-like token
+//    ("DD/MM/YY") and taking everything before it.
+async function parseSantanderBroker(buffer) {
+  await loadPdfJsLib();
+  const pdf = await getPdfDocumentWithPassword(buffer);
+  if (!pdf) throw new Error('__IMPORT_CANCELLED__');
+
+  const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  const MONTHS_PT = { janeiro:1, fevereiro:2, marco:3, abril:4, maio:5, junho:6,
+    julho:7, agosto:8, setembro:9, outubro:10, novembro:11, dezembro:12 };
+  let statementMonth = null;
+  const isFooterRow = ntxt => ntxt.startsWith('extrato_pf') || ntxt.startsWith('balp_') || ntxt.startsWith('pagina') || /^extrato consolidado/.test(ntxt) || /^[a-z]+\/\d{4}$/.test(ntxt);
+  function parseBRL(s) {
+    s = (s||'').trim();
+    if (s === '-' || s === '' || s === '—') return null;
+    const neg = s.endsWith('-');
+    s = s.replace(/-$/,'').replace(/[R$\s]/g,'').replace(/\./g,'').replace(',','.');
+    const n = parseFloat(s);
+    if (isNaN(n)) return null;
+    return neg ? -n : n;
+  }
+  const DATE_RE = /^\d{2}\/\d{2}\/\d{2,4}$/;
+  const RF_SUBTYPES = ['CDB/RDB', 'LCA/LCI/LIG', 'CRI/CRA', 'DEBENTURES', 'TESOURO DIRETO'];
+  const compact = s => s.replace(/\s+/g,'').replace(/\//g,'');
+
+  // Classifica categoria/tipo do app a partir do subtipo da Renda Fixa (ou
+  // de "fundos") + nome do ativo — mesmo critério já usado pra XP/Itaú/BTG.
+  function classifySantanderAsset(subtype, name) {
+    const n = (name||'').toUpperCase();
+    if (subtype === 'CDB/RDB') return { category:'renda_fixa', inv_type: n.includes('RDB') ? 'RDB' : 'CDB' };
+    if (subtype === 'LCA/LCI/LIG') {
+      if (n.includes('LCI')) return { category:'renda_fixa', inv_type:'LCI' };
+      if (n.includes('LIG')) return { category:'renda_fixa', inv_type:'LCI' };
+      return { category:'renda_fixa', inv_type:'LCA' };
+    }
+    if (subtype === 'CRI/CRA') return { category:'renda_fixa', inv_type: n.includes('CRA') ? 'CRA' : 'CRI' };
+    if (subtype === 'DEBENTURES') return { category:'renda_fixa', inv_type:'Debênture' };
+    if (subtype === 'TESOURO DIRETO') {
+      if (/IPCA/.test(n)) return { category:'tesouro', inv_type:'Tesouro IPCA+' };
+      if (/PREFIXADO/.test(n)) return { category:'tesouro', inv_type:'Tesouro Prefixado' };
+      return { category:'tesouro', inv_type:'Tesouro SELIC' };
+    }
+    // Fundos
+    if (n.includes('MULTIMERCADO')) return { category:'fundos', inv_type:'Fundo Multimercado' };
+    if (n.includes('AÇÕES') || n.includes('ACOES')) return { category:'fundos', inv_type:'Fundo de Ações' };
+    if (n.includes('CAMBIAL')) return { category:'fundos', inv_type:'Fundo Cambial' };
+    return { category:'fundos', inv_type:'Fundo Renda Fixa' };
+  }
+
+  // ── Extrai todas as linhas (Y agrupado), de todas as páginas, em fluxo
+  // contínuo, com deslocamento por página.
+  const allRows = [];
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const viewport = page.getViewport({ scale: 1 });
+    const items = content.items
+      .filter(it => it.str.trim() !== '')
+      .map(it => ({ x: it.transform[4], y: (viewport.height - it.transform[5]) + pageNum * 2000, text: it.str.trim() }));
+    items.sort((a,b) => a.y - b.y || a.x - b.x);
+    let cur = [], curY = null;
+    for (const it of items) {
+      if (curY === null || Math.abs(it.y - curY) > 2.5) {
+        if (cur.length) allRows.push(cur);
+        cur = [it]; curY = it.y;
+      } else {
+        cur.push(it);
+      }
+    }
+    if (cur.length) allRows.push(cur);
+
+    if (pageNum === 1 && !statementMonth) {
+      for (const it of items) {
+        const m = norm(it.text).match(/(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\/(\d{4})/);
+        if (m) { statementMonth = `${m[2]}-${String(MONTHS_PT[m[1]]).padStart(2,'0')}`; break; }
+      }
+    }
+  }
+
+  const assets = [];
+  const pendingApps = []; // [{ subtype, name }]
+  let currentSubtype = null;
+  let awaitingAppRow = false;
+  let inResumo = false;
+  let currentFundName = null;
+  let fundNumRows = [];
+
+  const rowText = row => row.map(w => w.text).join(' ');
+
+  function finalizeFund() {
+    if (currentFundName && fundNumRows.length >= 2) {
+      const valor = fundNumRows[1][0];
+      const { category, inv_type } = classifySantanderAsset(null, currentFundName);
+      assets.push({ name: currentFundName, category, inv_type, broker: 'Santander', valor, movimentacoes: [] });
+    }
+    currentFundName = null;
+    fundNumRows = [];
+  }
+
+  for (let i = 0; i < allRows.length; i++) {
+    const row = allRows[i];
+    const txt = rowText(row);
+    const ntxt = norm(txt);
+
+    if (isFooterRow(ntxt)) continue;
+    if (ntxt.startsWith('movimentacoes de conta')) break; // início do "Pacote de Serviços" — acabou a parte que interessa
+
+    let matchedSub = null;
+    for (const sub of RF_SUBTYPES) {
+      if (compact(ntxt) === compact(norm(sub))) { matchedSub = sub; break; }
+    }
+    if (matchedSub) { currentSubtype = matchedSub; continue; }
+
+    if (ntxt.startsWith('aplicacao n')) { awaitingAppRow = true; continue; }
+
+    if (awaitingAppRow) {
+      const dateIdx = row.findIndex(w => DATE_RE.test(w.text));
+      if (dateIdx > 0) {
+        const name = row.slice(0, dateIdx).map(w => w.text).join(' ');
+        pendingApps.push({ subtype: currentSubtype, name });
+      }
+      awaitingAppRow = false;
+      continue;
+    }
+
+    if (ntxt === 'resumo') { inResumo = true; continue; }
+
+    if (inResumo) {
+      if (ntxt.startsWith('total')) { inResumo = false; continue; }
+      const numIdx = [];
+      row.forEach((w, j) => { if (parseBRL(w.text) != null) numIdx.push(j); });
+      if (numIdx.length >= 3) {
+        // Pareamento por ORDEM (não por semelhança de palavras): o Resumo
+        // lista os tipos na mesma ordem em que as aplicações apareceram, e o
+        // vocabulário do rótulo (ex: "LCA/LCI/LIG CDI") não bate com o nome
+        // da aplicação específica (ex: "LCA DI SANTANDER").
+        const valorLiquido = parseBRL(row[numIdx[numIdx.length-1]].text);
+        const best = pendingApps.find(ap => !ap._assigned);
+        if (best) {
+          best._assigned = true;
+          const { category, inv_type } = classifySantanderAsset(best.subtype, best.name);
+          assets.push({ name: best.name, category, inv_type, broker: 'Santander', valor: valorLiquido, movimentacoes: [] });
+        }
+      }
+      continue;
+    }
+
+    if (ntxt.startsWith('cnpj do fundo')) {
+      finalizeFund();
+      let j = i - 1;
+      while (j >= 0 && isFooterRow(norm(rowText(allRows[j])))) j--;
+      currentFundName = j >= 0 ? rowText(allRows[j]).trim() : null;
+      fundNumRows = [];
+      continue;
+    }
+
+    if (ntxt.startsWith('conta fundo')) continue;
+
+    if (currentFundName) {
+      const nums = row.map(w => parseBRL(w.text)).filter(n => n != null);
+      if (nums.length >= 2) fundNumRows.push(nums);
+    }
+  }
+  finalizeFund();
+
+  return { month: statementMonth, assets, caixaValue: null, broker: 'Santander', unresolvedMovements: [] };
 }
 
 // ── Itaú Corretora — investment position statement (PDF) ──
