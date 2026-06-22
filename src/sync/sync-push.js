@@ -310,8 +310,7 @@ async function pushPatrimonio(all, userId, syncInvestments) {
 // 7. Evolução mensal (últimos 6 meses)
 // ─────────────────────────────────────────────────────────────
 async function pushEvolution(all, userId, getDbPath, fs) {
-  const from  = monthsAgo(6) + '-01';
-  const today = new Date().toISOString().slice(0, 10);
+  const from = monthsAgo(6) + '-01';
 
   // Lê a MESMA configuração de filtro que a tela de Evolução do desktop usa
   // (overview-config:get) — sem isso, o sync usava "todas as categorias",
@@ -330,10 +329,12 @@ async function pushEvolution(all, userId, getDbPath, fs) {
 
   // Filtro-base OBRIGATÓRIO — idêntico ao "WHERE" de evolucao:monthly-summary
   // no main.js: exige categoria preenchida e exclui transferências.
-  let where = `date>=? AND date<=? AND transfer_id IS NULL
+  // IMPORTANTE: sem limite superior de data — o desktop não tem teto
+  // (mostra inclusive lançamentos futuros já confirmados, como parcelas).
+  let where = `date>=? AND transfer_id IS NULL
     AND (category IS NOT NULL AND category != '')
     AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias')`;
-  const baseParams = [from, today];
+  const baseParams = [from];
 
   const params1 = [...baseParams];
   if (excludedCats.length) {
