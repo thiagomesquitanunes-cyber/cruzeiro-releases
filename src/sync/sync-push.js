@@ -309,27 +309,58 @@ async function pushPatrimonio(all, userId, syncInvestments) {
 // ─────────────────────────────────────────────────────────────
 // 7. Evolução mensal (últimos 6 meses)
 // ─────────────────────────────────────────────────────────────
-async function pushEvolution(all, userId) {
+async function pushEvolution(all, userId, getDbPath, fs) {
   const from  = monthsAgo(6) + '-01';
   const today = new Date().toISOString().slice(0, 10);
+
+  // Lê a MESMA configuração de filtro que a tela de Evolução do desktop usa
+  // (overview-config:get) — sem isso, o sync usava "todas as categorias",
+  // divergindo da tela real sempre que o usuário tinha excluído categorias
+  // (ex: nomes de contas/corretoras usados como categoria em investimentos).
+  let excludedCats = [];
+  try {
+    const cfgPath = getDbPath().replace('.db', '_overview_config.json');
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      excludedCats = cfg?.excludedCats || [];
+    }
+  } catch (e) {
+    console.error('[sync:push] erro ao ler overview_config.json:', e.message);
+  }
+
+  // Filtro-base OBRIGATÓRIO — idêntico ao "WHERE" de evolucao:monthly-summary
+  // no main.js: exige categoria preenchida e exclui transferências.
+  let where = `date>=? AND date<=? AND transfer_id IS NULL
+    AND (category IS NOT NULL AND category != '')
+    AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias')`;
+  const baseParams = [from, today];
+
+  const params1 = [...baseParams];
+  if (excludedCats.length) {
+    where += ` AND category NOT IN (${excludedCats.map(() => '?').join(',')})`;
+    params1.push(...excludedCats);
+  }
 
   const monthly = all(`
     SELECT substr(date,1,7) as month,
       SUM(CASE WHEN amount>0 THEN amount ELSE 0 END)        as income,
       SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END)   as expenses
     FROM transactions
-    WHERE date>=? AND date<=? AND transfer_id IS NULL
+    WHERE ${where}
     GROUP BY month ORDER BY month
-  `, [from, today]);
+  `, params1);
+
+  const params2 = [...baseParams];
+  let whereCat = where;
+  if (excludedCats.length) params2.push(...excludedCats);
 
   const byCategory = all(`
     SELECT substr(date,1,7) as month, category,
       SUM(ABS(amount)) as total
     FROM transactions
-    WHERE date>=? AND date<=? AND amount<0 AND transfer_id IS NULL
-      AND category NOT IN ('Transferência','Transferências')
+    WHERE ${whereCat} AND amount<0
     GROUP BY month, category
-  `, [from, today]);
+  `, params2);
 
   // Agrupa by_category por mês
   const catByMonth = {};
@@ -407,7 +438,7 @@ async function pushAiConfig(getAiConfig, userId) {
 // ENTRY POINT — executa todos os pushes em sequência
 // Falhas individuais são logadas mas não interrompem o processo
 // ─────────────────────────────────────────────────────────────
-async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref) {
+async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPath, fs) {
   const syncInvestments = typeof getSyncInvestmentsPref === 'function' ? getSyncInvestmentsPref() : false;
 
   const steps = [
@@ -417,7 +448,7 @@ async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref) {
     ['goals',        () => pushGoals(all, userId)],
     ['scheduled',    () => pushScheduled(all, userId)],
     ['patrimonio',   () => pushPatrimonio(all, userId, syncInvestments)],
-    ['evolution',    () => pushEvolution(all, userId)],
+    ['evolution',    () => pushEvolution(all, userId, getDbPath, fs)],
     ['ml_rules',     () => pushMlRules(all, userId)],
   ];
 

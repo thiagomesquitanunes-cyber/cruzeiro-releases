@@ -2092,8 +2092,6 @@ async function ctxCreateRecurring() {
     G('rec-category').value = tx.category || '';
     if (tx.amount < 0) { G('rec-expense').setValue?.(Math.abs(tx.amount)); }
     else               { G('rec-income').setValue?.(tx.amount); }
-    const day = tx.date ? parseInt(tx.date.slice(8,10)) : new Date().getDate();
-    G('rec-day').value = day;
     G('rec-next').value = tx.date || todayStr();
     // Revela o campo de conta destino e pré-seleciona a conta correta
     _updateRecTransferRow();
@@ -3291,10 +3289,21 @@ function bankLogoHtml(p, size=24) {
   return `<span style="display:inline-flex;align-items:center;justify-content:center;width:${size}px;height:${size}px;border-radius:4px;background:${bg};border:1px solid var(--border);flex-shrink:0;pointer-events:none;color:${fbColor};font-size:${fs}px;font-weight:700">${fb}</span>`;
 }
 
+// Passo a passo de onde encontrar cada extrato/posição no site da corretora —
+// mostrado como tooltip no "?" ao lado do nome, pra quem não lembra o caminho.
+const BROKER_HELP_TEXT = {
+  btg_broker: 'Como conseguir o extrato do BTG: acesse btgpactual.com, entre na sua conta, vá em "Documentos" → "Extrato de Investimentos". Clique em "Solicitar", escolha o período "Mês específico", tipo de documento "Consolidado" e formato "Excel (.xlsx)".',
+  xp_broker: 'Como conseguir os documentos da XP (são dois arquivos): (1) Posição — menu "Minha Conta" → "Histórico de Carteira", selecione o mês e baixe em "XLS". (2) Movimentações — menu "Minha Conta" → "Saldo/Extrato" (da Conta Investimento), selecione um período acima de 30 dias e clique no botão com um X (exportar).',
+  itau_broker: 'Como conseguir o extrato do Itaú: acesse itau.com.br, entre na sua conta, vá em Menu → Investimentos. No campo "Posição consolidada", clique em "Imprimir" e salve como PDF.',
+};
+
 function ddItemHtml(p, type, isBuiltin) {
   const logo = bankLogoHtml(p, 24);
   // Broker items call pickBroker; bank/card items call pickImport
   const clickFn = type === 'broker' ? `pickBroker('${p.id}')` : `pickImport('${p.id}','${type}')`;
+  const helpBtn = BROKER_HELP_TEXT[p.id]
+    ? `<button class="btn-icon" style="font-size:11px;color:var(--text3);cursor:help" title="${esc(BROKER_HELP_TEXT[p.id])}" onclick="event.stopPropagation()">❓</button>`
+    : '';
   const editBtn = `<button class="btn-icon" style="font-size:11px;color:var(--text3);margin-left:4px" title="Editar" onclick="event.stopPropagation();openBankEdit('${p.id}','${type}',${isBuiltin})">✎</button>`;
   const delBtn  = isBuiltin ? '' : `<button class="btn-icon" style="font-size:11px;color:var(--text3)" title="Remover" onclick="event.stopPropagation();deleteCustomParser('${p.id}')">✕</button>`;
   return `<div class="import-dd-item" style="justify-content:space-between" onclick="${clickFn}">
@@ -3303,7 +3312,7 @@ function ddItemHtml(p, type, isBuiltin) {
       <span style="font-weight:500">${esc(p.name)}</span>
       <span style="color:var(--text3);font-size:11px">${p.fileType||p.config?.fileType||'CSV'}</span>
     </span>
-    <span style="display:flex;gap:2px" onclick="event.stopPropagation()">${editBtn}${delBtn}</span>
+    <span style="display:flex;gap:2px;align-items:center" onclick="event.stopPropagation()">${helpBtn}${editBtn}${delBtn}</span>
   </div>`;
 }
 
@@ -3563,7 +3572,9 @@ async function onBankFileSelected(event) {
     let rows;
     const custom = _customBankParsers.find(p => p.id === selBank);
     if (custom) {
-      rows = parseCustomBank(buffer, custom.config);
+      rows = custom.config.fileType === 'PDF_CUSTOM'
+        ? await parseCustomBankPDF(buffer.slice(0), custom.config)
+        : parseCustomBank(buffer, custom.config);
     } else {
       rows = await parseBankFile(buffer);
     }
@@ -3672,7 +3683,7 @@ function renderBankPreview(rows) {
   const footer = preview.querySelector('div[style*="margin-top:10px"], .import-footer');
   if (footer) footer.innerHTML = `
     <button class="btn primary" onclick="confirmBankImport()">✓ Confirmar importação</button>
-    <button class="btn" onclick="cancelBankImport()">Cancelar</button>
+    <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
     <span id="bank-preview-count" style="font-size:12px;color:var(--text3)"></span>`;
 
   preview.style.display = 'block';
@@ -3973,6 +3984,16 @@ function recordDebtInterestSighting(hits, rows) {
   try { localStorage.setItem('crz-debt-interest-log', JSON.stringify(log)); } catch(e) {}
 }
 
+// Remove (ou restaura) uma linha específica da pré-visualização de importação,
+// sem descartar o lote inteiro — útil pra tirar um lançamento que não devia
+// ter sido capturado (ex: uma linha de saldo) sem perder o resto do extrato.
+function toggleImportRowRemoved(idx) {
+  const row = _importEditRows[idx];
+  if (!row) return;
+  row._removed = !row._removed;
+  renderImportEditTable(_importEditRows);
+}
+
 function renderImportEditTable(rows) {
   if (!rows || rows.length === 0) {
     toast('Nenhuma transação para importar após filtrar duplicatas.');
@@ -4017,12 +4038,17 @@ function renderImportEditTable(rows) {
   const tableRows = rows.map((r, i) => {
     const hasSug = r.sugMemo !== r.memo || r.sugCat;
     const amtCls = r.amount < 0 ? 'amt-exp' : 'amt-inc';
+    const isRemoved = !!r._removed;
     const holderCell = multiCard
       ? `<td style="font-size:11px;color:var(--text3);padding:4px 8px;vertical-align:middle;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.cardHolder||'')}">
            ${esc(cardHolderShortLabel(r.cardHolder||''))}<br><span style="color:var(--text3)">→ ${esc(acctName(r.accountId))}</span>
          </td>`
       : '';
-    const doneStyle = r._transferDone ? 'background:#f0fdf4;opacity:0.5' : '';
+    const doneStyle = r._transferDone ? 'background:#f0fdf4;opacity:0.5' : (isRemoved ? 'opacity:0.4;text-decoration:line-through' : '');
+    const removeCell = `<td style="padding:3px 4px;vertical-align:middle;text-align:center">
+      <button type="button" class="btn xs" title="${isRemoved ? 'Restaurar esta linha' : 'Remover esta linha da importação'}"
+        onclick="toggleImportRowRemoved(${i})" style="padding:2px 6px">${isRemoved ? '↩️' : '🗑️'}</button>
+    </td>`;
     // Ativo imobilizado: opções do _pat.assets
     const assetOptions = '<option value="">—</option>' +
       (_pat?.assets||[]).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
@@ -4038,7 +4064,7 @@ function renderImportEditTable(rows) {
       ['venda','🔴 Venda'],['venda_parcela','🔴 Parcela venda'],
     ].map(([v,l]) => `<option value="${v}">${l}</option>`).join('');
 
-    const patCell = r._transferDone ? '<td></td><td></td>' : `
+    const patCell = (r._transferDone || isRemoved) ? '<td></td><td></td>' : `
       <td style="padding:2px 4px;vertical-align:middle;min-width:160px">
         <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;white-space:nowrap;margin-bottom:3px">
           <input type="checkbox" class="import-pat-toggle" data-idx="${i}"
@@ -4074,25 +4100,26 @@ function renderImportEditTable(rows) {
       </td>`;
 
     return `<tr data-row-idx="${i}" style="${doneStyle}">
+      ${removeCell}
       <td style="white-space:nowrap;font-size:12px;padding:5px 8px;vertical-align:middle">${r.dateISO}</td>
       <td style="font-size:11px;color:var(--text3);padding:4px 8px;vertical-align:middle;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.desc||r.memo||'')}">${esc(r.desc||r.memo||'')}</td>
       ${holderCell}
       <td style="padding:3px 4px;vertical-align:middle">
         <div style="display:flex;align-items:center;gap:4px">
-          <input class="inp import-memo-inp" data-idx="${i}" value="${esc(r.sugMemo)}" ${r._transferDone?'disabled':''}
+          <input class="inp import-memo-inp" data-idx="${i}" value="${esc(r.sugMemo)}" ${(r._transferDone||isRemoved)?'disabled':''}
             style="flex:1;font-size:12px;padding:3px 6px;min-width:130px">
-          ${hasSug && !r._transferDone ? mlBadge : ''}
+          ${hasSug && !r._transferDone && !isRemoved ? mlBadge : ''}
         </div>
       </td>
       <td style="padding:3px 4px;vertical-align:middle">
         <div style="display:flex;align-items:center;gap:2px">
-          <input class="inp import-cat-inp" data-idx="${i}" value="${r._transferDone ? '✅ Transferência criada' : esc(r.sugCat)}" ${r._transferDone?'disabled':''}
+          <input class="inp import-cat-inp" data-idx="${i}" value="${r._transferDone ? '✅ Transferência criada' : esc(r.sugCat)}" ${(r._transferDone||isRemoved)?'disabled':''}
             placeholder="Categoria" autocomplete="off"
             style="flex:1;font-size:12px;padding:3px 6px;min-width:100px"
             oninput="openGlobalCatDrop(this)"
             onfocus="openGlobalCatDrop(this)"
             id="import-cat-${i}">
-          <button type="button" tabindex="-1" ${r._transferDone?'disabled':''}
+          <button type="button" tabindex="-1" ${(r._transferDone||isRemoved)?'disabled':''}
             style="padding:2px 5px;font-size:10px;line-height:1;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;flex-shrink:0;color:var(--text2)"
             onmousedown="event.preventDefault();openGlobalCatDrop(this.previousElementSibling)">▾</button>
         </div>
@@ -4113,7 +4140,7 @@ function renderImportEditTable(rows) {
       <div class="tbl-outer" style="max-height:calc(100vh - 360px)">
         <table class="ledger">
           <thead><tr>
-            <th>Data</th><th>Descrição original</th>${multiCard ? '<th>Titular → Conta</th>' : ''}<th>Memorando</th><th>Categoria</th><th class="right">Valor</th><th>Vinculado a ativo</th><th>Dívida pessoal</th>
+            <th></th><th>Data</th><th>Descrição original</th>${multiCard ? '<th>Titular → Conta</th>' : ''}<th>Memorando</th><th>Categoria</th><th class="right">Valor</th><th>Vinculado a ativo</th><th>Dívida pessoal</th>
           </tr></thead>
           <tbody id="bank-preview-body">${tableRows}</tbody>
         </table>
@@ -4121,8 +4148,9 @@ function renderImportEditTable(rows) {
     </div>
     <div class="import-footer" style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
       <button class="btn primary" onclick="doImportFromTable()">✓ Confirmar importação</button>
-      <button class="btn" onclick="cancelBankImport()">Cancelar</button>
-      <span style="font-size:12px;color:var(--text3)">${rows.length} lançamento(s) · 🧠 = sugerido pelo ML</span>
+      <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
+      <span style="font-size:12px;color:var(--text3)">${rows.length} lançamento(s)${rows.some(r=>r._removed) ? ` · ${rows.filter(r=>r._removed).length} removida(s) — não serão importadas` : ''} · 🧠 = sugerido pelo ML</span>
+
     </div>`;
 
   preview.style.display = 'block';
@@ -4149,7 +4177,8 @@ async function doImportFromTable() {
 
   // Linhas já processadas como transferência manual (via modal) NÃO entram na importação —
   // o registro já foi criado de fato nas contas; importá-las de novo duplicaria.
-  const sourceRows = rows.filter((r, i) => !(_importEditRows[i]?._transferDone));
+  // Linhas marcadas como removidas pelo usuário (🗑️ na pré-visualização) também ficam de fora.
+  const sourceRows = rows.filter((r, i) => !(_importEditRows[i]?._transferDone) && !(_importEditRows[i]?._removed));
 
   // Read edited memo/category from table inputs (índices preservados a partir das linhas originais)
   const memoInputs = G('bank-preview-body').querySelectorAll('.import-memo-inp');
@@ -4325,7 +4354,7 @@ function showMemoDupUI(matches, finalRows, updatedInstallments, accountId, check
 
       <div style="display:flex;gap:8px;align-items:center">
         <button class="btn primary" onclick="confirmMemoDupImport()">✓ Confirmar e importar</button>
-        <button class="btn" onclick="cancelBankImport()">Cancelar</button>
+        <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
       </div>
     </div>`;
 
@@ -4540,7 +4569,7 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
 
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <button class="btn primary" onclick="confirmDupAndImport()">✓ Confirmar e importar</button>
-        <button class="btn" onclick="cancelBankImport()">Cancelar</button>
+        <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
         <span style="font-size:12px;color:var(--text3)">
           ${potentialDups.length} duplicata(s) · por padrão marcadas para <strong>Pular</strong>
         </span>
@@ -4783,6 +4812,8 @@ const BUILTIN_BROKERS = [
     logoUrl:'data:image/png;base64,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', logoBg:'#003B71', logoFallback:'BT' },
   { id:'xp_broker',  type:'broker', name:'XP Investimentos', fileType:'XLSX (2 arquivos)',
     logoUrl:'data:image/png;base64,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', logoBg:'#111111', logoFallback:'XP' },
+  { id:'itau_broker', type:'broker', name:'Itaú', fileType:'PDF',
+    logoUrl:'data:image/png;base64,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', logoBg:'#EC7000', logoFallback:'IT' },
 ];
 
 let _customBrokerParsers = [];
@@ -4913,7 +4944,7 @@ async function onBrokerFileSelected(event) {
   if (!file) return;
   G('broker-file-name').textContent = file.name;
 
-  if (typeof XLSX === 'undefined') {
+  if (_selectedBroker !== 'itau_broker' && typeof XLSX === 'undefined') {
     await new Promise((res, rej) => {
       const s = document.createElement('script');
       s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
@@ -4940,6 +4971,10 @@ async function onBrokerFileSelected(event) {
       G('broker-result').innerHTML = '';
       showXPBrokerWizard(_brokerBuffer, file.name);
       return;
+    } else if (_selectedBroker === 'itau_broker') {
+      G('broker-result').innerHTML = '<div class="info-box">⏳ Lendo posição consolidada…</div>';
+      const { assets, month } = await parseItauInvestmentsPDF(_brokerBuffer);
+      parsed = { month, assets, caixaValue: null, broker: 'Itaú', unresolvedMovements: [] };
     } else {
       const custom = _customBrokerParsers.find(p => p.id === _selectedBroker);
       if (custom) parsed = parseCustomBroker(_brokerBuffer, custom.config);
@@ -5934,6 +5969,15 @@ function renderBrokerPreview(parsed) {
     const typeSel = row?.querySelector('.broker-type-sel');
     if (typeSel) typeSel.innerHTML = window._brokerTypeOptions(catSel.value, null);
   };
+  // Remove (ou restaura) um ativo específico da pré-visualização, sem
+  // descartar a importação inteira — útil pra tirar um ativo duplicado ou
+  // mal identificado sem perder o resto do extrato.
+  window._toggleBrokerAssetRemoved = (idx) => {
+    const p = G('broker-preview')._parsed;
+    if (!p?.assets?.[idx]) return;
+    p.assets[idx]._removed = !p.assets[idx]._removed;
+    renderBrokerPreview(p);
+  };
   // Parser de moeda simples para os campos editáveis desta tela (Valor/Ext/Rend)
   window._brokerParseBRL = v => {
     if (v == null || v === '') return null;
@@ -5972,32 +6016,39 @@ function renderBrokerPreview(parsed) {
       <td style="padding:3px 8px 5px 8px">${unkHtml}</td>
     </tr>` : '';
     const unclassifiedCount = (a.movimentacoes||[]).filter(m => !m.flow_type).length;
-    return `<tr>
+    const isRemoved = !!a._removed;
+    const rowStyle = isRemoved ? 'opacity:0.4;text-decoration:line-through' : '';
+    const dis = isRemoved ? 'disabled' : '';
+    return `<tr style="${rowStyle}">
+      <td style="padding:3px 4px;text-align:center;vertical-align:top">
+        <button type="button" class="btn xs" title="${isRemoved ? 'Restaurar este ativo' : 'Remover este ativo da importação'}"
+          onclick="window._toggleBrokerAssetRemoved(${i})" style="padding:2px 6px">${isRemoved ? '↩️' : '🗑️'}</button>
+      </td>
       <td style="font-size:11px;padding:4px 6px;min-width:150px">
         <div style="font-size:10px;color:var(--text3);margin-bottom:2px">${esc(a.name)}</div>
         ${nameInput}
       </td>
       <td style="padding:3px 4px">
-        <select class="broker-cat-sel inp" data-idx="${i}" style="font-size:11px;padding:2px 4px;min-width:90px" onchange="window._brokerCatChanged(this)">
+        <select class="broker-cat-sel inp" data-idx="${i}" style="font-size:11px;padding:2px 4px;min-width:90px" onchange="window._brokerCatChanged(this)" ${dis}>
           ${CAT_OPTIONS}
         </select>
       </td>
       <td style="padding:3px 4px">
-        <select class="broker-type-sel inp" data-idx="${i}" style="font-size:11px;padding:2px 4px;min-width:110px">
+        <select class="broker-type-sel inp" data-idx="${i}" style="font-size:11px;padding:2px 4px;min-width:110px" ${dis}>
           ${window._brokerTypeOptions(a.category, a.inv_type||'')}
         </select>
       </td>
       <td style="font-size:11px;padding:4px 6px;text-align:center">${vencLabel}</td>
       <td style="text-align:center;padding:4px 6px">
-        <input class="broker-valor-inp inp" data-idx="${i}" value="${a.valor!=null?fmtBRL(a.valor):''}"
+        <input class="broker-valor-inp inp" data-idx="${i}" value="${a.valor!=null?fmtBRL(a.valor):''}" ${dis}
           style="font-size:11px;padding:2px 5px;min-width:90px;text-align:right;font-family:'DM Mono',monospace;color:var(--green)">
       </td>
       <td style="text-align:center;padding:4px 6px">
-        <input class="broker-ext-inp inp" data-idx="${i}" value="${extTotal?fmtBRL(extTotal):''}"
+        <input class="broker-ext-inp inp" data-idx="${i}" value="${extTotal?fmtBRL(extTotal):''}" ${dis}
           style="font-size:11px;padding:2px 5px;min-width:80px;text-align:right;font-family:'DM Mono',monospace;color:var(--accent)">
       </td>
       <td style="text-align:center;padding:4px 6px">
-        <input class="broker-inc-inp inp" data-idx="${i}" value="${incTotal?fmtBRL(incTotal):''}"
+        <input class="broker-inc-inp inp" data-idx="${i}" value="${incTotal?fmtBRL(incTotal):''}" ${dis}
           style="font-size:11px;padding:2px 5px;min-width:80px;text-align:right;font-family:'DM Mono',monospace;color:var(--green)">
       </td>
       <td style="font-size:11px;padding:4px 8px;text-align:center;color:#d97706">${unclassifiedCount ? `❓ ${unclassifiedCount}` : ''}</td>
@@ -6163,6 +6214,7 @@ function renderBrokerPreview(parsed) {
       <div class="tbl-outer" style="max-height:420px;overflow-x:auto">
         <table class="ledger" style="min-width:720px">
           <thead><tr>
+            <th></th>
             <th>Extrato → Nome no Cruzeiro</th>
             <th>Categoria</th><th>Tipo</th>
             <th style="text-align:center">Vencimento</th>
@@ -6178,7 +6230,7 @@ function renderBrokerPreview(parsed) {
     ${unresolvedHtml}
     <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
       <button class="btn primary" onclick="confirmBrokerImport()">✓ Importar para Patrimônio</button>
-      <button class="btn" onclick="cancelBrokerImport()">Cancelar</button>
+      <button class="btn" onclick="cancelBrokerImport()">🗑️ Descartar importação</button>
       <span style="font-size:12px;color:var(--text3)">Os dados serão salvos em Patrimônio → Investimentos Financeiros</span>
     </div>`;  preview.style.display = 'block';
   if (G('broker-result')) G('broker-result').innerHTML = '';
@@ -6266,7 +6318,7 @@ async function confirmBrokerImport() {
       }
     }
   });
-  parsed.assets = parsed.assets.filter(a => !a._skip);
+  parsed.assets = parsed.assets.filter(a => !a._skip && !a._removed);
   // Apply edited category/type only for NEW assets (not existing ones)
   parsed.assets.forEach(a => {
     if (a._editedCategory) a.category = a._editedCategory;
@@ -6465,7 +6517,7 @@ async function onWizardFileSelected(event) {
 
     // Try PDF (Santander Extrato Consolidado Inteligente)
     if (!autoConfig && ext === 'pdf') {
-      const pdfRows = await parseSantanderPDF(_wizardBuffer);
+      const pdfRows = await parseSantanderPDF(_wizardBuffer.slice(0));
       if (pdfRows && pdfRows.length > 0) {
         autoConfig = { fileType: 'PDF', source: 'Santander' };
         autoRows = pdfRows;
@@ -6479,11 +6531,6 @@ async function onWizardFileSelected(event) {
   if (autoConfig && autoRows.length > 0) {
     _wizardParsed = autoRows;
     renderWizardAutoResult(autoConfig, autoRows);
-  } else if (ext === 'pdf') {
-    G('wizard-step1-result').innerHTML = `<div class="warn-box">
-      ⚠️ Não foi possível extrair transações deste PDF automaticamente.<br>
-      Atualmente apenas o extrato <strong>Santander "Extrato Consolidado Inteligente"</strong> é suportado.
-    </div>`;
   } else {
     renderWizardManualConfig(ext);
   }
@@ -6511,7 +6558,11 @@ async function getPdfDocumentWithPassword(buffer) {
   let errorMsg = '';
   while (true) {
     try {
-      const opts = { data: buffer };
+      // pdf.js transfere/destrói (detach) o ArrayBuffer que recebe — uma
+      // cópia nova evita que tentativas seguintes (nova senha, ou um
+      // chamador que reusa o mesmo buffer depois) quebrem com "Cannot
+      // perform Construct on a detached ArrayBuffer".
+      const opts = { data: buffer.slice(0) };
       if (password !== undefined) opts.password = password;
       return await pdfjsLib.getDocument(opts).promise;
     } catch (e) {
@@ -6648,6 +6699,198 @@ async function parseSantanderPDF(buffer) {
   }
 
   return result;
+}
+
+// ── Itaú Corretora — investment position statement (PDF) ──
+// Layout: each category ("Fundos de Investimento", "Tesouro Direto" etc.) is
+// a fixed, always-present row (even when empty) showing rendimento/distribuição/
+// valor investido for that category, immediately followed — when non-empty —
+// by a "sua rentabilidade acumulada" detail table listing each asset under
+// "produto/nome", with the asset's current value in the rightmost "valor
+// investido (R$)" column. Two quirks this parser specifically guards against
+// (both confirmed against a real statement):
+// 1) An asset's name can wrap across several physical lines, and the value
+//    columns don't always land on the LAST name line — so the asset boundary
+//    is detected by the vertical gap between consecutive name-column lines
+//    (~13pt = same asset wrapping; >~14.5pt = a new asset started), not by
+//    "stop accumulating as soon as a value appears".
+// 2) "total investido" appears as a running footer on EVERY page, not just
+//    the last one — it must close the current section without halting the
+//    whole parse, or anything past page 1 silently gets dropped.
+async function parseItauInvestmentsPDF(buffer) {
+  await loadPdfJsLib();
+  const pdf = await getPdfDocumentWithPassword(buffer);
+  if (!pdf) throw new Error('__IMPORT_CANCELLED__');
+
+  const ITAU_CATEGORIES = [
+    'Fundos de Investimento', 'CDB, Renda Fixa e Estruturados', 'Tesouro Direto',
+    'Poupança', 'Investimentos Imobiliários', 'Previdência', 'Ações',
+  ];
+  const norm = s => (s||'').toString().toLowerCase().normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  const CAT_BY_NORM = {};
+  ITAU_CATEGORIES.forEach(c => { CAT_BY_NORM[norm(c)] = c; });
+
+  function parseBRL(s) {
+    s = (s||'').trim();
+    if (s === '-' || s === '' || s === '—') return null;
+    s = s.replace(/R\$/g,'').replace(/\./g,'').replace(',','.').trim();
+    const n = parseFloat(s);
+    return isNaN(n) ? null : n;
+  }
+
+  // Classifica categoria/tipo interno do app a partir da categoria do Itaú +
+  // nome do ativo (a categoria do Itaú é o sinal principal; o nome refina o
+  // tipo dentro dela, igual ao critério já usado pra XP/BTG).
+  function classifyItauAsset(itauCategory, name) {
+    const n = (name||'').toUpperCase();
+    if (/\bFIP\b/.test(n)) return { category:'private_equity', inv_type:'Private Equity' };
+    switch (itauCategory) {
+      case 'Fundos de Investimento': {
+        if (n.includes('MULTIMERCADO')) return { category:'fundos', inv_type:'Fundo Multimercado' };
+        if (n.includes('AÇÕES') || n.includes('ACOES')) return { category:'fundos', inv_type:'Fundo de Ações' };
+        if (n.includes('CAMBIAL')) return { category:'fundos', inv_type:'Fundo Cambial' };
+        if (n.includes('RENDA FIXA')) return { category:'fundos', inv_type:'Fundo Renda Fixa' };
+        if (/^[A-Z]{4}1[123]\b/.test(n)) return { category:'fundos', inv_type:'FII' };
+        return { category:'fundos', inv_type:'Fundo Multimercado' };
+      }
+      case 'CDB, Renda Fixa e Estruturados': {
+        if (/^CRI\b/.test(n)) return { category:'renda_fixa', inv_type:'CRI' };
+        if (/^CRA\b/.test(n)) return { category:'renda_fixa', inv_type:'CRA' };
+        if (/^CDB\b/.test(n)) return { category:'renda_fixa', inv_type:'CDB' };
+        if (/^LCI\b/.test(n)) return { category:'renda_fixa', inv_type:'LCI' };
+        if (/^LCA\b/.test(n)) return { category:'renda_fixa', inv_type:'LCA' };
+        if (/^LF\b/.test(n))  return { category:'renda_fixa', inv_type:'LF' };
+        return { category:'renda_fixa', inv_type:'Debênture' };
+      }
+      case 'Tesouro Direto': {
+        if (/IPCA/.test(n))       return { category:'tesouro', inv_type:'Tesouro IPCA+' };
+        if (/PREFIXADO/.test(n))  return { category:'tesouro', inv_type:'Tesouro Prefixado' };
+        if (/SELIC/.test(n))      return { category:'tesouro', inv_type:'Tesouro SELIC' };
+        if (/RENDA\+/.test(n))    return { category:'tesouro', inv_type:'Renda+' };
+        if (/EDUCA\+/.test(n))    return { category:'tesouro', inv_type:'Tesouro Educa+' };
+        return { category:'tesouro', inv_type:'Tesouro SELIC' };
+      }
+      case 'Poupança': return { category:'renda_fixa', inv_type:'Poupança' };
+      case 'Investimentos Imobiliários': return { category:'fundos', inv_type:'FII' };
+      case 'Previdência': {
+        if (n.includes('PGBL')) return { category:'previdencia', inv_type:'PGBL' };
+        return { category:'previdencia', inv_type:'VGBL' };
+      }
+      case 'Ações': return { category:'renda_variavel', inv_type:'Ações' };
+      default: return { category:'fundos', inv_type:'Fundo Multimercado' };
+    }
+  }
+
+  const GAP_THRESHOLD = 14.5; // pt — abaixo = continuação do nome; acima = novo ativo
+
+  // ── Extrai todas as linhas (agrupadas por proximidade de Y), de todas as
+  // páginas, como um único fluxo contínuo — soma um deslocamento grande por
+  // página pra evitar que a reinicialização do eixo Y a cada página seja
+  // confundida com um "salto" dentro da mesma tabela.
+  const allRows = [];
+  let issuedMonth = null;
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const viewport = page.getViewport({ scale: 1 });
+    if (issuedMonth === null) {
+      const pageText = content.items.map(it => it.str).join(' ');
+      const m = pageText.match(/emitido em\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+      if (m) issuedMonth = `${m[3]}-${m[2]}`;
+    }
+    const items = content.items
+      .filter(it => it.str.trim() !== '')
+      .map(it => ({ x: it.transform[4], y: (viewport.height - it.transform[5]) + pageNum * 2000, text: it.str.trim() }));
+    items.sort((a,b) => a.y - b.y || a.x - b.x);
+    let cur = [], curY = null;
+    for (const it of items) {
+      if (curY === null || Math.abs(it.y - curY) > 1.5) {
+        if (cur.length) allRows.push(cur);
+        cur = [it]; curY = it.y;
+      } else {
+        cur.push(it);
+      }
+    }
+    if (cur.length) allRows.push(cur);
+  }
+  if (!issuedMonth) {
+    const now = new Date();
+    issuedMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  }
+
+  const assets = [];
+  const categoryTargets = {};
+  let currentCategory = null;
+  let ready = false; // true = past the "produto/nome" header, collecting asset rows
+  let nameBuffer = [];
+  let pendingValue = null;
+  let lastNameY = null;
+
+  function finalizeAsset() {
+    const name = nameBuffer.join(' ').replace(/\s+/g,' ').trim();
+    if (name && pendingValue != null) {
+      const { category, inv_type } = classifyItauAsset(currentCategory, name);
+      assets.push({ name, category, inv_type, broker: 'Itaú', valor: pendingValue, movimentacoes: [] });
+    }
+    nameBuffer = [];
+    pendingValue = null;
+  }
+
+  for (const row of allRows) {
+    const rowText = row.map(w => w.text).join(' ');
+    const ntxt = norm(rowText);
+
+    if (ntxt.startsWith('total investido')) {
+      // Aparece no rodapé de TODA página — finaliza a seção atual, não para o parse inteiro.
+      finalizeAsset();
+      ready = false;
+      lastNameY = null;
+      continue;
+    }
+
+    let matchedCat = null;
+    for (const cn in CAT_BY_NORM) {
+      if (ntxt.startsWith(cn)) { matchedCat = CAT_BY_NORM[cn]; break; }
+    }
+    if (matchedCat) {
+      finalizeAsset();
+      currentCategory = matchedCat;
+      ready = false;
+      lastNameY = null;
+      // Valor da categoria = último número (com formato de moeda BR) na linha.
+      const nums = rowText.match(/[\d.]+,\d{2}/g);
+      categoryTargets[matchedCat] = nums && nums.length ? parseBRL(nums[nums.length-1]) : 0;
+      continue;
+    }
+
+    if (ntxt.includes('rentabilidade') && ntxt.includes('acumulada')) {
+      ready = false;
+      continue;
+    }
+
+    if (!ready) {
+      if (row.some(w => w.text.toLowerCase() === 'nome')) ready = true;
+      continue;
+    }
+
+    // Modo de coleta de ativos da categoria atual
+    const nameWords = row.filter(w => w.x < 100).map(w => w.text);
+    if (nameWords.length) {
+      if (lastNameY != null && (row[0].y - lastNameY) > GAP_THRESHOLD) finalizeAsset();
+      nameBuffer.push(...nameWords);
+      lastNameY = row[0].y;
+    }
+    for (const w of row) {
+      if (w.x > 460) {
+        const v = parseBRL(w.text);
+        if (v != null) pendingValue = v;
+      }
+    }
+  }
+  finalizeAsset();
+
+  return { assets, categoryTargets, broker: 'Itaú', month: issuedMonth };
 }
 
 // ── Santander credit card invoice (Fatura) PDF parser ──
@@ -7098,7 +7341,38 @@ function renderWizardAutoResult(config, rows) {
     <button class="btn primary" onclick="saveWizardParser(${JSON.stringify(config).replace(/"/g,'&quot;')})">✓ Funcionou! Salvar</button>`;
 }
 
+// Conversão entre letra de coluna (A, B, ..., Z, AA, AB...) e índice 0-based,
+// igual ao Excel — usado pros seletores de coluna do assistente de
+// configuração manual, pra não obrigar o usuário a contar "A=0, B=1...".
+function colIndexToLetter(idx) {
+  let n = idx + 1, s = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+function colLetterToIndex(letter) {
+  let idx = 0;
+  letter = (letter||'').toUpperCase();
+  for (let i = 0; i < letter.length; i++) idx = idx * 26 + (letter.charCodeAt(i) - 64);
+  return idx - 1;
+}
+function colLetterOptions(selectedIdx) {
+  let html = '';
+  for (let i = 0; i < 52; i++) { // A..Z, AA..AZ — bem mais que qualquer extrato real usa
+    const letter = colIndexToLetter(i);
+    html += `<option value="${i}"${i===selectedIdx?' selected':''}>${letter}</option>`;
+  }
+  return html;
+}
+
 function renderWizardManualConfig(ext) {
+  if (ext === 'pdf') { renderWizardManualPdfConfig(); return; }
+  const isCSV = ext === 'csv';
+  const helpIcon = tip => `<span title="${esc(tip)}" style="cursor:help;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:1px solid var(--border);border-radius:50%;font-size:10px;color:var(--text3);margin-left:4px;flex-shrink:0">?</span>`;
+
   G('custom-parser-body').innerHTML = `
     <div class="warn-box" style="margin-bottom:12px">
       ⚠️ Não foi possível detectar automaticamente. Informe onde estão os dados:
@@ -7106,13 +7380,13 @@ function renderWizardManualConfig(ext) {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
       <div class="field" style="margin:0">
         <label class="lbl">Formato do arquivo</label>
-        <select class="inp" id="wiz-filetype">
+        <select class="inp" id="wiz-filetype" onchange="window._wizToggleDelimiter()">
           <option value="CSV"${ext==='csv'?' selected':''}>CSV</option>
           <option value="XLSX"${['xlsx','xls'].includes(ext)?' selected':''}>Excel (XLSX/XLS)</option>
           <option value="OFX"${ext==='ofx'?' selected':''}>OFX</option>
         </select>
       </div>
-      <div class="field" style="margin:0" id="wiz-delimiter-wrap">
+      <div class="field" style="margin:0;${isCSV?'':'visibility:hidden'}" id="wiz-delimiter-wrap">
         <label class="lbl">Separador (CSV)</label>
         <select class="inp" id="wiz-delimiter">
           <option value=";">Ponto e vírgula (;)</option>
@@ -7123,25 +7397,25 @@ function renderWizardManualConfig(ext) {
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
       <div class="field" style="margin:0">
-        <label class="lbl">Linha do cabeçalho</label>
+        <label class="lbl">Linha do cabeçalho${helpIcon('É a linha onde ficam os TÍTULOS das colunas (ex: "Data", "Descrição", "Valor"), contando a partir da linha 1 do arquivo. Tudo ANTES dela é ignorado (logos, dados da conta, avisos) e os lançamentos de verdade começam na linha seguinte. Se o arquivo não tiver títulos de coluna, informe o número da última linha antes do primeiro lançamento real.')}</label>
         <input class="inp" id="wiz-headerrow" type="number" value="1" min="1" max="50">
       </div>
       <div class="field" style="margin:0">
-        <label class="lbl">Coluna de data (A=0)</label>
-        <input class="inp" id="wiz-datecol" type="number" value="0" min="0" max="50">
+        <label class="lbl">Coluna de data</label>
+        <select class="inp" id="wiz-datecol">${colLetterOptions(0)}</select>
       </div>
       <div class="field" style="margin:0">
         <label class="lbl">Coluna de descrição</label>
-        <input class="inp" id="wiz-desccol" type="number" value="1" min="0" max="50">
+        <select class="inp" id="wiz-desccol">${colLetterOptions(1)}</select>
       </div>
     </div>
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
       <div class="field" style="margin:0">
         <label class="lbl">Coluna de valor</label>
-        <input class="inp" id="wiz-amtcol" type="number" value="2" min="0" max="50">
+        <select class="inp" id="wiz-amtcol">${colLetterOptions(2)}</select>
       </div>
       <div class="field" style="margin:0">
-        <label class="lbl">Inverter sinal?</label>
+        <label class="lbl">Inverter sinal?${helpIcon('Ao clicar em "Testar", veja a pré-visualização: despesas devem aparecer em vermelho e receitas em verde. Se estiver ao contrário (despesas em verde, receitas em vermelho), mude para "Sim" — isso inverte o sinal de todos os valores importados.')}</label>
         <select class="inp" id="wiz-invert">
           <option value="0">Não</option>
           <option value="1">Sim</option>
@@ -7158,6 +7432,339 @@ function renderWizardManualConfig(ext) {
     <button class="btn" onclick="closeModal('modal-custom-parser')">Cancelar</button>
     <button class="btn" onclick="testManualWizard()">🔍 Testar</button>
     <button class="btn primary" id="wiz-save-btn" style="display:none" onclick="saveManualWizard()">✓ Funcionou! Salvar</button>`;
+}
+
+// Esconde "Separador (CSV)" quando o formato não é CSV — esse campo só faz
+// sentido pra CSV, e ficava confuso aparecer sempre.
+window._wizToggleDelimiter = () => {
+  const wrap = G('wiz-delimiter-wrap');
+  if (wrap) wrap.style.visibility = G('wiz-filetype')?.value === 'CSV' ? '' : 'hidden';
+};
+
+// ── Assistente manual para PDF — baseado em "âncoras" de texto, não em
+// índice de coluna (que não existe num PDF). O usuário diz qual texto
+// aparece no título de cada coluna (data/descrição/valor) e, opcionalmente,
+// qual texto marca o fim da lista de lançamentos. O motor usa a posição X
+// de cada âncora, na linha do cabeçalho, pra decidir os limites de cada
+// coluna — mesma técnica (extração posicional via pdf.js) já usada nos
+// parsers do Santander e do Itaú, só que parametrizada em vez de fixa.
+function renderWizardManualPdfConfig() {
+  const helpIcon = tip => `<span title="${esc(tip)}" style="cursor:help;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:1px solid var(--border);border-radius:50%;font-size:10px;color:var(--text3);margin-left:4px;flex-shrink:0">?</span>`;
+
+  G('custom-parser-body').innerHTML = `
+    <div class="warn-box" style="margin-bottom:12px">
+      ⚠️ Não foi possível detectar automaticamente. PDFs não têm "colunas" fixas como planilhas —
+      em vez disso, descreva abaixo os textos que aparecem no extrato e o app usa a posição deles na página
+      pra encontrar os lançamentos.
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px">
+      <div class="field" style="margin:0">
+        <label class="lbl">Título da coluna de DATA${helpIcon('Digite exatamente o texto que aparece no topo da coluna de datas dos lançamentos (ex: "Data"). O app usa a posição horizontal desse texto na página pra saber onde a coluna de data começa.')}</label>
+        <input class="inp" id="wizpdf-date-header" type="text" placeholder="Ex: Data">
+      </div>
+      <div class="field" style="margin:0">
+        <label class="lbl">Título da coluna de DESCRIÇÃO${helpIcon('Digite exatamente o texto que aparece no topo da coluna com a descrição/histórico de cada lançamento (ex: "Histórico", "Descrição", "Lançamento").')}</label>
+        <input class="inp" id="wizpdf-desc-header" type="text" placeholder="Ex: Histórico">
+      </div>
+      <div class="field" style="margin:0">
+        <label class="lbl">Título da coluna de VALOR (ou ENTRADAS)${helpIcon('Digite o texto do topo da coluna de valores. Se o extrato tiver UMA coluna só (com sinal, ex: "-300,50" ou "300,50-"), use esse campo pra ela. Se o extrato separar entradas e saídas em colunas diferentes (ex: Itaú), use este campo pra coluna de ENTRADAS/créditos e preencha também o campo de saídas abaixo.')}</label>
+        <input class="inp" id="wizpdf-value-header" type="text" placeholder="Ex: Valor, ou Entradas">
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 2fr;gap:10px;margin-bottom:12px">
+      <div class="field" style="margin:0">
+        <label class="lbl">Título da coluna de SAÍDAS/DÉBITOS (opcional)${helpIcon('Preencha SÓ se o extrato tiver uma coluna separada pra saídas/débitos, diferente da coluna de entradas (ex: extratos do Itaú, com colunas "entradas R$" e "saídas R$" lado a lado). Se o extrato usa uma única coluna de valor com sinal pra tudo, deixe este campo em branco.')}</label>
+        <input class="inp" id="wizpdf-outflow-header" type="text" placeholder="Ex: Saídas (deixe em branco se não houver)">
+      </div>
+      <div class="field" style="margin:0">
+        <label class="lbl">Texto que indica o FIM da lista de lançamentos (opcional)${helpIcon('Digite um texto que só aparece DEPOIS do último lançamento, pra avisar o app onde parar (ex: "Saldo final", "Total de débitos", "SALDO"). Se deixar em branco, o app lê até o fim do arquivo. Linhas que comecem com "Saldo" (saldo anterior, saldo do dia, saldo final) já são sempre ignoradas automaticamente, mesmo sem preencher este campo.')}</label>
+        <input class="inp" id="wizpdf-end-text" type="text" placeholder="Ex: Saldo final">
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+      <div class="field" style="margin:0">
+        <label class="lbl">Formato da data</label>
+        <select class="inp" id="wizpdf-date-format" onchange="window._wizPdfToggleRefMonth()">
+          <option value="DDMMYYYY">DD/MM/AAAA (o ano já vem na data)</option>
+          <option value="DDMM">DD/MM (sem ano)</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0;display:none" id="wizpdf-refmonth-wrap">
+        <label class="lbl">Mês de referência do extrato${helpIcon('Como a data dos lançamentos não tem o ano, o app precisa saber a qual mês/ano este extrato pertence, pra completar a data corretamente. Lançamentos de meses POSTERIORES a este (ex: extrato de janeiro com um lançamento de dezembro) são automaticamente colocados no ano anterior.')}</label>
+        <input class="inp" id="wizpdf-refmonth" type="month">
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+      <div class="field" style="margin:0">
+        <label class="lbl">Inverter sinal?${helpIcon('Ao clicar em "Testar", veja a pré-visualização: despesas devem aparecer em vermelho e receitas em verde. Se estiver ao contrário (despesas em verde, receitas em vermelho), mude para "Sim" — isso inverte o sinal de todos os valores importados.')}</label>
+        <select class="inp" id="wizpdf-invert">
+          <option value="0">Não</option>
+          <option value="1">Sim</option>
+        </select>
+      </div>
+      <div class="field" style="margin:0">
+        <label class="lbl">Nome deste ${_wizardType === 'card' ? 'cartão' : 'banco'}</label>
+        <input class="inp" id="wizard-parser-name" type="text" placeholder="Ex: Nubank, Inter…">
+      </div>
+    </div>
+    <div id="wizard-manual-result"></div>`;
+
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="closeModal('modal-custom-parser')">Cancelar</button>
+    <button class="btn" onclick="testManualWizardPdf()">🔍 Testar</button>
+    <button class="btn primary" id="wiz-save-btn" style="display:none" onclick="saveManualWizardPdf()">✓ Funcionou! Salvar</button>`;
+}
+
+window._wizPdfToggleRefMonth = () => {
+  const wrap = G('wizpdf-refmonth-wrap');
+  if (wrap) wrap.style.display = G('wizpdf-date-format')?.value === 'DDMM' ? '' : 'none';
+};
+
+function _wizPdfReadConfig() {
+  return {
+    fileType:     'PDF_CUSTOM',
+    dateHeader:   G('wizpdf-date-header').value.trim(),
+    descHeader:   G('wizpdf-desc-header').value.trim(),
+    valueHeader:  G('wizpdf-value-header').value.trim(),
+    outflowHeader: G('wizpdf-outflow-header').value.trim() || null,
+    endText:      G('wizpdf-end-text').value.trim() || null,
+    dateFormat:   G('wizpdf-date-format').value, // 'DDMMYYYY' | 'DDMM'
+    refMonth:     G('wizpdf-refmonth').value || null, // 'YYYY-MM'
+    invertSign:   G('wizpdf-invert').value === '1',
+  };
+}
+
+async function testManualWizardPdf() {
+  if (!_wizardBuffer) { toast('Selecione um arquivo primeiro'); return; }
+  const config = _wizPdfReadConfig();
+  if (!config.dateHeader || !config.descHeader || !config.valueHeader) {
+    toast('Preencha os três títulos de coluna (data, descrição, valor)');
+    return;
+  }
+  const result = G('wizard-manual-result');
+  result.innerHTML = '<div class="info-box">⏳ Lendo PDF…</div>';
+  try {
+    const rows = await parseCustomBankPDF(_wizardBuffer.slice(0), config);
+    if (!rows.length) {
+      result.innerHTML = '<div class="warn-box">⚠️ Nenhuma transação encontrada com essas configurações. Confira se os textos digitados aparecem EXATAMENTE assim no PDF (maiúsculas/minúsculas e acentos não importam, mas o texto em si precisa estar certo).</div>';
+      G('wiz-save-btn').style.display = 'none';
+      return;
+    }
+    _wizardParsed = rows;
+    const preview = rows.slice(0,5).map(r =>
+      `<tr><td>${r.date}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
+    ).join('');
+    result.innerHTML = `
+      <div class="info-box" style="margin-bottom:8px">✅ ${rows.length} transações encontradas:</div>
+      <div class="tbl-outer" style="max-height:140px">
+        <table class="ledger"><thead><tr><th>Data</th><th>Descrição</th><th class="right">Valor</th></tr></thead>
+        <tbody>${preview}</tbody></table>
+      </div>`;
+    G('wiz-save-btn').style.display = '';
+  } catch(e) {
+    result.innerHTML = `<div class="warn-box">❌ Erro: ${esc(e.message)}</div>`;
+    G('wiz-save-btn').style.display = 'none';
+  }
+}
+
+async function saveManualWizardPdf() {
+  await saveWizardParser(_wizPdfReadConfig());
+}
+
+// ── Motor genérico de extração de PDF por âncoras de texto ──
+// Usa a mesma extração posicional (pdf.js, x/y de cada item de texto) já
+// validada nos parsers do Santander e do Itaú, mas parametrizada: em vez de
+// coordenadas fixas pra um banco específico, descobre a posição de cada
+// coluna a partir de onde os textos-âncora (títulos de coluna) aparecem na
+// linha de cabeçalho.
+async function parseCustomBankPDF(buffer, config) {
+  await loadPdfJsLib();
+  const pdf = await getPdfDocumentWithPassword(buffer);
+  if (!pdf) throw new Error('__IMPORT_CANCELLED__');
+
+  const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+  const dateHeaderN    = norm(config.dateHeader);
+  const descHeaderN    = norm(config.descHeader);
+  const valueHeaderN   = norm(config.valueHeader);
+  const outflowHeaderN = config.outflowHeader ? norm(config.outflowHeader) : null;
+  const endTextN       = config.endText ? norm(config.endText) : null;
+
+  // ── 1. Extrai todas as linhas (Y agrupado), de todas as páginas, como um
+  // fluxo contínuo — com deslocamento por página pra evitar descontinuidade
+  // no eixo Y entre páginas.
+  const allRows = [];
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const viewport = page.getViewport({ scale: 1 });
+    const items = content.items
+      .filter(it => it.str.trim() !== '')
+      .map(it => ({ x: it.transform[4], y: (viewport.height - it.transform[5]) + pageNum * 2000, text: it.str.trim() }));
+    items.sort((a,b) => a.y - b.y || a.x - b.x);
+    let cur = [], curY = null;
+    for (const it of items) {
+      if (curY === null || Math.abs(it.y - curY) > 2.5) {
+        if (cur.length) allRows.push(cur);
+        cur = [it]; curY = it.y;
+      } else {
+        cur.push(it);
+      }
+    }
+    if (cur.length) allRows.push(cur);
+  }
+
+  // ── 2. Acha a linha de cabeçalho — a primeira linha que contém os textos-
+  // âncora configurados (como substring, em qualquer ordem) — e a posição X
+  // de cada um, pra estabelecer os limites das colunas. A coluna de saídas é
+  // opcional (alguns extratos usam uma única coluna de valor com sinal;
+  // outros, como o Itaú, separam entradas e saídas em colunas distintas).
+  let headerIdx = -1, dateX = null, descX = null, valueX = null, outflowX = null;
+  for (let i = 0; i < allRows.length; i++) {
+    const row = allRows[i];
+    const rowTextN = row.map(w => norm(w.text)).join(' ');
+    const hasRequired = rowTextN.includes(dateHeaderN) && rowTextN.includes(descHeaderN) && rowTextN.includes(valueHeaderN);
+    const hasOutflow  = !outflowHeaderN || rowTextN.includes(outflowHeaderN);
+    if (hasRequired && hasOutflow) {
+      const findX = headerN => {
+        const w = row.find(w => norm(w.text).includes(headerN) || headerN.includes(norm(w.text)));
+        return w ? w.x : null;
+      };
+      dateX    = findX(dateHeaderN);
+      descX    = findX(descHeaderN);
+      valueX   = findX(valueHeaderN);
+      outflowX = outflowHeaderN ? findX(outflowHeaderN) : null;
+      if (dateX != null && descX != null && valueX != null && (!outflowHeaderN || outflowX != null)) { headerIdx = i; break; }
+    }
+  }
+  if (headerIdx === -1) {
+    throw new Error('Não encontrei uma linha com os títulos de coluna informados. Confira se o texto está exatamente igual ao do PDF.');
+  }
+
+  // Limites de coluna = ponto médio entre âncoras vizinhas (ordenadas por X)
+  const anchorList = [['date', dateX], ['desc', descX], ['value', valueX]];
+  if (outflowX != null) anchorList.push(['outflow', outflowX]);
+  const anchors = anchorList.sort((a,b) => a[1]-b[1]);
+  const bounds = {}; // 'date'|'desc'|'value'|'outflow' -> [min, max)
+  for (let i = 0; i < anchors.length; i++) {
+    const [name, x] = anchors[i];
+    const prevX = i > 0 ? anchors[i-1][1] : -Infinity;
+    const nextX = i < anchors.length-1 ? anchors[i+1][1] : Infinity;
+    bounds[name] = [i===0 ? -Infinity : (prevX+x)/2, i===anchors.length-1 ? Infinity : (x+nextX)/2];
+  }
+  // Se houver mais alguma coisa na MESMA linha de cabeçalho à direita da
+  // última âncora configurada (ex: uma coluna de "saldo" que o usuário não
+  // precisou informar, porque não é usada pra extrair lançamento nenhum),
+  // usa a posição dela pra limitar a última coluna — senão ela "vaza" e
+  // absorve valores de uma coluna que nem faz parte da configuração.
+  const lastAnchorX = anchors[anchors.length-1][1];
+  const nextHeaderWordX = allRows[headerIdx]
+    .map(w => w.x)
+    .filter(x => x > lastAnchorX + 5)
+    .sort((a,b) => a-b)[0];
+  if (nextHeaderWordX != null) {
+    bounds[anchors[anchors.length-1][0]][1] = (lastAnchorX + nextHeaderWordX) / 2;
+  }
+  const colOf = x => { for (const name in bounds) { if (x >= bounds[name][0] && x < bounds[name][1]) return name; } return null; };
+
+  // ── 3. Determina o ano de referência (datas DD/MM sem ano) ──
+  let refYear = new Date().getFullYear(), refMonth = new Date().getMonth()+1;
+  if (config.dateFormat === 'DDMM' && config.refMonth) {
+    const [ry, rm] = config.refMonth.split('-').map(Number);
+    refYear = ry; refMonth = rm;
+  }
+  function resolveDate(dateText) {
+    const m3 = dateText.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (m3) {
+      const d = parseInt(m3[1]), mo = parseInt(m3[2]);
+      let y = parseInt(m3[3]); if (y < 100) y += 2000;
+      return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    }
+    const m2 = dateText.match(/^(\d{1,2})\/(\d{1,2})$/);
+    if (m2) {
+      const d = parseInt(m2[1]), mo = parseInt(m2[2]);
+      // Lançamento num mês POSTERIOR ao mês de referência pertence ao ano anterior
+      // (extrato emitido em janeiro às vezes traz um lançamento de dezembro).
+      const y = mo > refMonth ? refYear - 1 : refYear;
+      return `${y}-${String(mo).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    }
+    return null;
+  }
+  const DATE_RE = config.dateFormat === 'DDMM' ? /^\d{1,2}\/\d{1,2}$/ : /^\d{1,2}\/\d{1,2}\/\d{2,4}$/;
+
+  function parseBRLValue(s) {
+    s = (s||'').trim();
+    if (!s) return null;
+    // Sinal negativo pode vir antes ("-300,50") OU depois ("300,50-"), uma
+    // convenção comum em extratos brasileiros (ex: Itaú) — ou entre parênteses.
+    const neg = /^-/.test(s) || /-$/.test(s) || /^\(.*\)$/.test(s);
+    s = s.replace(/[R$\s()]/g,'').replace(/\./g,'').replace(',','.').replace(/^-|-$/g,'');
+    const n = parseFloat(s);
+    if (isNaN(n)) return null;
+    return neg ? -n : n;
+  }
+
+  // ── 4. Varre as linhas após o cabeçalho, classificando cada palavra por
+  // coluna (posição X) e juntando linhas-continuação (sem data) na descrição
+  // do lançamento anterior — mesmo princípio dos parsers do Santander/Itaú.
+  // Linhas cuja descrição comece com "saldo" (saldo anterior, saldo final,
+  // saldo do dia etc.) são sempre ignoradas — não são lançamentos de verdade.
+  const res = [];
+  let pending = null; // { date, descParts, valueText, outflowText }
+
+  function flushPending() {
+    if (!pending) return;
+    const date = resolveDate(pending.dateText);
+    const valuePart   = parseBRLValue(pending.valueText);
+    const outflowPart = pending.outflowText ? parseBRLValue(pending.outflowText) : null;
+    let amount0 = null;
+    if (valuePart != null && outflowPart != null) amount0 = Math.abs(valuePart) - Math.abs(outflowPart);
+    else if (valuePart != null) amount0 = valuePart;
+    else if (outflowPart != null) amount0 = -Math.abs(outflowPart); // coluna de saída É sempre negativa, independente do sinal impresso
+    if (date && amount0 != null && amount0 !== 0) {
+      const desc = pending.descParts.join(' ').replace(/\s+/g,' ').trim();
+      const amount = config.invertSign ? -amount0 : amount0;
+      res.push({ date, desc, memo: desc, amount, saldo: null, category: '' });
+    }
+    pending = null;
+  }
+
+  for (let i = headerIdx + 1; i < allRows.length; i++) {
+    const row = allRows[i];
+    const rowTextN = row.map(w => norm(w.text)).join(' ');
+    if (endTextN && rowTextN.includes(endTextN)) break;
+
+    const byCol = { date: [], desc: [], value: [], outflow: [] };
+    for (const w of row) {
+      const col = colOf(w.x);
+      if (col) byCol[col].push(w.text);
+    }
+    const dateText = byCol.date.join(' ').trim();
+    const descText = byCol.desc.join(' ').trim();
+
+    if (DATE_RE.test(dateText)) {
+      if (norm(descText).startsWith('saldo')) {
+        // Linha de saldo (anterior/final/do dia) — fecha o que estava
+        // pendente, mas não é, em si, um lançamento.
+        flushPending();
+        continue;
+      }
+      flushPending();
+      pending = {
+        dateText,
+        descParts: descText ? [descText] : [],
+        valueText: byCol.value.join(' '),
+        outflowText: byCol.outflow.join(' '),
+      };
+    } else if (pending) {
+      // Linha sem data — continuação da descrição do lançamento anterior
+      if (byCol.desc.length) pending.descParts.push(byCol.desc.join(' '));
+      if (byCol.value.length && !pending.valueText) pending.valueText = byCol.value.join(' ');
+      if (byCol.outflow.length && !pending.outflowText) pending.outflowText = byCol.outflow.join(' ');
+    }
+  }
+  flushPending();
+
+  return res;
 }
 
 async function testManualWizard() {

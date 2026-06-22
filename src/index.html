@@ -414,6 +414,9 @@ select.inp option{background:var(--bg2);}
               <option value="6" selected>Últimos 6 meses</option>
               <option value="12">Últimos 12 meses</option>
               <option value="24">Últimos 24 meses</option>
+              <option value="36">Últimos 3 anos</option>
+              <option value="60">Últimos 5 anos</option>
+              <option value="9999">Todo o histórico</option>
             </select>
             <label class="lbl" style="margin-top:8px">Foco da análise</label>
             <select class="inp" id="ai-insights-focus">
@@ -792,7 +795,7 @@ select.inp option{background:var(--bg2);}
         </div>
         <div class="import-footer" style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
           <button class="btn primary" onclick="confirmBankImport()">✓ Confirmar importação</button>
-          <button class="btn" onclick="cancelBankImport()">Cancelar</button>
+          <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
           <span id="bank-preview-count" style="font-size:12px;color:var(--text3)"></span>
         </div>
       </div>

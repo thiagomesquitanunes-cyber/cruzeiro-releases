@@ -6029,7 +6029,7 @@ async function runMobileSync(trigger = 'manual') {
   try {
     const userId = sb.getUserId();
     const pull   = await syncPull.pullAll(all, run, first, save, userId);
-    const push   = await syncPush.pushAll(all, userId, getAiConfig, getSyncInvestmentsPref);
+    const push   = await syncPush.pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPath, fs);
     const result = { ok: true, trigger, pull, push, at: new Date().toISOString() };
     console.log('[sync] concluído:', result);
 
