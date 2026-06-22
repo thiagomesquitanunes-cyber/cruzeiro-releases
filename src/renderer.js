@@ -4060,7 +4060,7 @@ function renderImportEditTable(rows) {
       <button type="button" class="btn xs" title="${isRemoved ? 'Restaurar esta linha' : 'Remover esta linha da importação'}"
         onclick="toggleImportRowRemoved(${i})" style="padding:2px 6px">${isRemoved ? '↩️' : '🗑️'}</button>
     </td>`;
-    // Ativo imobilizado: opções do _pat.assets
+    // Bem/direito: opções do _pat.assets
     const assetOptions = '<option value="">—</option>' +
       (_pat?.assets||[]).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
     // Dívida pessoal: opções do _pat.debts
@@ -4069,6 +4069,7 @@ function renderImportEditTable(rows) {
 
     const patTxOptions = [
       ['aluguel','🏠 Aluguel recebido'],['dividendo','💰 Dividendo'],['jcp','💵 JCP'],
+      ['juros_mutuo','💰 Juros mútuo'],
       ['aporte','➕ Aporte'],['reducao','📉 Redução'],['compra','🟢 Compra/Entrada'],
       ['parcela_compra','🟢 Parcela de compra'],['despesa','📋 Despesa'],
       ['parcela_financiamento','🏦 Parcela financ.'],
@@ -4081,7 +4082,7 @@ function renderImportEditTable(rows) {
           <input type="checkbox" class="import-pat-toggle" data-idx="${i}"
             onchange="toggleImportPatRow(this,${i})"
             ${r._importPatAssetId ? 'checked' : ''}>
-          Ativo imob.
+          Bem/direito
         </label>
         <div class="import-pat-sub-${i}" style="display:${r._importPatAssetId?'flex':'none'};flex-direction:column;gap:2px">
           <select class="inp import-pat-asset-inp" data-idx="${i}"
@@ -4151,7 +4152,7 @@ function renderImportEditTable(rows) {
       <div class="tbl-outer" style="max-height:calc(100vh - 360px)">
         <table class="ledger">
           <thead><tr>
-            <th></th><th>Data</th><th>Descrição original</th>${multiCard ? '<th>Titular → Conta</th>' : ''}<th>Memorando</th><th>Categoria</th><th class="right">Valor</th><th>Vinculado a ativo</th><th>Dívida pessoal</th>
+            <th></th><th>Data</th><th>Descrição original</th>${multiCard ? '<th>Titular → Conta</th>' : ''}<th>Memorando</th><th>Categoria</th><th class="right">Valor</th><th>Vinculado a bem/direito</th><th>Dívida pessoal</th>
           </tr></thead>
           <tbody id="bank-preview-body">${tableRows}</tbody>
         </table>
@@ -4984,11 +4985,15 @@ async function onBrokerFileSelected(event) {
       return;
     } else if (_selectedBroker === 'itau_broker') {
       G('broker-result').innerHTML = '<div class="info-box">⏳ Lendo posição consolidada…</div>';
-      const { assets, month } = await parseItauInvestmentsPDF(_brokerBuffer);
-      parsed = { month, assets, caixaValue: null, broker: 'Itaú', unresolvedMovements: [] };
+      const { assets, month, totalLiquido } = await parseItauInvestmentsPDF(_brokerBuffer);
+      parsed = { month, assets, caixaValue: null, broker: 'Itaú', unresolvedMovements: [], totalLiquido };
     } else {
       const custom = _customBrokerParsers.find(p => p.id === _selectedBroker);
-      if (custom) parsed = parseGenericBroker(_brokerBuffer, custom.config);
+      if (custom) {
+        parsed = custom.config.fileType === 'PDF'
+          ? await parseGenericBrokerPDF(_brokerBuffer, custom.config)
+          : parseGenericBroker(_brokerBuffer, custom.config);
+      }
       else throw new Error('Corretora não reconhecida');
     }
 
@@ -5500,6 +5505,28 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
   }
   if (!month) throw new Error('Não foi possível identificar a data da posição histórica no arquivo XP.');
 
+  // Saldo em caixa (dinheiro disponível, não alocado em nenhum ativo) — vem
+  // de uma linha-resumo no TOPO da planilha ("Saldo Disponível histórico"),
+  // separada da listagem de ativos por categoria que vem depois. Acha a
+  // coluna pelo título e lê o valor da linha imediatamente abaixo.
+  let caixaValue = null;
+  for (let ri = 0; ri < Math.min(posRows.length, 10); ri++) {
+    const row = posRows[ri] || [];
+    const colIdx = row.findIndex(c => /saldo dispon[ií]vel/i.test(String(c||'')));
+    if (colIdx >= 0) {
+      const valRow = posRows[ri+1] || [];
+      const parsed = (() => {
+        const v = valRow[colIdx];
+        if (!v) return null;
+        const s = String(v).replace(/R\$\s*/,'').replace(/\./g,'').replace(',','.').trim();
+        const n = parseFloat(s);
+        return isNaN(n) ? null : n;
+      })();
+      if (parsed != null) caixaValue = parsed;
+      break;
+    }
+  }
+
   // Parse R$ values
   const parseBRL = v => {
     if (!v) return null;
@@ -5839,7 +5866,8 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
     }
   }
 
-  return { month, assets, caixaValue: null, broker: 'XP', unresolvedMovements };
+  const totalLiquido = assets.reduce((s,a) => s + (a.valor||0), 0) + (caixaValue||0);
+  return { month, assets, caixaValue, broker: 'XP', unresolvedMovements, totalLiquido };
 }
 
 // ── Motor do importador genérico de corretoras ──
@@ -6077,7 +6105,166 @@ function parseGenericBroker(buffer, config) {
     }
   }
 
-  return { month: null, assets, caixaValue: null, broker: config.brokerName || 'Importado', unresolvedMovements };
+  const totalLiquido = assets.reduce((s,a) => s + (a.valor||0), 0);
+  return { month: null, assets, caixaValue: null, broker: config.brokerName || 'Importado', unresolvedMovements, totalLiquido };
+}
+
+// Mesma proteção usada na versão XLSX/CSV: uma linha de marcador de seção de
+// verdade é só texto — se a linha já tem um valor numérico, é provavelmente
+// uma linha de ATIVO cujo nome só por coincidência contém o texto do
+// marcador (ex: um fundo chamado "XYZ Renda Fixa" batendo com o marcador
+// "Renda Fixa").
+function _gbPdfFindMarkerRow(rows, marker, startIdx) {
+  if (!marker) return null;
+  const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+  const markerN = norm(marker);
+  for (let r = startIdx||0; r < rows.length; r++) {
+    const row = rows[r];
+    const rowText = norm(row.map(w => w.text).join(' '));
+    if (!rowText.includes(markerN)) continue;
+    const hasNumber = row.some(w => /^-?[\d.,]+-?$/.test(w.text.trim()));
+    if (hasNumber) continue;
+    return r;
+  }
+  return null;
+}
+
+// ── Motor de PDF do importador genérico de corretoras ──
+// Generaliza a técnica já validada no parser do Itaú: extração posicional
+// via pdf.js (x/y de cada item), nome do ativo que pode quebrar em várias
+// linhas (detectado pelo salto vertical entre linhas, não pelo aparecimento
+// do valor), e limite dinâmico de coluna (se houver mais alguma coisa à
+// direita na própria linha de cabeçalho, ela vira o limite, evitando que a
+// coluna de valor "vaze" pra dentro de uma coluna não configurada, como
+// uma de saldo/observações). A diferença é que aqui as âncoras (marcador de
+// categoria, título da coluna de nome, título da coluna de valor) vêm da
+// configuração do usuário, não de texto fixo de um banco específico.
+async function parseGenericBrokerPDF(buffer, config) {
+  await loadPdfJsLib();
+  const pdf = await getPdfDocumentWithPassword(buffer);
+  if (!pdf) throw new Error('__IMPORT_CANCELLED__');
+
+  const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  function parseBRL(s) {
+    s = (s||'').trim();
+    if (s === '-' || s === '' || s === '—') return null;
+    const neg = /^-/.test(s) || /-$/.test(s) || /^\(.*\)$/.test(s);
+    s = s.replace(/^-|-$/g,'').replace(/[R$\s()]/g,'').replace(/\./g,'').replace(',','.');
+    const n = parseFloat(s);
+    return isNaN(n) ? null : (neg ? -n : n);
+  }
+  const GAP_THRESHOLD = 14.5;
+
+  const allRows = [];
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const viewport = page.getViewport({ scale: 1 });
+    const items = content.items
+      .filter(it => it.str.trim() !== '')
+      .map(it => ({ x: it.transform[4], y: (viewport.height - it.transform[5]) + pageNum * 2000, text: it.str.trim() }));
+    items.sort((a,b) => a.y - b.y || a.x - b.x);
+    let cur = [], curY = null;
+    for (const it of items) {
+      if (curY === null || Math.abs(it.y - curY) > 2.5) {
+        if (cur.length) allRows.push(cur);
+        cur = [it]; curY = it.y;
+      } else {
+        cur.push(it);
+      }
+    }
+    if (cur.length) allRows.push(cur);
+  }
+
+  const assets = [];
+  const catKeys = Object.keys(config.categories || {});
+
+  for (const catKey of catKeys) {
+    const catCfg = config.categories[catKey];
+    const nameAnchorN = norm(catCfg.nameAnchor);
+    const valueAnchorN = norm(catCfg.valueAnchor);
+    if (!nameAnchorN || !valueAnchorN) continue;
+
+    let scanStart = 0;
+    if (catCfg.categoryMarker) {
+      const markerRow = _gbPdfFindMarkerRow(allRows, catCfg.categoryMarker, 0);
+      if (markerRow == null) continue; // categoria não encontrada neste arquivo — pula, sem erro
+      scanStart = markerRow + 1;
+    }
+
+    let headerIdx = -1, nameX = null, valueX = null;
+    for (let i = scanStart; i < allRows.length; i++) {
+      const row = allRows[i];
+      const rowTextN = row.map(w => norm(w.text)).join(' ');
+      if (rowTextN.includes(nameAnchorN) && rowTextN.includes(valueAnchorN)) {
+        const findX = anchorN => { const w = row.find(w => norm(w.text).includes(anchorN) || anchorN.includes(norm(w.text))); return w ? w.x : null; };
+        nameX = findX(nameAnchorN); valueX = findX(valueAnchorN);
+        if (nameX != null && valueX != null) { headerIdx = i; break; }
+      }
+    }
+    if (headerIdx === -1) continue; // não achou o cabeçalho desta categoria — pula
+
+    const anchors = [['name', nameX], ['value', valueX]].sort((a,b) => a[1]-b[1]);
+    const bounds = {};
+    for (let i = 0; i < anchors.length; i++) {
+      const [nm, x] = anchors[i];
+      const prevX = i > 0 ? anchors[i-1][1] : -Infinity;
+      const nextX = i < anchors.length-1 ? anchors[i+1][1] : Infinity;
+      bounds[nm] = [i===0 ? -Infinity : (prevX+x)/2, i===anchors.length-1 ? Infinity : (x+nextX)/2];
+    }
+    const lastAnchorX = anchors[anchors.length-1][1];
+    const nextHeaderWordX = allRows[headerIdx].map(w => w.x).filter(x => x > lastAnchorX + 5).sort((a,b) => a-b)[0];
+    if (nextHeaderWordX != null) bounds[anchors[anchors.length-1][0]][1] = (lastAnchorX + nextHeaderWordX) / 2;
+    const colOf = x => { for (const nm in bounds) { if (x >= bounds[nm][0] && x < bounds[nm][1]) return nm; } return null; };
+
+    let sectionEnd = allRows.length;
+    for (const otherKey of catKeys) {
+      if (otherKey === catKey) continue;
+      const otherMarker = config.categories[otherKey].categoryMarker;
+      if (!otherMarker) continue;
+      const otherRow = _gbPdfFindMarkerRow(allRows, otherMarker, headerIdx + 1);
+      if (otherRow != null && otherRow < sectionEnd) sectionEnd = otherRow;
+    }
+    // Mesmo sem outra categoria CONFIGURADA pra usar como limite, se o mesmo
+    // padrão de cabeçalho (nome+valor) aparecer de novo mais abaixo, é quase
+    // certo que uma tabela nova começou ali — provavelmente outra categoria
+    // que nem foi configurada. Sem esse limite, a seção atual "varre demais"
+    // e engole o conteúdo de uma categoria vizinha não configurada.
+    for (let i = headerIdx + 1; i < sectionEnd; i++) {
+      const row = allRows[i];
+      const rowTextN = row.map(w => norm(w.text)).join(' ');
+      if (rowTextN.includes(nameAnchorN) && rowTextN.includes(valueAnchorN)) { sectionEnd = i; break; }
+    }
+
+    let nameBuffer = [], pendingValue = null, lastNameY = null;
+    function flushAsset() {
+      const name = nameBuffer.join(' ').replace(/\s+/g,' ').trim();
+      if (name && pendingValue != null) {
+        const { category, inv_type } = _gbClassify(catKey, name, null);
+        assets.push({ name, category, inv_type, broker: config.brokerName || 'Importado', valor: pendingValue, movimentacoes: [] });
+      }
+      nameBuffer = []; pendingValue = null;
+    }
+    for (let i = headerIdx + 1; i < sectionEnd; i++) {
+      const row = allRows[i];
+      const nameWords = row.filter(w => colOf(w.x) === 'name').map(w => w.text);
+      if (nameWords.length) {
+        if (lastNameY != null && (row[0].y - lastNameY) > GAP_THRESHOLD) flushAsset();
+        nameBuffer.push(...nameWords);
+        lastNameY = row[0].y;
+      }
+      for (const w of row) {
+        if (colOf(w.x) === 'value') {
+          const v = parseBRL(w.text);
+          if (v != null) pendingValue = v;
+        }
+      }
+    }
+    flushAsset();
+  }
+
+  const totalLiquido = assets.reduce((s,a) => s + (a.valor||0), 0);
+  return { month: null, assets, caixaValue: null, broker: config.brokerName || 'Importado', unresolvedMovements: [], totalLiquido };
 }
 
 // ── Assistente sequencial do importador genérico de corretoras ──
@@ -6137,8 +6324,8 @@ function renderBrokerWizardStep1() {
         <option value="1" ${_bw.filesSeparate?'selected':''}>…estão em arquivos separados</option>
       </select>
     </div>
-    <div id="bw-pdf-note" class="warn-box" style="display:${_bw.fileType==='PDF'?'':'none'}">
-      ⚠️ Este assistente ainda não cobre extratos em PDF — funciona pra CSV e Excel. Se for um PDF, me avise direto na conversa que eu configuro manualmente, do mesmo jeito que fizemos pro Itaú.
+    <div id="bw-pdf-note" class="info-box" style="display:${_bw.fileType==='PDF'?'':'none'}">
+      ℹ️ Pra PDF, o assistente importa a <strong>posição</strong> de cada categoria (ainda não as movimentações — só a posição mesmo, igual fizemos pro Itaú).
     </div>`;
   G('custom-parser-footer').innerHTML = `
     <button class="btn" onclick="closeModal('modal-custom-parser')">Cancelar</button>
@@ -6151,10 +6338,7 @@ window._bwToggleFiletypeNote = () => {
 function _bwStep1Next() {
   _bw.fileType = G('bw-filetype').value;
   _bw.filesSeparate = G('bw-files-separate').value === '1';
-  if (_bw.fileType === 'PDF') {
-    toast('PDF ainda não é suportado neste assistente — me avise na conversa que eu configuro manualmente.');
-    return;
-  }
+  if (_bw.fileType === 'PDF') { _bw.sheetMode = null; renderBrokerWizardStep3(); return; }
   if (_bw.fileType === 'CSV') { _bw.sheetMode = 'single'; renderBrokerWizardStep3(); return; }
   renderBrokerWizardStep2();
 }
@@ -6191,7 +6375,7 @@ function renderBrokerWizardStep3() {
         </label>`).join('')}
     </div>`;
   G('custom-parser-footer').innerHTML = `
-    <button class="btn" onclick="${_bw.fileType==='CSV'?'renderBrokerWizardStep1()':'renderBrokerWizardStep2()'}">← Voltar</button>
+    <button class="btn" onclick="${_bw.fileType==='CSV'||_bw.fileType==='PDF'?'renderBrokerWizardStep1()':'renderBrokerWizardStep2()'}">← Voltar</button>
     <button class="btn primary" onclick="_bwStep3Next()">Continuar →</button>`;
 }
 function _bwStep3Next() {
@@ -6209,6 +6393,28 @@ function renderBrokerWizardCategoryScreen() {
   const existing = _bw.categories[catKey] || {};
   const n = _bw.selectedCategories.length;
   const idx = _bw.categoryIdx + 1;
+  const isPdf = _bw.fileType === 'PDF';
+
+  if (isPdf) {
+    G('custom-parser-body').innerHTML = `
+      <div style="font-size:12px;color:var(--text3);margin-bottom:14px">Categoria ${idx} de ${n} — <strong>${esc(label)}</strong></div>
+      <div class="field">
+        <label class="lbl">Que texto marca o início desta categoria no PDF (opcional)${_bwHelpIcon('Um texto que só aparece uma vez, logo antes da lista de ativos dessa categoria — ex: "Renda Fixa", "Fundos de Investimento". Deixe em branco se o documento só tiver essa categoria, sem precisar distinguir seções.')}</label>
+        <input class="inp" id="bw-cat-location" value="${esc(existing.categoryMarker||'')}" placeholder="Ex: Renda Fixa (ou deixe em branco)">
+      </div>
+      <div class="field">
+        <label class="lbl">Texto no título da coluna do NOME do ativo${_bwHelpIcon('O texto que aparece no topo da coluna com o nome de cada ativo — ex: "Produto", "Ativo", "Nome".')}</label>
+        <input class="inp" id="bw-cat-namecol" value="${esc(existing.nameAnchor||'')}" placeholder="Ex: Produto">
+      </div>
+      <div class="field">
+        <label class="lbl">Texto no título da coluna do VALOR da posição atual${_bwHelpIcon('O texto que aparece no topo da coluna com o valor de cada ativo — ex: "Valor Líquido", "Saldo Atual".')}</label>
+        <input class="inp" id="bw-cat-valuecol" value="${esc(existing.valueAnchor||'')}" placeholder="Ex: Valor Líquido (R$)">
+      </div>`;
+    G('custom-parser-footer').innerHTML = `
+      <button class="btn" onclick="_bwCategoryBack()">← Voltar</button>
+      <button class="btn primary" onclick="_bwCategoryNext()">Continuar →</button>`;
+    return;
+  }
 
   const locationField = _bw.sheetMode === 'perCategory' ? `
     <div class="field">
@@ -6276,6 +6482,14 @@ window._bwToggleMov = () => {
 
 function _bwSaveCurrentCategoryScreen() {
   const catKey = _bw.selectedCategories[_bw.categoryIdx];
+  if (_bw.fileType === 'PDF') {
+    _bw.categories[catKey] = {
+      categoryMarker: G('bw-cat-location').value.trim() || null,
+      nameAnchor: G('bw-cat-namecol').value.trim(),
+      valueAnchor: G('bw-cat-valuecol').value.trim(),
+    };
+    return;
+  }
   const cfg = {
     nameCol: G('bw-cat-namecol').value.trim(),
     valueCol: G('bw-cat-valuecol').value.trim(),
@@ -6297,8 +6511,9 @@ function _bwSaveCurrentCategoryScreen() {
   _bw.categories[catKey] = cfg;
 }
 function _bwCategoryNext() {
-  if (!G('bw-cat-namecol').value.trim() || !G('bw-cat-valuecol').value.trim() || !G('bw-cat-location').value.trim()) {
-    toast('Preencha os campos obrigatórios desta categoria (localização, nome e valor)');
+  const locationRequired = _bw.fileType !== 'PDF'; // pra PDF, o marcador de categoria é opcional
+  if (!G('bw-cat-namecol').value.trim() || !G('bw-cat-valuecol').value.trim() || (locationRequired && !G('bw-cat-location').value.trim())) {
+    toast('Preencha os campos obrigatórios desta categoria (nome e valor' + (locationRequired ? ', localização' : '') + ')');
     return;
   }
   _bwSaveCurrentCategoryScreen();
@@ -6334,7 +6549,7 @@ function renderBrokerWizardFinal() {
       <button class="btn" onclick="document.getElementById('bw-test-file-input').click()">📂 Selecionar arquivo pra testar</button>
       <span id="bw-test-file-name" style="font-size:12px;color:var(--text3)"></span>
     </div>
-    <input type="file" id="bw-test-file-input" style="display:none" accept=".csv,.CSV,.xls,.xlsx,.XLS,.XLSX" onchange="_bwTestFile(event)">
+    <input type="file" id="bw-test-file-input" style="display:none" accept=".csv,.CSV,.xls,.xlsx,.XLS,.XLSX,.pdf,.PDF" onchange="_bwTestFile(event)">
     <div id="bw-test-result"></div>`;
   G('custom-parser-footer').innerHTML = `
     <button class="btn" onclick="_bwBackFromFinal()">← Voltar</button>
@@ -6355,7 +6570,7 @@ async function _bwTestFile(event) {
   G('bw-test-file-name').textContent = file.name;
   const result = G('bw-test-result');
   result.innerHTML = '<div class="info-box">⏳ Lendo arquivo…</div>';
-  if (typeof XLSX === 'undefined') {
+  if (_bw.fileType !== 'PDF' && typeof XLSX === 'undefined') {
     await new Promise((res, rej) => {
       const s = document.createElement('script');
       s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
@@ -6366,7 +6581,7 @@ async function _bwTestFile(event) {
   try {
     const config = { fileType: _bw.fileType, filesSeparate: _bw.filesSeparate, sheetMode: _bw.sheetMode,
       categories: _bw.categories, brokerName: (G('bw-broker-name').value||'').trim() };
-    const parsed = parseGenericBroker(buffer, config);
+    const parsed = _bw.fileType === 'PDF' ? await parseGenericBrokerPDF(buffer, config) : parseGenericBroker(buffer, config);
     _bw._lastTestConfig = config;
     if (!parsed.assets.length) {
       result.innerHTML = '<div class="warn-box">⚠️ Nenhum ativo encontrado. Confira se os títulos de coluna/abas/marcadores estão exatamente como aparecem no arquivo.</div>';
@@ -6940,6 +7155,10 @@ async function confirmBrokerImport() {
     if (a._editedCategory) a.category = a._editedCategory;
     if (a._editedType)     a.inv_type  = a._editedType;
   });
+  // Recalcula o total líquido a partir dos valores FINAIS (depois de edições
+  // e remoções) — senão o ajuste de saldo na conta vinculada ficaria
+  // desatualizado em relação ao que o usuário de fato editou na tela.
+  parsed.totalLiquido = parsed.assets.reduce((s,a) => s + (a.valor||0), 0) + (parsed.caixaValue||0);
 
   const btn = preview.querySelector('.btn.primary');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Importando…'; }
@@ -6982,11 +7201,11 @@ async function confirmBrokerImport() {
       ✅ <strong>Importação concluída — ${parsed.broker} · ${fmtMonth(parsed.month)}</strong><br>
       • ${result.createdAssets} ativo(s) criado(s)<br>
       • ${result.updatedAssets} ativo(s) atualizado(s)<br>
-      • ${result.txInserted} transação(ões) registrada(s)${adjMsg}
+      • ${result.txInserted} transação(ões) registrada(s)${result.skippedDuplicates ? ` · ⏭ ${result.skippedDuplicates} já existente(s), não duplicada(s)` : ''}${adjMsg}
     </div>`;
     cancelBrokerImport();
     if (currentPage === 'patrimonio') await refreshPatrimonio();
-    toast(`✅ ${result.txInserted} registros importados`);
+    toast(`✅ ${result.txInserted} registros importados${result.skippedDuplicates ? ` (${result.skippedDuplicates} já existentes, ignoradas)` : ''}`);
     // Learn ML mappings from this broker import
     try {
       const mlItems = parsed.assets
@@ -7691,7 +7910,8 @@ async function parseItauInvestmentsPDF(buffer) {
   }
   finalizeAsset();
 
-  return { assets, categoryTargets, broker: 'Itaú', month: issuedMonth };
+  const totalLiquido = assets.reduce((s,a) => s + (a.valor||0), 0);
+  return { assets, categoryTargets, broker: 'Itaú', month: issuedMonth, totalLiquido };
 }
 
 // ── Santander credit card invoice (Fatura) PDF parser ──
@@ -8958,7 +9178,7 @@ async function saveRecurring(){
   if (amount===0){ toast('Informe o valor (despesa ou receita)'); return; }
   if (!next_date){ toast('Informe a data inicial'); return; }
   if (isTransfer && (!transfer_to_account_id || transfer_to_account_id === account_id)) { toast('Selecione uma conta destino diferente da origem'); return; }
-  if (G('rec-pat-toggle')?.checked && !pat_asset_id) { toast('Selecione o ativo imobilizado'); return; }
+  if (G('rec-pat-toggle')?.checked && !pat_asset_id) { toast('Selecione o bem/direito'); return; }
   if (G('rec-debt-toggle')?.checked && !pat_debt_id) { toast('Selecione a dívida pessoal'); return; }
   closeModal('modal-recurring');
   if (editingId) {
@@ -9608,7 +9828,7 @@ const STRINGS = {
   lbl_duplicates:       { pt: 'Duplicatas detectadas',    en: 'Duplicates detected' },
 
   // ── Net Worth ──
-  lbl_fixed_assets:     { pt: 'Patrimônio imobilizado',   en: 'Fixed assets' },
+  lbl_fixed_assets:     { pt: 'Bens e Direitos',   en: 'Assets & Rights' },
   lbl_investments:      { pt: 'Investimentos financeiros', en: 'Financial investments' },
   lbl_debt:             { pt: 'Saldo devedor',            en: 'Outstanding balance' },
   lbl_financing:        { pt: 'Financiamento',            en: 'Financing' },
@@ -10098,17 +10318,17 @@ const TOUR_STEPS = [
     subtitle: 'Tudo que você tem em um único lugar',
     body: `A aba <strong>Patrimônio</strong> consolida em uma linha do tempo mensal:<br><br>
       • <strong>Contas bancárias</strong> — saldos de todas as contas<br>
-      • <strong>Bens imobilizados</strong> — imóveis, veículos, participações societárias<br>
+      • <strong>Bens e Direitos</strong> — imóveis, veículos, participações societárias<br>
       • <strong>Investimentos financeiros</strong> — renda fixa, fundos, ações, previdência<br><br>
       Role para a direita para ver o histórico mês a mês. O card <strong>"Total Patrimônio"</strong> no topo sempre mostra o mês atual.`,
     target: '[data-page="patrimonio"]', page: 'patrimonio', position: 'right',
   },
-  // ── 19. Bens imobilizados ─────────────────────────────────────────────────
+  // ── 19. Bens e Direitos ─────────────────────────────────────────
   {
     icon: '🏠',
-    title: 'Bens imobilizados',
+    title: 'Bens e Direitos',
     subtitle: 'Imóveis, veículos e participações societárias',
-    body: `Clique em <strong>+ Ativo</strong> para cadastrar um bem físico.<br><br>
+    body: `Clique em <strong>+ Novo</strong> para cadastrar um bem ou direito.<br><br>
       • Vincule lançamentos bancários ao bem (aluguéis, parcelas, dividendos…) — eles são contabilizados na TIR do ativo<br>
       • Para bens financiados: gere o <strong>cronograma de amortização</strong> (SAC, PRICE, SAM ou Planta), escolha o <strong>índice de correção</strong> (IPCA, IGP-M, INCC ou TR) e registre as parcelas previstas — o saldo devedor diminui automaticamente quando você registra parcelas pagas<br>
       • Cadastre o <strong>valor de venda</strong> para encerrar o ativo e calcular o ganho de capital`,
@@ -12087,12 +12307,32 @@ async function refreshSyncStatus() {
     if (badge)     { badge.textContent = '🟢 Conectado'; badge.style.color = 'var(--green)'; }
     if (runBtn)    runBtn.style.display = '';
     if (emailEl)   emailEl.textContent = status.email || '';
+
+    // Carrega estado atual do toggle de sincronização de investimentos
+    const investToggle = G('sync-investments-toggle');
+    if (investToggle && ff.syncGetInvestmentsPref) {
+      const enabled = await ff.syncGetInvestmentsPref().catch(() => false);
+      investToggle.checked = !!enabled;
+    }
   } else {
     if (loggedIn)  loggedIn.style.display  = 'none';
     if (loggedOut) loggedOut.style.display = '';
     if (badge)     { badge.textContent = '⚪ Desconectado'; badge.style.color = 'var(--text3)'; }
     if (runBtn)    runBtn.style.display = 'none';
   }
+}
+
+async function syncToggleInvestments(enabled) {
+  if (!ff.syncSetInvestmentsPref) return;
+  const result = await ff.syncSetInvestmentsPref(enabled).catch(e => ({ ok: false, error: e.message }));
+  if (!result?.ok) {
+    toast('❌ Erro ao salvar preferência: ' + (result?.error || 'desconhecido'));
+    return;
+  }
+  toast(enabled
+    ? '✅ Investimentos serão sincronizados com o mobile a partir de agora'
+    : '✅ Investimentos não serão mais sincronizados — dados já enviados foram removidos');
+  syncRunNow();
 }
 
 async function syncDoLogin() {
@@ -13458,7 +13698,7 @@ function refreshPatrimonioChart() {
   _pat.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
   const months = [...monthSet].sort();
 
-  // ── Asset value by month (imobilizado) ──
+  // ── Asset value by month (bens e direitos) ──
   const histMap = {};
   _pat.historyAll.forEach(h => {
     if (!histMap[h.asset_id]) histMap[h.asset_id] = {};
@@ -13472,8 +13712,8 @@ function refreshPatrimonioChart() {
   });
 
   // Net out outstanding financing debt (saldo devedor) from each asset's value,
-  // matching the "Total Imobilizado" row in the table — otherwise the chart
-  // overstates imobilizado for financed assets.
+  // matching the "Total Bens e Direitos" row in the table — otherwise the chart
+  // overstates bens e direitos for financed assets.
   _pat.assets.forEach(a => {
     if (!a.financed || !_pat.financing[a.id]?.length) return;
     const allFins = _pat.financing[a.id].slice().sort((x,y) => x.month.localeCompare(y.month));
@@ -13522,7 +13762,7 @@ function refreshPatrimonioChart() {
     };
   }
 
-  // ── 1. Total patrimônio — only start when imobilizado OR investimentos have data ──
+  // ── 1. Total patrimônio — only start when bens e direitos OR investimentos have data ──
   const firstRealM = months.find(m => (imobByMonth[m]||0) > 0 || (invByMonth[m]||0) > 0);
   const totalRaw = months.map(m => {
     if (!firstRealM || m < firstRealM) return null;
@@ -13543,11 +13783,11 @@ function refreshPatrimonioChart() {
   }];
   _patCharts.total = patMakeChart('pat-chart-total', totalDs, trimTotal.months, 'BRL');
 
-  // ── 2. Patrimônio imobilizado — only months with data ──
+  // ── 2. Bens e Direitos — only months with data ──
   const imobRaw = months.map(m => imobByMonth[m] > 0 ? imobByMonth[m] : null);
   const trimImob = trimLeading(months, imobRaw);
   const imobDs = [{
-    label: 'Imobilizado',
+    label: 'Bens e Direitos',
     data: trimImob.series[0],
     borderColor: '#f59e0b',
     backgroundColor: 'rgba(245,158,11,.08)',
@@ -14147,7 +14387,7 @@ let _pat = {
   debts: [],            // personal_debts
   debtInstallments: {}, // {debtId: [{month, installment, balance_end, ...}]}
   currentMonth: '',
-  showAssetFlow: false,   // Fluxo nominal/real dos ativos imobilizados — colapsado por padrão
+  showAssetFlow: false,   // Fluxo nominal/real dos bens e direitos — colapsado por padrão
   showDebtInstallments: false, // Linha de parcelas das dívidas pessoais — colapsada por padrão
 };
 
@@ -14162,13 +14402,14 @@ const PAT_TX_CASH = {
   aluguel:                { label: '🏠 Aluguel recebido',          sign: +1 },
   dividendo:              { label: '💰 Dividendo',                 sign: +1 },
   jcp:                    { label: '💵 JCP',                       sign: +1 },
+  juros_mutuo:            { label: '💰 Juros de mútuo',            sign: +1 },
   venda:                  { label: '🔴 Venda',                     sign: +1 },
   venda_parcela:          { label: '🔴 Parcela de venda',          sign: +1 },
 };
 
 const PAT_ASSET_TYPES = {
   imovel:'🏠 Imóvel', veiculo:'🚗 Veículo', barco:'⛵ Barco',
-  clube:'🏌️ Clube', societario:'🏢 Societário', outro:'📦 Outro',
+  clube:'🏌️ Clube', societario:'🏢 Societário', mutuo:'💰 Mútuo', outro:'📦 Outro',
 };
 const PAT_TRENDS = {
   minus2x:'📉📉 −2× IPCA', minus1x:'📉 −1× IPCA', stable:'➡️ Estável',
@@ -14319,7 +14560,7 @@ function refreshPatrimonioTable() {
   // (placeholder — will be overwritten after full calculation)
   const grandTotal_placeholder = totalAssets + totalAccounts;
   G('pat-cards').innerHTML = `
-    <div class="stat-card"><div class="stat-lbl">🏠 Imobilizado</div><div class="stat-val green">${fmtBRL(totalAssets)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
+    <div class="stat-card"><div class="stat-lbl">🏠 Bens e Direitos</div><div class="stat-val green">${fmtBRL(totalAssets)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card"><div class="stat-lbl">🏦 Contas</div><div class="stat-val green">${fmtBRL(totalAccounts)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card" id="pat-card-inv"><div class="stat-lbl">📈 Investimentos</div><div class="stat-val green">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card" id="pat-card-debt"><div class="stat-lbl">💳 Dívidas Pessoais</div><div class="stat-val red">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
@@ -14347,7 +14588,7 @@ function refreshPatrimonioTable() {
     <td style="${STICKY};right:0;min-width:60px;background:var(--bg4)"></td>
   </tr>`;
 
-  // ── Imobilizado ──
+  // ── Bens e Direitos ──
   let visibleAssets = _pat.assets.filter(a => showHidden || !a.hidden);
   const filterAssetType = G('patf-asset-type')?.value || '';
   if (filterAssetType) visibleAssets = visibleAssets.filter(a => a.asset_type === filterAssetType);
@@ -14783,7 +15024,7 @@ function refreshPatrimonioTable() {
     return '<td class="' + cls + ' right" style="font-size:12px;font-family:DM Mono,monospace;padding:6px 10px' + cellBg3 + '">' + fmtBRL(v) + '</td>';
   }).join('');
   const assetTotalRow = `<tr style="font-weight:700;background:var(--bg4);border-top:2px solid var(--border2);border-bottom:2px solid var(--border2)">
-    <td style="${STICKY4};left:0;min-width:400px;font-size:12px;padding:8px 12px" colspan="4">Total Imobilizado</td>
+    <td style="${STICKY4};left:0;min-width:400px;font-size:12px;padding:8px 12px" colspan="4">Total Bens e Direitos</td>
     ${assetTotalRowCells}
     <td style="${STICKY4};right:0;min-width:60px"></td>
   </tr>`;
@@ -15000,7 +15241,7 @@ function refreshPatrimonioTable() {
       <!-- 1. IMOBILIZADO -->
       <tbody>
         <tr style="background:var(--bg3)">
-          <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">🏠 Patrimônio Imobilizado ${assetFlowToggle}</td>
+          <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">🏠 Bens e Direitos ${assetFlowToggle}</td>
           ${months.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
           <td style="${STICKY3};right:0;min-width:60px;text-align:right">
             <button class="btn xs primary" onclick="openPatAssetModal()" style="font-size:10px">+ Novo</button>
@@ -15529,6 +15770,24 @@ async function openPatAssetModal(id) {
         .map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
   }
   populateCategorySelect('fc-sync-category', 'Financiamento');
+  // Reset/popula os campos do Mútuo
+  if (G('pat-mutuo-month-m')) G('pat-mutuo-month-m').value = curMo;
+  if (G('pat-mutuo-month-y')) G('pat-mutuo-month-y').value = curY;
+  if (G('pat-mutuo-value')) { setupCurrencyInput(G('pat-mutuo-value')); G('pat-mutuo-value').setValue(null); }
+  if (G('pat-mutuo-juros')) G('pat-mutuo-juros').value = '';
+  if (G('pat-mutuo-base')) G('pat-mutuo-base').value = 'mensal';
+  if (G('pat-mutuo-juros-tipo')) G('pat-mutuo-juros-tipo').value = 'simples';
+  if (G('pat-mutuo-mes-incidencia')) G('pat-mutuo-mes-incidencia').value = String(curMo);
+  if (G('pat-mutuo-indefinida')) G('pat-mutuo-indefinida').checked = true;
+  if (G('pat-mutuo-termino')) G('pat-mutuo-termino').value = '';
+  if (G('pat-mutuo-sync-account')) {
+    G('pat-mutuo-sync-account').innerHTML = '<option value="">— Não sincronizar —</option>' +
+      (accounts||[]).filter(a => !a.hidden && (a.type==='bank'||a.type==='cash'))
+        .map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  }
+  patMutuoBaseChanged();
+  patMutuoIndefinidaChanged();
+  patMutuoJurosTipoChanged();
   if (G('fin-contract-label')) G('fin-contract-label').value = '';
   if (G('pat-fin-contract-selector')) G('pat-fin-contract-selector').style.display = 'none';
   if (G('pat-fin-closed-notice')) G('pat-fin-closed-notice').style.display = 'none';
@@ -15536,7 +15795,7 @@ async function openPatAssetModal(id) {
   _finCurrentContractId = null;
   patToggleFinancingSection();
   patUpdateSaleSection();
-  G('pat-asset-modal-title').textContent = id ? 'Editar ativo' : 'Novo ativo imobilizado';
+  G('pat-asset-modal-title').textContent = id ? 'Editar ativo' : 'Novo bem ou direito';
 
   if (id) {
     const a = _pat.assets.find(a => a.id === id);
@@ -15577,6 +15836,23 @@ async function openPatAssetModal(id) {
         G('pat-asset-month-y').value = fy;
         G('pat-asset-month-m').value = fm;
         G('pat-asset-value').setValue(first.value);
+        if (a.asset_type === 'mutuo') {
+          if (G('pat-mutuo-month-y')) G('pat-mutuo-month-y').value = fy;
+          if (G('pat-mutuo-month-m')) G('pat-mutuo-month-m').value = fm;
+          if (G('pat-mutuo-value'))   G('pat-mutuo-value').setValue(first.value);
+        }
+      }
+      if (a.asset_type === 'mutuo') {
+        if (G('pat-mutuo-juros')) G('pat-mutuo-juros').value = a.mutuo_taxa_juros ?? '';
+        if (G('pat-mutuo-base'))  G('pat-mutuo-base').value  = a.mutuo_indexador_base || 'mensal';
+        patMutuoBaseChanged();
+        if (G('pat-mutuo-mes-incidencia') && a.mutuo_mes_incidencia) G('pat-mutuo-mes-incidencia').value = String(a.mutuo_mes_incidencia);
+        if (G('pat-mutuo-indefinida')) G('pat-mutuo-indefinida').checked = !a.mutuo_data_termino;
+        if (G('pat-mutuo-termino')) G('pat-mutuo-termino').value = a.mutuo_data_termino || '';
+        patMutuoIndefinidaChanged();
+        if (G('pat-mutuo-sync-account')) G('pat-mutuo-sync-account').value = a.mutuo_sync_account_id || '';
+        if (G('pat-mutuo-juros-tipo')) G('pat-mutuo-juros-tipo').value = a.mutuo_juros_tipo || 'simples';
+        patMutuoJurosTipoChanged();
       }
     }
   }
@@ -15635,6 +15911,53 @@ async function openPatAssetModal(id) {
 function patAssetTypeChanged() {
   const f = G('pat-asset-ownership-field');
   if (f) f.style.display = G('pat-asset-type')?.value === 'societario' ? '' : 'none';
+
+  // Mútuo é estruturalmente diferente de um bem físico — não tem "forma de
+  // aquisição"/financiamento/tendência de preço (IPCA), tem juros e
+  // indexador próprios. Por isso esconde tudo isso e mostra a seção dedicada.
+  const isMutuo = G('pat-asset-type')?.value === 'mutuo';
+  const mutuoSection = G('pat-section-mutuo');
+  if (mutuoSection) mutuoSection.style.display = isMutuo ? '' : 'none';
+  const trendRow = G('pat-trend-acquisition-row');
+  if (trendRow) trendRow.style.display = isMutuo ? 'none' : '';
+  const contractSelector = G('pat-fin-contract-selector');
+  if (isMutuo) {
+    ['pat-section-vista','pat-section-parcelado-vendedor','pat-section-construtora','pat-section-bancario'].forEach(s => {
+      const el = G(s); if (el) el.style.display = 'none';
+    });
+    if (contractSelector) contractSelector.style.display = 'none';
+  } else if (G('pat-acquisition-type')) {
+    patAcquisitionTypeChanged(); // restaura a seção certa conforme a forma de aquisição atual
+  }
+}
+
+// Mostra o "mês de incidência" só quando o indexador incide anualmente —
+// não faz sentido perguntar isso pra incidência mensal (incide todo mês).
+function patMutuoBaseChanged() {
+  const f = G('pat-mutuo-mes-incidencia-field');
+  if (f) f.style.display = G('pat-mutuo-base')?.value === 'anual' ? '' : 'none';
+}
+
+// Esconde a data de término quando o mútuo é por prazo indefinido.
+function patMutuoIndefinidaChanged() {
+  const f = G('pat-mutuo-termino-field');
+  if (f) f.style.display = G('pat-mutuo-indefinida')?.checked ? 'none' : '';
+}
+
+// Simples: lança juros periodicamente na conta vinculada (mostra o campo).
+// Compostos: só atualiza a posição do mútuo mês a mês — não lança nada na
+// conta periodicamente (o recebimento final é registrado manualmente, igual
+// a vender/encerrar qualquer outro bem) — por isso esconde o campo.
+function patMutuoJurosTipoChanged() {
+  const isCompostos = G('pat-mutuo-juros-tipo')?.value === 'compostos';
+  const f = G('pat-mutuo-sync-account-field');
+  if (f) f.style.display = isCompostos ? 'none' : '';
+  const info = G('pat-mutuo-info-box');
+  if (info) {
+    info.textContent = isCompostos
+      ? 'Os juros se acumulam ao valor do mútuo mês a mês (ou ano a ano, conforme o indexador) — a posição é atualizada automaticamente, mas nenhum valor é lançado na conta bancária até o mútuo ser encerrado. Quando isso acontecer, registre o recebimento manualmente (igual ao vender/encerrar qualquer outro bem).'
+      : 'Os juros futuros previstos são lançados automaticamente como entrada na conta vinculada (não conferidos), mês a mês até a data de término (ou continuamente, se indefinido).';
+  }
 }
 
 async function savePatAsset() {
@@ -15658,6 +15981,22 @@ async function savePatAsset() {
   const soldMonth = (soldM >= 1 && soldM <= 12 && soldY >= 2000) ? `${soldY}-${String(soldM).padStart(2,'0')}` : null;
   const soldValueEl = G('pat-asset-sold-value'); const soldValue = soldValueEl?.rawValue ? (soldValueEl.rawValue()||null) : (parseFloat(soldValueEl?.value)||null);
   const ownershipPct = (type === 'societario') ? (parseFloat(G('pat-asset-ownership-pct')?.value) || null) : null;
+  const isMutuoSave = type === 'mutuo';
+  const mutuoJuros = isMutuoSave ? (parseFloat(G('pat-mutuo-juros')?.value) || 0) : null;
+  const mutuoBase  = isMutuoSave ? (G('pat-mutuo-base')?.value || 'mensal') : null;
+  const mutuoMesIncidencia = (isMutuoSave && mutuoBase === 'anual') ? (parseInt(G('pat-mutuo-mes-incidencia')?.value) || null) : null;
+  const mutuoIndefinida = G('pat-mutuo-indefinida')?.checked ?? true;
+  const mutuoTermino = (isMutuoSave && !mutuoIndefinida) ? (G('pat-mutuo-termino')?.value || null) : null;
+  const mutuoSyncAccountId = isMutuoSave ? (parseInt(G('pat-mutuo-sync-account')?.value) || null) : null;
+  const mutuoJurosTipo = isMutuoSave ? (G('pat-mutuo-juros-tipo')?.value || 'simples') : null;
+  // Mês/valor do mútuo vêm de campos próprios (não dos campos de "à vista",
+  // que ficam escondidos pra este tipo) — mesma lógica de histórico/compra,
+  // só que com os valores certos.
+  const mutuoMo = isMutuoSave ? parseInt(G('pat-mutuo-month-m')?.value) : null;
+  const mutuoYr = isMutuoSave ? parseInt(G('pat-mutuo-month-y')?.value) : null;
+  const mutuoMonth = (mutuoMo >= 1 && mutuoMo <= 12 && mutuoYr >= 2000) ? `${mutuoYr}-${String(mutuoMo).padStart(2,'0')}` : null;
+  const mutuoValEl = G('pat-mutuo-value');
+  const mutuoVal = isMutuoSave ? (mutuoValEl?.rawValue ? mutuoValEl.rawValue() : parseFloat((mutuoValEl?.value||'').replace(',','.'))) : null;
 
   if (!name) { toast('Informe o nome do ativo'); return; }
 
@@ -15665,7 +16004,8 @@ async function savePatAsset() {
   closeModal('modal-pat-asset');
 
   // 1. Save asset record
-  const result = await ff.patAssetSave({ id, name, asset_type: type, trend, sold_month: soldMonth, sold_value: soldValue, hidden, financed, financing_total, ownership_pct: ownershipPct });
+  const result = await ff.patAssetSave({ id, name, asset_type: type, trend, sold_month: soldMonth, sold_value: soldValue, hidden, financed, financing_total, ownership_pct: ownershipPct,
+    mutuo_taxa_juros: mutuoJuros, mutuo_indexador_base: mutuoBase, mutuo_mes_incidencia: mutuoMesIncidencia, mutuo_data_termino: mutuoTermino, mutuo_sync_account_id: mutuoSyncAccountId, mutuo_juros_tipo: mutuoJurosTipo });
   const assetId = result.id;
 
   // 2a. Save financing installments; set asset value = financing_total at first installment month
@@ -15821,7 +16161,7 @@ async function savePatAsset() {
       }
     }
   }
-  if (!financed && acqType !== 'parcelado_vendedor' && !isNaN(val) && val > 0 && month) {
+  if (!financed && acqType !== 'parcelado_vendedor' && !isNaN(val) && val > 0 && month && !isMutuoSave) {
     await ff.patHistorySet({ assetId, month, value: val, manual: true });
     const existingCompra = _pat.txAll.find(t => t.asset_id === assetId && t.tx_type === 'compra');
     // Only auto-create/update if there's no manually-edited "compra" row already
@@ -15835,6 +16175,23 @@ async function savePatAsset() {
         notes: existingCompra?.notes || 'Valor de compra do ativo',
       });
     }
+  }
+  if (isMutuoSave && !isNaN(mutuoVal) && mutuoVal > 0 && mutuoMonth) {
+    await ff.patHistorySet({ assetId, month: mutuoMonth, value: mutuoVal, manual: true });
+    const existingCompra = _pat.txAll.find(t => t.asset_id === assetId && t.tx_type === 'compra');
+    const hasManualCompraRow = _patTxRows.some(r => r.tx_type === 'compra' && r.month === mutuoMonth);
+    if (!hasManualCompraRow) {
+      await ff.patTxSave({
+        id: existingCompra?.id || null,
+        assetId, month: mutuoMonth,
+        tx_type: 'compra', total_value: mutuoVal,
+        notes: existingCompra?.notes || 'Valor do mútuo concedido',
+      });
+    }
+    // O backend já tenta sincronizar dentro de patAssetSave, mas naquele
+    // momento o histórico (linha acima) ainda não existia pra um mútuo
+    // recém-criado — chama de novo agora que o principal já está salvo.
+    await ff.patMutuoSync({ assetId }).catch(() => {});
   }
 
   // 3a. Save pat_transactions rows + manual hist_value overrides

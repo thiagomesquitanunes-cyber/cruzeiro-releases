@@ -310,60 +310,55 @@ async function pushPatrimonio(all, userId, syncInvestments) {
 // 7. Evolução mensal (últimos 6 meses)
 // ─────────────────────────────────────────────────────────────
 async function pushEvolution(all, userId, getDbPath, fs) {
+  // Janela: últimos 6 meses SEM teto de data — o desktop não limita datas
+  // futuras (lançamentos confirmados com data à frente aparecem normalmente).
   const from = monthsAgo(6) + '-01';
 
-  // Lê a MESMA configuração de filtro que a tela de Evolução do desktop usa
-  // (overview-config:get) — sem isso, o sync usava "todas as categorias",
-  // divergindo da tela real sempre que o usuário tinha excluído categorias
-  // (ex: nomes de contas/corretoras usados como categoria em investimentos).
+  // Lê a configuração real de filtros do usuário (mesmo arquivo que
+  // a tela de Evolução do desktop usa via overview-config:get).
   let excludedCats = [];
-  try {
-    const cfgPath = getDbPath().replace('.db', '_overview_config.json');
-    if (fs.existsSync(cfgPath)) {
-      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-      excludedCats = cfg?.excludedCats || [];
+  if (typeof getDbPath === 'function' && fs && typeof fs.existsSync === 'function') {
+    try {
+      const cfgPath = getDbPath().replace('.db', '_overview_config.json');
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        excludedCats = cfg?.excludedCats || [];
+      }
+    } catch (e) {
+      console.error('[sync:push:evolution] erro ao ler overview_config:', e.message);
     }
-  } catch (e) {
-    console.error('[sync:push] erro ao ler overview_config.json:', e.message);
   }
 
-  // Filtro-base OBRIGATÓRIO — idêntico ao "WHERE" de evolucao:monthly-summary
-  // no main.js: exige categoria preenchida e exclui transferências.
-  // IMPORTANTE: sem limite superior de data — o desktop não tem teto
-  // (mostra inclusive lançamentos futuros já confirmados, como parcelas).
-  let where = `date>=? AND transfer_id IS NULL
-    AND (category IS NOT NULL AND category != '')
-    AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias')`;
-  const baseParams = [from];
+  const excPlaceholders = excludedCats.length
+    ? ` AND category NOT IN (${excludedCats.map(() => '?').join(',')})`
+    : '';
 
-  const params1 = [...baseParams];
-  if (excludedCats.length) {
-    where += ` AND category NOT IN (${excludedCats.map(() => '?').join(',')})`;
-    params1.push(...excludedCats);
-  }
+  const baseWhere = `
+    date >= ?
+    AND transfer_id IS NULL
+    AND category IS NOT NULL AND category != ''
+    AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias')
+    ${excPlaceholders}
+  `;
+  const baseParams = [from, ...excludedCats];
 
   const monthly = all(`
     SELECT substr(date,1,7) as month,
-      SUM(CASE WHEN amount>0 THEN amount ELSE 0 END)        as income,
-      SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END)   as expenses
+      SUM(CASE WHEN amount>0 THEN amount ELSE 0 END)      as income,
+      SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expenses
     FROM transactions
-    WHERE ${where}
+    WHERE ${baseWhere}
     GROUP BY month ORDER BY month
-  `, params1);
-
-  const params2 = [...baseParams];
-  let whereCat = where;
-  if (excludedCats.length) params2.push(...excludedCats);
+  `, baseParams);
 
   const byCategory = all(`
     SELECT substr(date,1,7) as month, category,
       SUM(ABS(amount)) as total
     FROM transactions
-    WHERE ${whereCat} AND amount<0
+    WHERE ${baseWhere} AND amount < 0
     GROUP BY month, category
-  `, params2);
+  `, baseParams);
 
-  // Agrupa by_category por mês
   const catByMonth = {};
   byCategory.forEach(r => {
     if (!catByMonth[r.month]) catByMonth[r.month] = {};
@@ -380,12 +375,16 @@ async function pushEvolution(all, userId, getDbPath, fs) {
     synced_at:   new Date().toISOString(),
   }));
 
-  await sb.upsert('mobile_evolution', rows, 'user_id,month');
-  // Remove meses fora da janela atual de 6 meses, ou que zeraram
-  // por exclusão de todas as transações daquele mês no desktop.
-  await sb.pruneNotIn('mobile_evolution', userId, 'month', rows.map(r => r.month))
-    .catch(() => {});
+  // Apaga TUDO e reinsere do zero — garante que dados de versões
+  // anteriores (com filtros incorretos) não sobrevivam no Supabase.
+  await sb.remove('mobile_evolution', { user_id: userId });
+  if (rows.length) {
+    await sb.upsert('mobile_evolution', rows, 'user_id,month');
+  }
+
+  console.log(`[sync:push:evolution] ${rows.length} meses sincronizados (${from} em diante)`);
 }
+
 
 // ─────────────────────────────────────────────────────────────
 // 8. Regras de ML
@@ -439,6 +438,10 @@ async function pushAiConfig(getAiConfig, userId) {
 // ENTRY POINT — executa todos os pushes em sequência
 // Falhas individuais são logadas mas não interrompem o processo
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// ENTRY POINT — executa todos os pushes em sequência
+// Falhas individuais são logadas mas não interrompem o processo
+// ─────────────────────────────────────────────────────────────
 async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPath, fs) {
   const syncInvestments = typeof getSyncInvestmentsPref === 'function' ? getSyncInvestmentsPref() : false;
 
@@ -453,7 +456,6 @@ async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPa
     ['ml_rules',     () => pushMlRules(all, userId)],
   ];
 
-  // ai_config só entra se a função foi passada (compatibilidade com chamadas antigas)
   if (typeof getAiConfig === 'function') {
     steps.push(['ai_config', () => pushAiConfig(getAiConfig, userId)]);
   }

@@ -83,6 +83,7 @@ const api = {
   // Patrimônio
   patAssetsList:       ()    => ipcRenderer.invoke('pat:assets-list'),
   patAssetSave:        (d)   => ipcRenderer.invoke('pat:asset-save', d),
+  patMutuoSync:        (d)   => ipcRenderer.invoke('pat:mutuo-sync', d),
   patAssetDelete:      (d)   => ipcRenderer.invoke('pat:asset-delete', d),
   patFinancingGet:     (d)   => ipcRenderer.invoke('pat:financing-get', d),
   patFinancingSave:    (d)   => ipcRenderer.invoke('pat:financing-save', d),

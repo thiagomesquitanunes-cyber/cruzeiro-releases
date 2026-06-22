@@ -1261,7 +1261,7 @@ select.inp option{background:var(--bg2);}
     <div id="pat-filters-panel" style="display:none;margin-bottom:14px;padding:12px 16px;background:var(--bg3);border:1px solid var(--border);border-radius:8px">
       <div style="display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start">
         <div style="min-width:200px">
-          <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:8px">🏠 ATIVOS IMOBILIZADOS</div>
+          <div style="font-size:11px;font-weight:700;color:var(--text3);margin-bottom:8px">🏠 BENS E DIREITOS</div>
           <div class="field" style="margin:0 0 8px">
             <label class="lbl">Tipo</label>
             <select class="inp sm" id="patf-asset-type" onchange="patFiltersChanged()">
@@ -1376,10 +1376,10 @@ select.inp option{background:var(--bg2);}
         </div>
         <div style="position:relative;height:220px"><canvas id="pat-chart-total"></canvas></div>
       </div>
-      <!-- 2. Patrimônio imobilizado -->
+      <!-- 2. Bens e Direitos -->
       <div class="tbl-card" style="padding:18px;margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-          <span style="font-weight:600;font-size:13px">🏠 Patrimônio Imobilizado</span>
+          <span style="font-weight:600;font-size:13px">🏠 Bens e Direitos</span>
         </div>
         <div style="position:relative;height:220px"><canvas id="pat-chart-imob"></canvas></div>
       </div>
@@ -1603,7 +1603,7 @@ select.inp option{background:var(--bg2);}
       </div>
       <div class="modal-body">
         <div class="info-box" style="margin-bottom:14px;font-size:13px">
-          Selecione o arquivo <strong>Finanças.xlsx</strong>. O Cruzeiro vai ler a aba "Patrimônio" e importar os valores históricos dos ativos imobilizados cadastrados.
+          Selecione o arquivo <strong>Finanças.xlsx</strong>. O Cruzeiro vai ler a aba "Patrimônio" e importar os valores históricos dos bens e direitos cadastrados.
         </div>
         <button class="btn primary" onclick="triggerPatImportFile()">📂 Selecionar arquivo Excel</button>
         <input type="file" id="pat-import-file" accept=".xlsx,.xls" style="display:none" onchange="onPatImportFile(event)">
@@ -1732,7 +1732,7 @@ select.inp option{background:var(--bg2);}
   <div class="overlay" id="modal-pat-asset" style="z-index:400">
     <div class="modal" style="width:720px;max-width:98vw">
       <div class="modal-hdr">
-        <h3 id="pat-asset-modal-title">Novo ativo imobilizado</h3>
+        <h3 id="pat-asset-modal-title">Novo bem ou direito</h3>
         <button class="btn-icon" onclick="closeModal('modal-pat-asset')">✕</button>
       </div>
       <div class="modal-body">
@@ -1752,6 +1752,7 @@ select.inp option{background:var(--bg2);}
               <option value="barco">⛵ Barco</option>
               <option value="clube">🏌️ Título em clube</option>
               <option value="societario">🏢 Participação societária</option>
+              <option value="mutuo">💰 Mútuo</option>
               <option value="outro">📦 Outro</option>
             </select>
           </div>
@@ -1760,7 +1761,7 @@ select.inp option{background:var(--bg2);}
           <label class="lbl">% de participação na empresa</label>
           <input class="inp" id="pat-asset-ownership-pct" type="number" min="0" max="100" step="0.01" placeholder="Ex: 25">
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+        <div id="pat-trend-acquisition-row" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
           <div class="field" style="margin:0">
             <label class="lbl">Tendência de preço</label>
             <select class="inp" id="pat-asset-trend">
@@ -2242,6 +2243,74 @@ select.inp option{background:var(--bg2);}
           </div>
         </div>
 
+        <!-- Seção: Mútuo (empréstimo concedido a terceiros) -->
+        <div id="pat-section-mutuo" style="display:none;margin-top:12px">
+          <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+          <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">💰 Mútuo</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div class="field" style="margin:0">
+              <label class="lbl">Mês do mútuo</label>
+              <div style="display:flex;gap:6px;align-items:center">
+                <input class="inp" id="pat-mutuo-month-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px">
+                <span style="color:var(--text3)">/</span>
+                <input class="inp" id="pat-mutuo-month-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:80px">
+              </div>
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Valor do mútuo (principal)</label>
+              <input class="inp" id="pat-mutuo-value" type="number" step="0.01" placeholder="0,00">
+            </div>
+          </div>
+          <div class="field" style="margin-top:8px">
+            <label class="lbl">Tipo de juros<span title="Simples: os juros são pagos periodicamente (mensal ou anual, conforme o indexador) — o app lança a entrada prevista na conta vinculada a cada período. Compostos: os juros se acumulam ao saldo do mútuo mês a mês (ou ano a ano) e só são recebidos de uma vez ao final — o app só atualiza a posição (valor do bem) projetada, sem lançar nada periodicamente na conta; o recebimento final é registrado manualmente, como ao vender/encerrar qualquer outro bem." style="cursor:help;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:1px solid var(--border);border-radius:50%;font-size:10px;color:var(--text3);margin-left:4px">?</span></label>
+            <select class="inp" id="pat-mutuo-juros-tipo" onchange="patMutuoJurosTipoChanged()">
+              <option value="simples">Simples — juros pagos periodicamente</option>
+              <option value="compostos">Compostos — juros acumulam, recebidos só ao final</option>
+            </select>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+            <div class="field" style="margin:0">
+              <label class="lbl">Taxa de juros (%)</label>
+              <input class="inp" id="pat-mutuo-juros" type="number" step="0.01" placeholder="Ex: 1,5">
+            </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Indexador — incidência</label>
+              <select class="inp" id="pat-mutuo-base" onchange="patMutuoBaseChanged()">
+                <option value="mensal">Mensal</option>
+                <option value="anual">Anual</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+            <div class="field" id="pat-mutuo-mes-incidencia-field" style="margin:0;display:none">
+              <label class="lbl">Mês de incidência do indexador</label>
+              <select class="inp" id="pat-mutuo-mes-incidencia">
+                <option value="1">Janeiro</option><option value="2">Fevereiro</option><option value="3">Março</option>
+                <option value="4">Abril</option><option value="5">Maio</option><option value="6">Junho</option>
+                <option value="7">Julho</option><option value="8">Agosto</option><option value="9">Setembro</option>
+                <option value="10">Outubro</option><option value="11">Novembro</option><option value="12">Dezembro</option>
+              </select>
+            </div>
+            <div class="field" id="pat-mutuo-sync-account-field" style="margin:0">
+              <label class="lbl">Conta vinculada (lançamento dos juros futuros)</label>
+              <select class="inp" id="pat-mutuo-sync-account"><option value="">— Não sincronizar —</option></select>
+            </div>
+          </div>
+          <div style="margin-top:8px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+              <input type="checkbox" id="pat-mutuo-indefinida" checked onchange="patMutuoIndefinidaChanged()">
+              Mútuo por prazo indefinido (sem data de término)
+            </label>
+            <div class="field" id="pat-mutuo-termino-field" style="margin:8px 0 0;display:none">
+              <label class="lbl">Data de término</label>
+              <input class="inp" id="pat-mutuo-termino" type="month">
+            </div>
+          </div>
+          <div class="info-box" id="pat-mutuo-info-box" style="margin-top:8px;font-size:12px">
+            Os juros futuros previstos são lançados automaticamente como entrada na conta vinculada (não conferidos), mês a mês até a data de término (ou continuamente, se indefinido).
+          </div>
+        </div>
+
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;font-size:13px">
           <input type="checkbox" id="pat-asset-hidden">
           Ocultar ativo (ex: já vendido ou não mais relevante)
@@ -2648,11 +2717,11 @@ select.inp option{background:var(--bg2);}
       <div style="border-top:1px solid var(--border);margin:0 16px 4px;padding-top:8px">
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text3)">
           <input type="checkbox" id="tx-pat-toggle" onchange="G('tx-pat-section').style.display=this.checked?'':'none'">
-          Vincular a ativo imobilizado
+          Vincular a bem/direito
         </label>
       </div>
       <div id="tx-pat-section" style="margin:0 16px 10px;padding-top:6px;display:none">
-        <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">🏠 Vincular a ativo imobilizado (opcional)</div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">🏠 Vincular a bem/direito (opcional)</div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <div class="field" style="flex:2;margin:0">
             <label class="lbl">Ativo</label>
@@ -2870,11 +2939,11 @@ select.inp option{background:var(--bg2);}
       <div style="border-top:1px solid var(--border);margin:0 16px 4px;padding-top:8px">
         <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text3)">
           <input type="checkbox" id="rec-pat-toggle" onchange="G('rec-pat-section').style.display=this.checked?'':'none'">
-          Vincular a ativo imobilizado
+          Vincular a bem/direito
         </label>
       </div>
       <div id="rec-pat-section" style="margin:0 16px 10px;padding-top:6px;display:none">
-        <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">🏠 Vincular a ativo imobilizado (opcional)</div>
+        <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.4px">🏠 Vincular a bem/direito (opcional)</div>
         <div class="field" style="margin:0">
           <label class="lbl">Ativo</label>
           <select class="inp" id="rec-pat-asset">
