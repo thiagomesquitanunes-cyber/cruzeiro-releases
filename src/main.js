@@ -531,6 +531,7 @@ function ensureLateColumns() {
     'ALTER TABLE pat_assets ADD COLUMN mutuo_data_termino TEXT',
     'ALTER TABLE pat_assets ADD COLUMN mutuo_sync_account_id INTEGER',
     "ALTER TABLE pat_assets ADD COLUMN mutuo_juros_tipo TEXT DEFAULT 'simples'",
+    "ALTER TABLE pat_assets ADD COLUMN mutuo_index_type TEXT DEFAULT 'none'",
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance REAL',
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance_month TEXT',
     // Mês de aquisição (compra) — distinto do mês da 1ª parcela (first_month),
@@ -2750,7 +2751,7 @@ ipcMain.handle('pat:assets-list', () =>
 );
 
 ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, sold_month, sold_value, hidden, financed, financing_total, ownership_pct,
-  mutuo_taxa_juros, mutuo_indexador_base, mutuo_mes_incidencia, mutuo_data_termino, mutuo_sync_account_id, mutuo_juros_tipo }) => {
+  mutuo_taxa_juros, mutuo_indexador_base, mutuo_mes_incidencia, mutuo_data_termino, mutuo_sync_account_id, mutuo_juros_tipo, mutuo_index_type }) => {
   const ownPct = (asset_type === 'societario' && ownership_pct != null && ownership_pct !== '') ? parseFloat(ownership_pct) : null;
   const isMutuo = asset_type === 'mutuo';
   const mJuros   = isMutuo ? (parseFloat(mutuo_taxa_juros) || 0) : null;
@@ -2759,11 +2760,12 @@ ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, 
   const mFim     = isMutuo ? (mutuo_data_termino || null) : null; // null = indefinida
   const mConta   = isMutuo ? (mutuo_sync_account_id || null) : null;
   const mTipo    = isMutuo ? (mutuo_juros_tipo || 'simples') : null;
+  const mIndex   = isMutuo ? (mutuo_index_type || 'none') : null;
   if (id) {
     run(`UPDATE pat_assets SET name=?,asset_type=?,trend=?,sort_order=?,sold_month=?,sold_value=?,hidden=?,financed=?,financing_total=?,ownership_pct=?,
-      mutuo_taxa_juros=?,mutuo_indexador_base=?,mutuo_mes_incidencia=?,mutuo_data_termino=?,mutuo_sync_account_id=?,mutuo_juros_tipo=? WHERE id=?`,
+      mutuo_taxa_juros=?,mutuo_indexador_base=?,mutuo_mes_incidencia=?,mutuo_data_termino=?,mutuo_sync_account_id=?,mutuo_juros_tipo=?,mutuo_index_type=? WHERE id=?`,
       [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, ownPct,
-       mJuros, mBase, mMes, mFim, mConta, mTipo, id]);
+       mJuros, mBase, mMes, mFim, mConta, mTipo, mIndex, id]);
     if (sold_month) {
       db.run('DELETE FROM pat_history WHERE asset_id=? AND month>? AND manual=0', [id, sold_month]);
       save();
@@ -2772,9 +2774,9 @@ ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, 
     return { id };
   } else {
     const newId = run(`INSERT INTO pat_assets (name,asset_type,trend,sort_order,sold_month,sold_value,hidden,financed,financing_total,ownership_pct,
-      mutuo_taxa_juros,mutuo_indexador_base,mutuo_mes_incidencia,mutuo_data_termino,mutuo_sync_account_id,mutuo_juros_tipo) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      mutuo_taxa_juros,mutuo_indexador_base,mutuo_mes_incidencia,mutuo_data_termino,mutuo_sync_account_id,mutuo_juros_tipo,mutuo_index_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, ownPct,
-       mJuros, mBase, mMes, mFim, mConta, mTipo]);
+       mJuros, mBase, mMes, mFim, mConta, mTipo, mIndex]);
     const resolvedId = newId || first('SELECT id FROM pat_assets WHERE name=? ORDER BY id DESC LIMIT 1', [name])?.id;
     if (isMutuo && resolvedId) syncMutuoToBank(resolvedId);
     return { id: resolvedId };
@@ -3446,133 +3448,55 @@ function _syncKeysBalanceToBank({ assetId, contractId, accountId, syncDay, categ
   return { created: 1 };
 }
 
-// Mútuo — projeta os juros futuros previstos e mantém dois registros em
-// sincronia, conforme o tipo de juros configurado:
+// Mútuo — projeta a evolução futura do saldo e, se "simples", os juros
+// pagos periodicamente. Modelo (igual a um contrato real "corrigido pelo
+// índice X + juros de Y%"), em UM ÚNICO avanço mês a mês:
 //
-// SIMPLES: o juro é pago periodicamente (mensal: todo mês sobre o
-// principal; anual: uma vez por ano, no mês de incidência). Pra cada
-// período, sincroniza DOIS lançamentos:
-//   1) opcional — uma transação bancária (entrada, não conferida) na conta
-//      vinculada, se houver uma configurada (mesmo princípio do
-//      _syncInstallmentsToBank: liga via pat_asset_id+pat_installment_month
-//      pra atualizar em vez de duplicar);
-//   2) SEMPRE — um pat_transactions 'juros_mutuo', criado de forma
-//      PROATIVA (não depende de o usuário "confirmar" nada no banco). É
-//      isso que faz aparecer corretamente no fluxo de caixa nominal/real do
-//      ativo desde já, sem repetir o problema que tivemos com parcela de
-//      financiamento (que só criava o registro quando alguém marcava
-//      "pago", e se esse gatilho falhasse, a parcela "desaparecia" do
-//      fluxo). Aqui não existe esse gatilho frágil — o registro sempre
-//      existe a partir do momento em que o cronograma é gerado.
+//   1) CORREÇÃO MONETÁRIA pelo indexador escolhido (IPCA/INCC/IGP-M/TR),
+//      acumulada mês a mês e aplicada ao saldo no mês de incidência —
+//      sempre acontece, independente do tipo de juros (é correção de
+//      valor, não juro).
+//   2) JUROS calculados sobre o saldo JÁ corrigido:
+//      • SIMPLES: pagos nesse momento (lançamento na conta vinculada +
+//        pat_transactions) — o saldo NÃO inclui o juro, só a correção.
+//      • COMPOSTOS: incorporados ao saldo — nada é lançado agora; o valor
+//        só é recebido por inteiro ao encerrar o mútuo (manualmente, igual
+//        a vender/encerrar qualquer outro bem).
 //
-// COMPOSTOS: não paga juro periodicamente — o saldo do mútuo CRESCE mês a
-// mês (ou ano a ano), só sendo recebido por inteiro ao final. Em vez de
-// lançamentos de juros, projeta o valor composto direto no pat_history
-// (delegado a _projectMutuoComposto).
+// O pat_transactions do juros simples é criado de forma PROATIVA (na hora
+// em que o cronograma é gerado, não quando alguém "confirma" algo) — é isso
+// que faz aparecer corretamente no fluxo de caixa nominal/real do ativo
+// desde já, sem repetir o problema que tivemos com parcela de
+// financiamento (que só existia quando alguém marcava "pago", e se esse
+// gatilho falhasse, a parcela "desaparecia" do fluxo).
 function syncMutuoToBank(assetId) {
   const asset = first('SELECT * FROM pat_assets WHERE id=?', [assetId]);
   if (!asset || asset.asset_type !== 'mutuo') return { created: 0, updated: 0 };
 
-  if ((asset.mutuo_juros_tipo || 'simples') === 'compostos') {
-    return _projectMutuoComposto(asset);
-  }
-
-  const principal = first('SELECT value FROM pat_history WHERE asset_id=? ORDER BY month DESC LIMIT 1', [assetId])?.value || 0;
-  if (!principal) return { created: 0, updated: 0 };
-
-  const taxa = (asset.mutuo_taxa_juros || 0) / 100;
-  if (!taxa) return { created: 0, updated: 0 };
-  const base = asset.mutuo_indexador_base || 'mensal';
-  const mesIncidencia = asset.mutuo_mes_incidencia;
-  const dataTermino = asset.mutuo_data_termino; // 'YYYY-MM' ou null (indefinida)
-
-  const now = new Date();
-  const HORIZON_MONTHS = 24; // teto razoável quando o mútuo é indefinido
-
-  const schedule = [];
-  const cursor = new Date(now.getFullYear(), now.getMonth(), 1);
-  for (let i = 0; i < HORIZON_MONTHS; i++) {
-    const y = cursor.getFullYear(), mo = cursor.getMonth() + 1;
-    const monthStr = `${y}-${String(mo).padStart(2,'0')}`;
-    if (dataTermino && monthStr > dataTermino) break;
-
-    if (base === 'mensal') {
-      schedule.push({ month: monthStr, amount: principal * taxa });
-    } else if (mesIncidencia && mo === mesIncidencia) {
-      schedule.push({ month: monthStr, amount: principal * taxa });
-    }
-    cursor.setMonth(cursor.getMonth() + 1);
-  }
-
-  const todayMonth = now.toISOString().slice(0,7);
-  let created = 0, updated = 0;
-  schedule.forEach(row => {
-    if (row.month < todayMonth) return; // nunca cria/atualiza retroativo
-    const amount = Math.abs(row.amount);
-
-    // 1) Transação bancária — opcional, só se houver conta vinculada.
-    if (asset.mutuo_sync_account_id) {
-      const dueDate = `${row.month}-01`;
-      const existingTx = first('SELECT id, amount, cleared FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, row.month]);
-      if (existingTx) {
-        if (existingTx.cleared !== 1 && Math.abs((existingTx.amount ?? 0) - amount) > 0.005) {
-          run('UPDATE transactions SET amount=? WHERE id=?', [amount, existingTx.id]);
-          updated++;
-        }
-      } else {
-        run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_installment_month)
-             VALUES (?,?,?,?,?,0,?,?)`,
-          [asset.mutuo_sync_account_id, dueDate, 'Juros recebidos', `Juros mútuo — ${asset.name}`, amount, assetId, row.month]);
-        created++;
-      }
-    }
-
-    // 2) pat_transactions — SEMPRE, independente de conta vinculada ou de
-    // "conferido" no banco (ver explicação no comentário da função).
-    const existingPatTx = first(
-      `SELECT id, total_value FROM pat_transactions WHERE asset_id=? AND substr(month,1,7)=? AND tx_type='juros_mutuo'`,
-      [assetId, row.month]);
-    if (existingPatTx) {
-      if (Math.abs(existingPatTx.total_value - amount) > 0.005) {
-        run('UPDATE pat_transactions SET total_value=? WHERE id=?', [amount, existingPatTx.id]);
-      }
-    } else {
-      run(`INSERT INTO pat_transactions (asset_id, month, tx_type, total_value, notes) VALUES (?,?,?,?,?)`,
-        [assetId, `${row.month}-01`, 'juros_mutuo', amount, 'Juros previstos (mútuo, simples)']);
-    }
-  });
-
-  if (created || updated) save();
-  return { created, updated };
-}
-
-// Mútuo com juros COMPOSTOS — em vez de pagar juro periodicamente, o saldo
-// cresce mês a mês (ou ano a ano) e só é recebido por inteiro ao final
-// (quando o usuário encerrar o mútuo manualmente, registrando a venda/
-// liquidação — igual a qualquer outro bem). Aqui só projeta a EVOLUÇÃO do
-// valor no pat_history; nenhum lançamento de caixa é criado.
-function _projectMutuoComposto(asset) {
-  const assetId = asset.id;
-  // Usa o principal ORIGINAL (a primeira entrada manual) como base do
-  // cálculo — nunca o valor mais recente, que em re-sincronizações
-  // anteriores já pode estar com juros compostos acumulados (senão
-  // dobraríamos o composto a cada chamada).
+  // Usa o principal ORIGINAL (primeira entrada manual) como base do
+  // cálculo — nunca o valor mais recente, que em sincronizações anteriores
+  // já pode incluir correção/juros acumulados (senão dobraríamos o cálculo
+  // a cada chamada).
   const principalRow = first('SELECT month, value FROM pat_history WHERE asset_id=? AND manual=1 ORDER BY month ASC LIMIT 1', [assetId]);
   if (!principalRow) return { created: 0, updated: 0 };
 
   const taxa = (asset.mutuo_taxa_juros || 0) / 100;
-  if (!taxa) return { created: 0, updated: 0 };
+  const indexType = asset.mutuo_index_type || 'none';
+  if (!taxa && indexType === 'none') return { created: 0, updated: 0 }; // nada pra projetar
+
   const base = asset.mutuo_indexador_base || 'mensal';
   const mesIncidencia = asset.mutuo_mes_incidencia;
-  const dataTermino = asset.mutuo_data_termino;
+  const dataTermino = asset.mutuo_data_termino; // 'YYYY-MM' ou null (indefinida)
+  const jurosTipo = asset.mutuo_juros_tipo || 'simples';
 
   const now = new Date();
   const todayMonth = now.toISOString().slice(0,7);
-  const HORIZON_MONTHS = 24;
+  const HORIZON_MONTHS = 24; // teto razoável quando o mútuo é indefinido
   const startMonth = principalRow.month.slice(0,7);
   const [sy, smo] = startMonth.split('-').map(Number);
 
-  let value = principalRow.value;
+  let balance = principalRow.value;
+  let pendingIndexFactor = 1; // acumula a correção mês a mês até a próxima incidência
   let created = 0, updated = 0;
   const cursor = new Date(sy, smo - 1, 1);
   const endCursor = new Date(now.getFullYear(), now.getMonth() + HORIZON_MONTHS, 1);
@@ -3583,18 +3507,64 @@ function _projectMutuoComposto(asset) {
     if (dataTermino && monthStr > dataTermino) break;
 
     if (monthStr !== startMonth) {
-      if (base === 'mensal' || (mesIncidencia && mo === mesIncidencia)) value = value * (1 + taxa);
+      // Acumula a correção TODO mês (mesmo fora do mês de incidência) —
+      // necessário pra incidência anual, que precisa somar os 12 meses
+      // desde a última correção, não só o mês da incidência em si.
+      if (indexType !== 'none') {
+        pendingIndexFactor *= (1 + _monthlyIndexRate(indexType, monthStr));
+      }
+
+      const isIncidencia = base === 'mensal' || (mesIncidencia && mo === mesIncidencia);
+      if (isIncidencia) {
+        if (indexType !== 'none') {
+          balance = balance * pendingIndexFactor;
+          pendingIndexFactor = 1;
+        }
+        const juros = balance * taxa;
+        if (jurosTipo === 'compostos') {
+          balance = balance + juros;
+        } else if (monthStr >= todayMonth && juros > 0.005) {
+          // SIMPLES: paga agora — nunca cria/atualiza retroativo.
+          if (asset.mutuo_sync_account_id) {
+            const dueDate = `${monthStr}-01`;
+            const existingTx = first('SELECT id, amount, cleared FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, monthStr]);
+            if (existingTx) {
+              if (existingTx.cleared !== 1 && Math.abs((existingTx.amount ?? 0) - juros) > 0.005) {
+                run('UPDATE transactions SET amount=? WHERE id=?', [juros, existingTx.id]);
+                updated++;
+              }
+            } else {
+              run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_installment_month)
+                   VALUES (?,?,?,?,?,0,?,?)`,
+                [asset.mutuo_sync_account_id, dueDate, 'Juros recebidos', `Juros mútuo — ${asset.name}`, juros, assetId, monthStr]);
+              created++;
+            }
+          }
+          const existingPatTx = first(
+            `SELECT id, total_value FROM pat_transactions WHERE asset_id=? AND substr(month,1,7)=? AND tx_type='juros_mutuo'`,
+            [assetId, monthStr]);
+          if (existingPatTx) {
+            if (Math.abs(existingPatTx.total_value - juros) > 0.005) {
+              run('UPDATE pat_transactions SET total_value=? WHERE id=?', [juros, existingPatTx.id]);
+            }
+          } else {
+            run(`INSERT INTO pat_transactions (asset_id, month, tx_type, total_value, notes) VALUES (?,?,?,?,?)`,
+              [assetId, `${monthStr}-01`, 'juros_mutuo', juros, 'Juros previstos (mútuo, simples)']);
+          }
+        }
+      }
     }
 
-    // Só regrava a partir do mês atual em diante — meses passados mantêm o
-    // que já foi de fato registrado (não sobrescreve histórico encerrado).
+    // Posição (saldo) deste mês — só regrava a partir do mês atual em
+    // diante; meses passados mantêm o que já foi de fato registrado (nunca
+    // sobrescreve histórico encerrado/manual).
     if (monthStr >= todayMonth) {
       const existing = first('SELECT id, value, manual FROM pat_history WHERE asset_id=? AND month=?', [assetId, monthStr]);
       if (!existing) {
-        run('INSERT INTO pat_history (asset_id, month, value, manual) VALUES (?,?,?,0)', [assetId, monthStr, value]);
+        run('INSERT INTO pat_history (asset_id, month, value, manual) VALUES (?,?,?,0)', [assetId, monthStr, balance]);
         created++;
-      } else if (!existing.manual && Math.abs(existing.value - value) > 0.005) {
-        run('UPDATE pat_history SET value=? WHERE id=?', [value, existing.id]);
+      } else if (!existing.manual && Math.abs(existing.value - balance) > 0.005) {
+        run('UPDATE pat_history SET value=? WHERE id=?', [balance, existing.id]);
         updated++;
       }
     }
@@ -3658,6 +3628,32 @@ function _syncInstallmentsToBank({ schedule, accountId, syncDay, category, asset
   return { created, updated };
 }
 
+// Garante que existe (ou não) um pat_transactions 'parcela_financiamento'
+// pra esta parcela, de acordo com o status "paid" — cria/atualiza se paga,
+// remove se desmarcada. Chamado em TODO write-path que altera o status de
+// uma parcela de financiamento, pra nunca mais depender de um backfill
+// posterior pra ela aparecer no fluxo de caixa nominal/real do ativo (foi
+// exatamente a falta disso que causou parcelas pagas "desaparecendo").
+function _syncFinancingInstallmentPatTx(assetId, month, paid, amount) {
+  const monthStr = (month || '').slice(0,7);
+  if (!assetId || !monthStr) return;
+  if (paid) {
+    const existing = first(
+      `SELECT id, total_value FROM pat_transactions WHERE asset_id=? AND substr(month,1,7)=? AND tx_type='parcela_financiamento'`,
+      [assetId, monthStr]);
+    if (existing) {
+      if (amount != null && Math.abs(existing.total_value - Math.abs(amount)) > 0.005) {
+        run('UPDATE pat_transactions SET total_value=? WHERE id=?', [Math.abs(amount), existing.id]);
+      }
+    } else if (amount != null) {
+      run(`INSERT INTO pat_transactions (asset_id, month, tx_type, total_value, notes) VALUES (?,?,?,?,?)`,
+        [assetId, monthStr+'-01', 'parcela_financiamento', Math.abs(amount), 'Parcela paga']);
+    }
+  } else {
+    run(`DELETE FROM pat_transactions WHERE asset_id=? AND substr(month,1,7)=? AND tx_type='parcela_financiamento'`, [assetId, monthStr]);
+  }
+}
+
 // When a synced installment transaction is marked cleared (conferido), mark the
 // corresponding pat_financing / personal_debt_installments row as paid.
 function _onInstallmentTxCleared(tx) {
@@ -3668,6 +3664,7 @@ function _onInstallmentTxCleared(tx) {
     const row = first('SELECT * FROM pat_financing WHERE contract_id=? AND month LIKE ?', [contract?.id ?? null, month+'%']);
     if (row && row.paid !== 1) {
       run('UPDATE pat_financing SET is_projection=0, paid=1, linked_tx_id=? WHERE id=?', [tx.id, row.id]);
+      _syncFinancingInstallmentPatTx(tx.pat_asset_id, month, true, row.installment);
     }
   } else if (tx.pat_debt_id) {
     const row = first('SELECT * FROM personal_debt_installments WHERE debt_id=? AND month LIKE ?', [tx.pat_debt_id, month+'%']);
@@ -3688,6 +3685,7 @@ function _onInstallmentTxUncleared(tx) {
     const row = first('SELECT * FROM pat_financing WHERE contract_id=? AND month LIKE ?', [contract?.id ?? null, month+'%']);
     if (row && row.paid === 1) {
       run('UPDATE pat_financing SET is_projection=1, paid=0, linked_tx_id=NULL WHERE id=?', [row.id]);
+      _syncFinancingInstallmentPatTx(tx.pat_asset_id, month, false, null);
       _rebalanceSchedule(tx.pat_asset_id);
     }
   } else if (tx.pat_debt_id) {
@@ -3718,6 +3716,7 @@ ipcMain.handle('pat:financing-toggle-paid', (_, { ids, paid }) => {
     const row = first('SELECT * FROM pat_financing WHERE id=?', [id]);
     if (!row) return;
     run('UPDATE pat_financing SET paid=?, is_projection=? WHERE id=?', [paid?1:0, paid?0:1, id]);
+    _syncFinancingInstallmentPatTx(row.asset_id, row.month, !!paid, row.installment);
     affectedAssets.add(row.asset_id);
   });
   affectedAssets.forEach(assetId => _rebalanceSchedule(assetId));
@@ -3837,9 +3836,9 @@ ipcMain.handle('pat:financing-mark-paid', (_, { assetId, month, amount }) => {
     run('INSERT INTO pat_financing (asset_id,contract_id,month,installment,principal,interest,correction,balance_end,is_projection,paid) VALUES (?,?,?,?,?,?,0,?,0,1)',
       [assetId, cId, month, amount, principal, interest, balanceEnd]);
   }
+  _syncFinancingInstallmentPatTx(assetId, month, true, amount);
   _rebalanceSchedule(assetId);
   save();
-  _backfillMissingFinancingTx();
   return { ok: true };
 });
 
@@ -3864,6 +3863,7 @@ ipcMain.handle('pat:financing-unpay', (_, { assetId, month }) => {
       run('DELETE FROM pat_financing WHERE contract_id=? AND month=?', [cId, month]);
     }
   }
+  _syncFinancingInstallmentPatTx(assetId, month, false, null);
   _rebalanceSchedule(assetId);
   save();
   return { ok: true };
@@ -3892,9 +3892,9 @@ ipcMain.handle('pat:financing-installment-set', (_, { assetId, month, installmen
          VALUES (?,?,?,?,0,0,0,?,?)`,
       [assetId, cId, month, installment, paid ? 0 : 1, paid ? 1 : 0]);
   }
+  _syncFinancingInstallmentPatTx(assetId, month, !!paid, installment);
   _rebalanceSchedule(assetId);
   save();
-  _backfillMissingFinancingTx();
   return { ok: true };
 });
 

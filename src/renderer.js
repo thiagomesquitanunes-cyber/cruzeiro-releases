@@ -3188,7 +3188,20 @@ async function runBudgetReport(from, to, accountIds, categories, excludeTransfer
 let _bankParsed = [];   // holds parsed rows before confirm
 
 // ── Built-in bank/card configs (editable name, icon, sort_order) ──
+// Lista única e abrangente de extensões aceitas em QUALQUER seletor de
+// arquivo de importação (banco, cartão, corretora) — xls/xlsx/csv/ofx/pdf,
+// com variações de maiúscula/minúscula (alguns sistemas são sensíveis a
+// isso). Usar uma lista única e permissiva em todo lugar evita o problema
+// de filtrar por engano o formato de um banco que ainda nem existia quando
+// a lista "inteligente" por tipo foi escrita (foi exatamente isso que
+// escondeu o CSV do Bradesco).
+const ALL_IMPORT_EXT = '.xls,.xlsx,.XLS,.XLSX,.csv,.CSV,.ofx,.OFX,.pdf,.PDF';
+
 const BUILTIN_BANKS = [
+  { id:'bb', type:'bank', name:'Banco do Brasil (CSV/OFX)', fileType:'CSV/OFX', sort_order:3,
+    logoUrl:'data:image/png;base64,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', logoBg:'#FFEF38', logoFallback:'BB' },
+  { id:'bradesco', type:'bank', name:'Bradesco (extrato CSV)', fileType:'CSV', sort_order:2,
+    logoUrl:'data:image/png;base64,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', logoBg:'#fff', logoFallback:'BR' },
   { id:'santander', type:'bank', name:'Santander (extrato PDF)', fileType:'PDF', sort_order:1,
     logoUrl:'data:image/png;base64,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', logoBg:'#fff', logoFallback:'SF' },
   { id:'itau',  type:'bank', name:'Itaú',  fileType:'XLSX', sort_order:0,
@@ -3254,20 +3267,27 @@ async function restorePendingImportIfAny() {
   }
 }
 
+// Ordenação compartilhada por TODAS as listas de importação (bancos,
+// cartões, corretoras — tanto pré-configurados quanto criados pelo
+// usuário): alfabética por padrão; itens com posição definida manualmente
+// (via o reordenador de arrastar-e-soltar) ficam fixados no topo, na ordem
+// escolhida. Substitui o antigo seletor "1ª posição/2ª posição" por item.
+function sortImportItems(items) {
+  return items.slice().sort((a,b) => {
+    if (a._manualOrder && b._manualOrder) return a.sort_order - b.sort_order;
+    if (a._manualOrder !== b._manualOrder) return a._manualOrder ? -1 : 1;
+    return (a.name||'').localeCompare(b.name||'', 'pt-BR');
+  });
+}
+
 function getBuiltinDefs(list) {
-  return list
-    .map(b => {
-      const ov = _builtinOverrides[b.id] || {};
-      // Track whether the user explicitly set a position via the "posição" editor —
-      // those items keep their manual order, ranked before everything else.
-      return { ...b, name: ov.name || b.name, logoUrl: ov.logoUrl || b.logoUrl,
-        sort_order: ov.sort_order ?? b.sort_order, _manualOrder: ov.sort_order != null };
-    })
-    .sort((a,b) => {
-      if (a._manualOrder && b._manualOrder) return a.sort_order - b.sort_order;
-      if (a._manualOrder !== b._manualOrder) return a._manualOrder ? -1 : 1;
-      return a.name.localeCompare(b.name, 'pt-BR');
-    });
+  return sortImportItems(list.map(b => {
+    const ov = _builtinOverrides[b.id] || {};
+    // Track whether the user explicitly set a position via o reordenador —
+    // esses itens mantêm a ordem manual, ficando antes de todo o resto.
+    return { ...b, name: ov.name || b.name, logoUrl: ov.logoUrl || b.logoUrl,
+      sort_order: ov.sort_order ?? b.sort_order, _manualOrder: ov.sort_order != null };
+  }));
 }
 
 function bankLogoHtml(p, size=24) {
@@ -3328,18 +3348,130 @@ function renderImportDropdowns() {
   // Custom bank items
   const bankContainer = G('import-dd-bank-custom');
   if (bankContainer) {
-    bankContainer.innerHTML = _customBankParsers.filter(p => p.type === 'bank')
-      .sort((a,b) => (a.name||'').localeCompare(b.name||'', 'pt-BR'))
+    const items = _customBankParsers.filter(p => p.type === 'bank')
+      .map(p => ({ ...p, _manualOrder: p.sort_order != null }));
+    bankContainer.innerHTML = sortImportItems(items)
       .map(p => ddItemHtml({...p, fileType: p.config?.fileType}, 'bank', false)).join('');
   }
 
   // Custom card items
   const cardContainer = G('import-dd-card-custom');
   if (cardContainer) {
-    cardContainer.innerHTML = _customBankParsers.filter(p => p.type === 'card')
-      .sort((a,b) => (a.name||'').localeCompare(b.name||'', 'pt-BR'))
+    const items = _customBankParsers.filter(p => p.type === 'card')
+      .map(p => ({ ...p, _manualOrder: p.sort_order != null }));
+    cardContainer.innerHTML = sortImportItems(items)
       .map(p => ddItemHtml({...p, fileType: p.config?.fileType}, 'card', false)).join('');
   }
+}
+
+// ── Reordenar bancos/cartões/corretoras por arrastar-e-soltar ──
+// Substitui o antigo seletor "1ª posição/2ª posição" por item: aqui é uma
+// lista única (pré-configurados + criados pelo usuário) que o próprio
+// usuário arrasta. Por padrão tudo é alfabético; só fica "manual" o que for
+// efetivamente arrastado aqui.
+let _reorderState = null;
+let _reorderDragIdx = null;
+
+function openReorderModal(type) {
+  ['bank','card','broker'].forEach(t => {
+    const dd = G(`import-dd-${t}`); if (dd) dd.style.display = 'none';
+    const ar = G(`import-dd-${t}-arrow`); if (ar) ar.textContent = '▾';
+  });
+
+  const builtinList = type === 'broker' ? BUILTIN_BROKERS : type === 'bank' ? BUILTIN_BANKS : BUILTIN_CARDS;
+  const customList = type === 'broker' ? (_customBrokerParsers||[]) : (_customBankParsers||[]).filter(p => p.type === type);
+
+  const builtinSorted = getBuiltinDefs(builtinList);
+  const customSorted = sortImportItems(customList.map(p => ({ ...p, _manualOrder: p.sort_order != null })));
+  const builtinIds = new Set(builtinList.map(b => b.id));
+
+  _reorderState = {
+    type,
+    items: [...builtinSorted, ...customSorted].map(p => ({
+      id: p.id, name: p.name, isBuiltin: builtinIds.has(p.id), logoHtml: bankLogoHtml(p, 20),
+    })),
+  };
+
+  renderReorderModal();
+  openModal('modal-custom-parser');
+}
+
+function renderReorderModal() {
+  const typeLabel = { bank: 'bancos', card: 'cartões', broker: 'corretoras' }[_reorderState.type];
+  G('custom-parser-title').textContent = `↕ Reordenar ${typeLabel}`;
+  G('custom-parser-body').innerHTML = `
+    <p style="font-size:13px;color:var(--text2);margin:0 0 12px">Arraste pra reordenar. Por padrão a lista é alfabética (inclusive bancos/corretoras que você mesmo criar) — só reordene aqui se quiser fixar uma ordem específica.</p>
+    <div id="reorder-list" style="display:flex;flex-direction:column;gap:4px;max-height:50vh;overflow-y:auto">
+      ${_reorderState.items.map((it, i) => `
+        <div class="reorder-row" draggable="true" data-idx="${i}"
+          ondragstart="_reorderDragStart(event,${i})" ondragover="_reorderDragOver(event)" ondrop="_reorderDrop(event,${i})" ondragend="_reorderDragEnd(event)"
+          style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;cursor:grab;user-select:none">
+          <span style="color:var(--text3);font-size:14px">☰</span>
+          ${it.logoHtml}
+          <span style="flex:1;font-weight:500;pointer-events:none">${esc(it.name)}</span>
+          ${it.isBuiltin ? '' : '<span style="font-size:10px;color:var(--text3);pointer-events:none">personalizado</span>'}
+        </div>`).join('')}
+    </div>`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="_reorderReset()">↺ Voltar ao alfabético</button>
+    <button class="btn" onclick="closeModal('modal-custom-parser')">Cancelar</button>
+    <button class="btn primary" onclick="_reorderSave()">✓ Salvar ordem</button>`;
+}
+function _reorderDragStart(e, idx) {
+  _reorderDragIdx = idx;
+  e.dataTransfer.effectAllowed = 'move';
+  e.target.style.opacity = '0.4';
+}
+function _reorderDragOver(e) { e.preventDefault(); }
+function _reorderDrop(e, idx) {
+  e.preventDefault();
+  if (_reorderDragIdx === null || _reorderDragIdx === idx) return;
+  const items = _reorderState.items;
+  const [moved] = items.splice(_reorderDragIdx, 1);
+  items.splice(idx, 0, moved);
+  _reorderDragIdx = null;
+  renderReorderModal();
+}
+function _reorderDragEnd(e) { e.target.style.opacity = ''; _reorderDragIdx = null; }
+
+// "Voltar ao alfabético" LIMPA a marcação manual (não só reordena pra
+// bater com o alfabético atual) — assim um banco novo que você adicionar
+// depois entra automaticamente na posição alfabética certa, em vez de
+// ficar sempre depois de tudo que já foi "fixado" uma vez.
+async function _reorderReset() {
+  const { type, items } = _reorderState;
+  for (const it of items) {
+    if (it.isBuiltin) {
+      if (_builtinOverrides[it.id]) delete _builtinOverrides[it.id].sort_order;
+    } else {
+      const list = type === 'broker' ? _customBrokerParsers : _customBankParsers;
+      const parser = list.find(p => p.id === it.id);
+      if (parser) { delete parser.sort_order; await ff.bankParserSave(parser); }
+    }
+  }
+  await ff.bankParserSave({ id: '__builtin_overrides__', data: _builtinOverrides });
+  renderImportDropdowns();
+  renderBrokerDropdown();
+  closeModal('modal-custom-parser');
+  toast('Ordem alfabética restaurada');
+}
+async function _reorderSave() {
+  const { type, items } = _reorderState;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.isBuiltin) {
+      _builtinOverrides[it.id] = { ...(_builtinOverrides[it.id]||{}), sort_order: i };
+    } else {
+      const list = type === 'broker' ? _customBrokerParsers : _customBankParsers;
+      const parser = list.find(p => p.id === it.id);
+      if (parser) { parser.sort_order = i; await ff.bankParserSave(parser); }
+    }
+  }
+  await ff.bankParserSave({ id: '__builtin_overrides__', data: _builtinOverrides });
+  renderImportDropdowns();
+  renderBrokerDropdown();
+  closeModal('modal-custom-parser');
+  toast('Ordem salva');
 }
 
 async function deleteCustomParser(id) {
@@ -3381,13 +3513,6 @@ function openBankEdit(id, type, isBuiltin) {
     if (!current) return;
   }
 
-  // All items of same type for sort_order reference
-  const allSameType = isBuiltin
-    ? getBuiltinDefs(type === 'broker' ? BUILTIN_BROKERS : type === 'bank' ? BUILTIN_BANKS : BUILTIN_CARDS)
-    : (type === 'broker' ? _customBrokerParsers : _customBankParsers).filter(p => p.type === type);
-
-  const posOptions = allSameType.map((p,i) => `<option value="${i}" ${(current.sort_order ?? 0) === i ? 'selected' : ''}>${i+1}ª posição</option>`).join('');
-
   G('custom-parser-title').textContent = `Editar — ${current.name}`;
   G('custom-parser-body').innerHTML = `
     <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
@@ -3400,10 +3525,6 @@ function openBankEdit(id, type, isBuiltin) {
           <label class="lbl">URL do ícone (imagem)</label>
           <input class="inp" id="edit-bank-logo" type="text" value="${esc(current.logoUrl||'')}" placeholder="https://…/logo.png" style="max-width:320px" oninput="previewEditLogo()">
           <div style="font-size:11px;color:var(--text3);margin-top:3px">Pode usar qualquer URL pública de imagem, ou deixar em branco para usar as iniciais.</div>
-        </div>
-        <div class="field">
-          <label class="lbl">Posição no menu</label>
-          <select class="inp" id="edit-bank-order" style="max-width:160px">${posOptions}</select>
         </div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:center;gap:8px">
@@ -3431,12 +3552,12 @@ function previewEditLogo() {
 async function saveBankEdit(id, type, isBuiltin) {
   const name       = G('edit-bank-name').value.trim();
   const logoUrl    = G('edit-bank-logo').value.trim();
-  const sort_order = parseInt(G('edit-bank-order').value);
 
   if (!name) { toast('Informe um nome'); return; }
 
   if (isBuiltin) {
-    _builtinOverrides[id] = { name, logoUrl, sort_order };
+    const existingOv = _builtinOverrides[id] || {};
+    _builtinOverrides[id] = { ...existingOv, name, logoUrl };
     await ff.bankParserSave({ id: '__builtin_overrides__', data: _builtinOverrides });
   } else {
     const allCustom = [...(_customBankParsers||[]), ...(_customBrokerParsers||[])];
@@ -3444,7 +3565,6 @@ async function saveBankEdit(id, type, isBuiltin) {
     if (parser) {
       parser.name = name;
       parser.logoUrl = logoUrl;
-      parser.sort_order = sort_order;
       await ff.bankParserSave(parser);
       const all = await ff.bankParsersList();
       _customBankParsers   = all.filter(p => p.id !== '__builtin_overrides__' && p.type !== 'broker');
@@ -3524,7 +3644,7 @@ function pickImport(bankId, type) {
     const label = G('bank-selected-label');
     if (label) label.textContent = `Selecionado: ${custom.name}`;
     G('bank-file-trigger').style.display = 'flex';
-    G('bank-file-input').accept = custom.config.fileType === 'CSV' ? '.csv,.CSV' : '.xls,.xlsx,.XLS,.XLSX,.ofx,.OFX,.pdf,.PDF';
+    G('bank-file-input').accept = ALL_IMPORT_EXT;
     cancelBankImport();
     return;
   }
@@ -3539,7 +3659,7 @@ function pickImport(bankId, type) {
   const label = G('bank-selected-label');
   if (label) label.innerHTML = `<span style="display:flex;align-items:center;gap:8px">Selecionado: ${builtinDef ? bankLogoHtml({...builtinDef,...(_builtinOverrides[bankId]||{})},18) : ''} <strong>${esc(builtinName)}</strong></span>`;
 
-  G('bank-file-input').accept = (bankId === 'xp' || bankId === 'itau_card') ? '.csv,.CSV' : (bankId === 'santander_fatura' || bankId === 'itau_fatura' || bankId === 'santander') ? '.pdf,.PDF' : '.xls,.xlsx,.XLS,.XLSX';
+  G('bank-file-input').accept = ALL_IMPORT_EXT;
   G('bank-file-trigger').style.display = 'flex';
 
   const bankSel = G('bank-account');
@@ -3611,6 +3731,8 @@ async function onBankFileSelected(event) {
 async function parseBankFile(buffer) {
   if (selBank === 'xp') return parseBankXP(buffer);
   if (selBank === 'btg') return parseBankBTG(buffer);
+  if (selBank === 'bradesco') return parseBankBradesco(buffer);
+  if (selBank === 'bb') return parseBankBB(buffer);
   if (selBank === 'itau_card') return parseBankItauCard(buffer);
   if (selBank === 'santander_fatura') return parseSantanderFaturaPDF(buffer);
   if (selBank === 'itau_fatura') return parseItauFaturaPDF(buffer);
@@ -4703,6 +4825,159 @@ function parseBankItau(buffer) {
   return res;
 }
 
+// Bradesco — extrato em CSV, separado por ";", com colunas SEPARADAS de
+// crédito e débito (em vez de uma única coluna de valor com sinal) —
+// amount = crédito - débito. Formato real observado:
+//   "Extrato de: Ag: ... | Conta: ...;;;;;"          (linha de título, ignorada)
+//   "Data;Histórico;Docto.;Crédito (R$);Débito (R$);Saldo (R$)"  (cabeçalho)
+//   "12/06/2026;COD. LANC. 0;0;0,00; ;4.026,78"      (linha de abertura, sem
+//                                                      movimento real — pulada)
+//   "15/06/2026;TED-TRANSF ELET DISPON;...;7.007,22; ;11.034,00"
+//   ... mais linhas de movimento ...
+//   (linha em branco, depois "Filtro de resultados...", "Últimos
+//   Lancamentos", aviso de horário, etc. — tudo descartado)
+// Banco do Brasil — emite extrato tanto em CSV quanto em OFX, pelo MESMO
+// botão de download no site. Em vez de pedir pro usuário escolher o
+// formato, o parser "cheira" o conteúdo do arquivo (não confia na extensão)
+// e despacha pro parser certo — assim o mesmo botão "Selecionar arquivo"
+// funciona pra qualquer um dos dois que o usuário baixar.
+function parseBankBB(buffer) {
+  const head = new TextDecoder('latin1').decode(buffer.slice ? buffer.slice(0, 300) : buffer).slice(0, 300);
+  if (/OFXHEADER|<OFX>/i.test(head)) return parseOFX(buffer);
+  return parseBankBBCsv(buffer);
+}
+
+// Valor do CSV do BB usa PONTO como decimal (ex: "4050.00", "-2266.37") —
+// convenção invertida da maioria dos bancos brasileiros (que usam vírgula).
+// Se um dia aparecer separador de milhar, assume o ÚLTIMO entre vírgula/
+// ponto como decimal (heurística robusta a qualquer uma das convenções).
+function parseBBValue(s) {
+  s = (s||'').trim();
+  if (!s) return 0;
+  const neg = s.startsWith('-');
+  s = s.replace(/^-/, '');
+  if (s.includes(',') && s.includes('.')) {
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g,'').replace(',','.');
+    else s = s.replace(/,/g,'');
+  } else if (s.includes(',') && !s.includes('.')) {
+    s = s.replace(',','.');
+  }
+  const n = parseFloat(s) || 0;
+  return neg ? -n : n;
+}
+
+// CSV do BB: campos entre aspas, separados por vírgula, com uma vírgula
+// sobrando no final de cada linha (campo vazio). Formato real observado:
+//   "Data","Dependencia Origem","Histórico","Data do Balancete","Número do documento","Valor",
+//   "11/05/2026","","Saldo Anterior","","0","107.68",       <- marcador de abertura, sem movimento real
+//   "25/05/2026","","Ordem Bancária - SP-SEC DA FAZENDA E PL","","202605220055061","4050.00",
+//   ...
+//   "23/06/2026","","S A L D O","","0","49.57",              <- marcador de fechamento (note os espaços)
+function parseBankBBCsv(buffer) {
+  const text = new TextDecoder('latin1').decode(buffer);
+  const rows = text.split(/\r?\n/).filter(l => l.trim()).map(l => {
+    // Parse manual do CSV com aspas — split simples por vírgula quebraria
+    // se algum campo entre aspas contivesse uma vírgula.
+    const cells = [];
+    let cur = '', inQuotes = false;
+    for (let i = 0; i < l.length; i++) {
+      const c = l[i];
+      if (c === '"') inQuotes = !inQuotes;
+      else if (c === ',' && !inQuotes) { cells.push(cur); cur = ''; }
+      else cur += c;
+    }
+    cells.push(cur);
+    return cells;
+  });
+
+  // Acha o cabeçalho pelo TÍTULO das colunas, não pela posição.
+  let hdrIdx = -1, di = -1, li = -1, vi = -1;
+  for (let i = 0; i < Math.min(rows.length, 3); i++) {
+    const r = rows[i].map(c => norm(String(c)));
+    const _di = r.findIndex(c => c === 'data' || c.startsWith('data'));
+    const _li = r.findIndex(c => c.includes('historico'));
+    const _vi = r.findIndex(c => c === 'valor' || c.includes('valor'));
+    if (_di >= 0 && _li >= 0 && _vi >= 0) { hdrIdx = i; di = _di; li = _li; vi = _vi; break; }
+  }
+  if (hdrIdx < 0) return [];
+
+  // Comparação por versão "compactada" (sem espaços) — cobre tanto "Saldo
+  // Anterior" quanto a formatação esquisita "S A L D O" com espaços entre
+  // cada letra, sem arriscar pegar uma descrição real que só MENCIONE
+  // "saldo" em algum lugar (ex: um eventual "Transferência de saldo").
+  const SKIP_COMPACT = ['saldoanterior', 'saldo'];
+  const DATE_RE = /^\d{2}\/\d{2}\/\d{4}$/;
+  const res = [];
+  for (let i = hdrIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    const dateRaw = (row[di] || '').trim();
+    if (!DATE_RE.test(dateRaw)) continue;
+    const desc = (row[li] || '').trim();
+    const ndCompact = norm(desc).replace(/\s+/g,'');
+    if (SKIP_COMPACT.includes(ndCompact)) continue;
+    const date = pDate(dateRaw);
+    if (!date) continue;
+    const amount = parseBBValue(row[vi]);
+    if (!amount) continue;
+    res.push({ date, desc, memo: desc, amount, saldo: null, category: '' });
+  }
+  return res;
+}
+
+function parseBankBradesco(buffer) {
+  let text;
+  try { text = new TextDecoder('utf-8').decode(buffer).replace(/^\uFEFF/, ''); }
+  catch(e) { text = new TextDecoder('latin1').decode(buffer); }
+
+  const rows = text.split(/\r?\n/).filter(l => l.length).map(l => l.split(';'));
+
+  // Acha a linha de cabeçalho pelo TÍTULO das colunas (não pela posição) —
+  // assim continua funcionando se o Bradesco reordenar as colunas.
+  let hdrIdx = -1, di = -1, li = -1, ci = -1, deI = -1, si = -1;
+  for (let i = 0; i < Math.min(rows.length, 6); i++) {
+    const r = rows[i].map(c => norm(String(c)));
+    const _di  = r.findIndex(c => c === 'data' || c.startsWith('data'));
+    const _li  = r.findIndex(c => c.includes('historico'));
+    const _ci  = r.findIndex(c => c.includes('credito'));
+    const _deI = r.findIndex(c => c.includes('debito'));
+    if (_di >= 0 && _li >= 0 && _ci >= 0 && _deI >= 0) {
+      hdrIdx = i; di = _di; li = _li; ci = _ci; deI = _deI;
+      si = r.findIndex(c => c.includes('saldo'));
+      break;
+    }
+  }
+  if (hdrIdx < 0) return [];
+
+  // Marcadores conhecidos de fim da seção de movimentações — encerra a
+  // leitura ao encontrar qualquer um deles, mas tolera linhas em branco ou
+  // malformadas NO MEIO dos dados (só pula, não encerra).
+  const STOP_MARKERS = ['filtro de resultados', 'ultimos lancamentos', 'nao ha lancamentos', 'os dados acima', 'total;'];
+  const DATE_RE = /^\d{2}\/\d{2}\/\d{4}$/;
+  const res = [];
+  for (let i = hdrIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    const rowNorm = norm(row.join(';'));
+    if (STOP_MARKERS.some(m => rowNorm.includes(m))) break;
+
+    const dateRaw = (row[di] || '').trim();
+    if (!DATE_RE.test(dateRaw)) continue; // linha em branco/metadado — pula, não é necessariamente fim
+    const date = pDate(dateRaw);
+    if (!date) continue;
+
+    const desc = (row[li] || '').trim();
+    const creditoRaw = (row[ci] || '').trim();
+    const debitoRaw  = (row[deI] || '').trim();
+    const credito = creditoRaw ? (pVal(creditoRaw) || 0) : 0;
+    const debito  = debitoRaw  ? (pVal(debitoRaw)  || 0) : 0;
+    const amount = credito - debito;
+    if (!amount) continue; // linha de abertura/sem movimento real (ex: "COD. LANC. 0")
+
+    const saldo = si >= 0 && row[si] ? pVal(row[si]) : null;
+    res.push({ date, desc, memo: desc, amount, saldo, category: '' });
+  }
+  return res;
+}
+
 function parseBankXP(buffer) {
   // Try UTF-8 first, fall back to latin1 (XP sometimes exports latin1)
   let text;
@@ -4841,14 +5116,14 @@ async function initBrokerDropdown() {
 
 function renderBrokerDropdown() {
   const builtin = G('import-dd-broker-builtin');
-  if (builtin) builtin.innerHTML = BUILTIN_BROKERS.map(p => {
-    const ov = _builtinOverrides[p.id] || {};
-    return ddItemHtml({ ...p, name: ov.name||p.name, logoUrl: ov.logoUrl||p.logoUrl, sort_order: ov.sort_order??p.sort_order }, 'broker', true);
-  }).sort((a,b) => 0).join(''); // already sorted by getBuiltinDefs logic
+  if (builtin) builtin.innerHTML = getBuiltinDefs(BUILTIN_BROKERS).map(p => ddItemHtml(p, 'broker', true)).join('');
 
   const custom = G('import-dd-broker-custom');
-  if (custom) custom.innerHTML = _customBrokerParsers.map(p =>
-    ddItemHtml({...p, fileType: p.config?.fileType}, 'broker', false)).join('');
+  if (custom) {
+    const items = (_customBrokerParsers||[]).map(p => ({ ...p, _manualOrder: p.sort_order != null }));
+    custom.innerHTML = sortImportItems(items)
+      .map(p => ddItemHtml({...p, fileType: p.config?.fileType}, 'broker', false)).join('');
+  }
 }
 
 function toggleBrokerDropdown() {
@@ -7309,7 +7584,7 @@ function renderWizardStep1() {
       <span id="wizard-file-name" style="font-size:12px;color:var(--text3)"></span>
     </div>
     <input type="file" id="wizard-file-input" style="display:none"
-      accept=".csv,.CSV,.xls,.xlsx,.XLS,.XLSX,.ofx,.OFX,.pdf,.PDF"
+      accept="${ALL_IMPORT_EXT}"
       onchange="onWizardFileSelected(event)">
     <div id="wizard-step1-result" style="margin-top:12px"></div>`;
   G('custom-parser-footer').innerHTML = `
@@ -15776,6 +16051,7 @@ async function openPatAssetModal(id) {
   if (G('pat-mutuo-value')) { setupCurrencyInput(G('pat-mutuo-value')); G('pat-mutuo-value').setValue(null); }
   if (G('pat-mutuo-juros')) G('pat-mutuo-juros').value = '';
   if (G('pat-mutuo-base')) G('pat-mutuo-base').value = 'mensal';
+  if (G('pat-mutuo-index-type')) G('pat-mutuo-index-type').value = 'none';
   if (G('pat-mutuo-juros-tipo')) G('pat-mutuo-juros-tipo').value = 'simples';
   if (G('pat-mutuo-mes-incidencia')) G('pat-mutuo-mes-incidencia').value = String(curMo);
   if (G('pat-mutuo-indefinida')) G('pat-mutuo-indefinida').checked = true;
@@ -15845,6 +16121,7 @@ async function openPatAssetModal(id) {
       if (a.asset_type === 'mutuo') {
         if (G('pat-mutuo-juros')) G('pat-mutuo-juros').value = a.mutuo_taxa_juros ?? '';
         if (G('pat-mutuo-base'))  G('pat-mutuo-base').value  = a.mutuo_indexador_base || 'mensal';
+        if (G('pat-mutuo-index-type')) G('pat-mutuo-index-type').value = a.mutuo_index_type || 'none';
         patMutuoBaseChanged();
         if (G('pat-mutuo-mes-incidencia') && a.mutuo_mes_incidencia) G('pat-mutuo-mes-incidencia').value = String(a.mutuo_mes_incidencia);
         if (G('pat-mutuo-indefinida')) G('pat-mutuo-indefinida').checked = !a.mutuo_data_termino;
@@ -15929,6 +16206,15 @@ function patAssetTypeChanged() {
   } else if (G('pat-acquisition-type')) {
     patAcquisitionTypeChanged(); // restaura a seção certa conforme a forma de aquisição atual
   }
+
+  // "Venda/Saída" não se aplica a mútuo no mesmo sentido — é "encerramento"
+  // (o mútuo acaba e o dinheiro emprestado volta), não uma venda de bem.
+  const saleTitle = G('pat-sale-section-title');
+  const saleMonthLbl = G('pat-sale-month-label');
+  const saleValueLbl = G('pat-sale-value-label');
+  if (saleTitle) saleTitle.textContent = isMutuo ? 'Encerramento do mútuo (opcional)' : 'Venda / Saída (opcional)';
+  if (saleMonthLbl) saleMonthLbl.textContent = isMutuo ? 'Mês de encerramento' : 'Mês de venda';
+  if (saleValueLbl) saleValueLbl.textContent = isMutuo ? 'Valor devolvido' : 'Valor de venda';
 }
 
 // Mostra o "mês de incidência" só quando o indexador incide anualmente —
@@ -15989,6 +16275,7 @@ async function savePatAsset() {
   const mutuoTermino = (isMutuoSave && !mutuoIndefinida) ? (G('pat-mutuo-termino')?.value || null) : null;
   const mutuoSyncAccountId = isMutuoSave ? (parseInt(G('pat-mutuo-sync-account')?.value) || null) : null;
   const mutuoJurosTipo = isMutuoSave ? (G('pat-mutuo-juros-tipo')?.value || 'simples') : null;
+  const mutuoIndexType = isMutuoSave ? (G('pat-mutuo-index-type')?.value || 'none') : null;
   // Mês/valor do mútuo vêm de campos próprios (não dos campos de "à vista",
   // que ficam escondidos pra este tipo) — mesma lógica de histórico/compra,
   // só que com os valores certos.
@@ -16005,7 +16292,7 @@ async function savePatAsset() {
 
   // 1. Save asset record
   const result = await ff.patAssetSave({ id, name, asset_type: type, trend, sold_month: soldMonth, sold_value: soldValue, hidden, financed, financing_total, ownership_pct: ownershipPct,
-    mutuo_taxa_juros: mutuoJuros, mutuo_indexador_base: mutuoBase, mutuo_mes_incidencia: mutuoMesIncidencia, mutuo_data_termino: mutuoTermino, mutuo_sync_account_id: mutuoSyncAccountId, mutuo_juros_tipo: mutuoJurosTipo });
+    mutuo_taxa_juros: mutuoJuros, mutuo_indexador_base: mutuoBase, mutuo_mes_incidencia: mutuoMesIncidencia, mutuo_data_termino: mutuoTermino, mutuo_sync_account_id: mutuoSyncAccountId, mutuo_juros_tipo: mutuoJurosTipo, mutuo_index_type: mutuoIndexType });
   const assetId = result.id;
 
   // 2a. Save financing installments; set asset value = financing_total at first installment month

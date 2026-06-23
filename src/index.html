@@ -2192,57 +2192,6 @@ select.inp option{background:var(--bg2);}
           </div>
         </div>
 
-        <!-- Histórico de movimentações (sempre visível) -->
-        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
-        <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Histórico mensal — Movimentações</div>
-        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Coluna de movimentação aceita valores negativos (saída de caixa) e positivos (entrada). Tipos que afetam o valor do ativo atualizam automaticamente a posição.</div>
-        <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden;margin-bottom:8px">
-          <div style="display:grid;grid-template-columns:110px 1fr 150px 120px 120px 36px;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
-            <span>Data</span><span>Tipo</span><span>Conta</span>
-            <span style="text-align:right;padding-right:4px">Valor ativo (R$)</span>
-            <span style="text-align:right;padding-right:4px">Movimentação</span>
-            <span></span>
-          </div>
-          <div id="pat-tx-table" style="max-height:320px;overflow-y:auto"></div>
-          <div style="padding:8px 10px;border-top:1px solid var(--border);background:var(--bg4);display:flex;gap:8px;align-items:center">
-            <button class="btn xs" onclick="patTxAddRow()">+ Adicionar linha</button>
-            <button class="btn xs" onclick="patTxRepeatLast()">↻ Repetir anterior</button>
-            <span style="font-size:11px;color:var(--text3)">Deixe "Valor ativo" em branco para usar o cálculo automático por IPCA</span>
-          </div>
-        </div>
-
-        <!-- Venda / Saída -->
-        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
-        <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px">Venda / Saída (opcional)</div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap">
-          <div class="field" style="margin:0;flex:1;min-width:120px">
-            <label class="lbl">Mês de venda</label>
-            <div style="display:flex;gap:6px">
-              <input class="inp" id="pat-asset-sold-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px" onchange="patUpdateSaleSection()">
-              <input class="inp" id="pat-asset-sold-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:90px" onchange="patUpdateSaleSection()">
-            </div>
-          </div>
-          <div class="field" style="margin:0;flex:1;min-width:120px">
-            <label class="lbl">Valor de venda</label>
-            <input class="inp" id="pat-asset-sold-value" type="number" step="0.01" placeholder="0,00" onchange="patUpdateSaleSection()">
-          </div>
-        </div>
-        <div id="pat-sale-payment-section" style="display:none;margin-top:10px">
-          <div class="field" style="margin:0;max-width:320px">
-            <label class="lbl">Forma de pagamento</label>
-            <select class="inp" id="pat-sale-payment-type" onchange="patUpdateSaleSection()">
-              <option value="vista">À vista</option>
-              <option value="parcelado">Parcelado</option>
-            </select>
-          </div>
-          <div id="pat-sale-installments-hint" class="info-box" style="display:none;margin-top:8px;font-size:12px">
-            Adicione as parcelas do recebimento na tabela de Movimentações, usando o tipo <strong>"🔴 Parcela de venda"</strong>.
-          </div>
-          <div id="pat-sale-vista-hint" class="info-box" style="margin-top:8px;font-size:12px">
-            Ao registrar o recebimento na conta bancária, vincule a transação a este ativo com o tipo <strong>"🔴 Venda"</strong>.
-          </div>
-        </div>
-
         <!-- Seção: Mútuo (empréstimo concedido a terceiros) -->
         <div id="pat-section-mutuo" style="display:none;margin-top:12px">
           <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
@@ -2274,16 +2223,26 @@ select.inp option{background:var(--bg2);}
               <input class="inp" id="pat-mutuo-juros" type="number" step="0.01" placeholder="Ex: 1,5">
             </div>
             <div class="field" style="margin:0">
-              <label class="lbl">Indexador — incidência</label>
+              <label class="lbl">Indexador (correção monetária)<span title="Se escolhido, o saldo do mútuo é corrigido automaticamente por este índice a cada incidência, ANTES de calcular os juros sobre o valor já corrigido — igual a um contrato 'corrigido pelo índice + juros de X%'. Deixe em 'Nenhum' pra um mútuo só com taxa fixa, sem correção monetária." style="cursor:help;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:1px solid var(--border);border-radius:50%;font-size:10px;color:var(--text3);margin-left:4px">?</span></label>
+              <select class="inp" id="pat-mutuo-index-type">
+                <option value="none">Nenhum (só taxa fixa)</option>
+                <option value="IPCA">IPCA</option>
+                <option value="INCC">INCC</option>
+                <option value="IGP-M">IGP-M</option>
+                <option value="TR">TR (Taxa Referencial)</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+            <div class="field" style="margin:0">
+              <label class="lbl">Periodicidade de incidência</label>
               <select class="inp" id="pat-mutuo-base" onchange="patMutuoBaseChanged()">
                 <option value="mensal">Mensal</option>
                 <option value="anual">Anual</option>
               </select>
             </div>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
             <div class="field" id="pat-mutuo-mes-incidencia-field" style="margin:0;display:none">
-              <label class="lbl">Mês de incidência do indexador</label>
+              <label class="lbl">Mês de incidência</label>
               <select class="inp" id="pat-mutuo-mes-incidencia">
                 <option value="1">Janeiro</option><option value="2">Fevereiro</option><option value="3">Março</option>
                 <option value="4">Abril</option><option value="5">Maio</option><option value="6">Junho</option>
@@ -2291,6 +2250,8 @@ select.inp option{background:var(--bg2);}
                 <option value="10">Outubro</option><option value="11">Novembro</option><option value="12">Dezembro</option>
               </select>
             </div>
+          </div>
+          <div style="margin-top:8px">
             <div class="field" id="pat-mutuo-sync-account-field" style="margin:0">
               <label class="lbl">Conta vinculada (lançamento dos juros futuros)</label>
               <select class="inp" id="pat-mutuo-sync-account"><option value="">— Não sincronizar —</option></select>
@@ -2308,6 +2269,57 @@ select.inp option{background:var(--bg2);}
           </div>
           <div class="info-box" id="pat-mutuo-info-box" style="margin-top:8px;font-size:12px">
             Os juros futuros previstos são lançados automaticamente como entrada na conta vinculada (não conferidos), mês a mês até a data de término (ou continuamente, se indefinido).
+          </div>
+        </div>
+
+        <!-- Histórico de movimentações (sempre visível) -->
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+        <div style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Histórico mensal — Movimentações</div>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Coluna de movimentação aceita valores negativos (saída de caixa) e positivos (entrada). Tipos que afetam o valor do ativo atualizam automaticamente a posição.</div>
+        <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden;margin-bottom:8px">
+          <div style="display:grid;grid-template-columns:110px 1fr 150px 120px 120px 36px;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
+            <span>Data</span><span>Tipo</span><span>Conta</span>
+            <span style="text-align:right;padding-right:4px">Valor ativo (R$)</span>
+            <span style="text-align:right;padding-right:4px">Movimentação</span>
+            <span></span>
+          </div>
+          <div id="pat-tx-table" style="max-height:320px;overflow-y:auto"></div>
+          <div style="padding:8px 10px;border-top:1px solid var(--border);background:var(--bg4);display:flex;gap:8px;align-items:center">
+            <button class="btn xs" onclick="patTxAddRow()">+ Adicionar linha</button>
+            <button class="btn xs" onclick="patTxRepeatLast()">↻ Repetir anterior</button>
+            <span style="font-size:11px;color:var(--text3)">Deixe "Valor ativo" em branco para usar o cálculo automático por IPCA</span>
+          </div>
+        </div>
+
+        <!-- Venda / Saída (relabeada para "Encerramento do mútuo" quando o tipo é Mútuo) -->
+        <hr style="border:none;border-top:1px solid var(--border);margin:14px 0">
+        <div id="pat-sale-section-title" style="font-size:12px;font-weight:600;color:var(--text3);margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px">Venda / Saída (opcional)</div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap">
+          <div class="field" style="margin:0;flex:1;min-width:120px">
+            <label class="lbl" id="pat-sale-month-label">Mês de venda</label>
+            <div style="display:flex;gap:6px">
+              <input class="inp" id="pat-asset-sold-m" type="number" min="1" max="12" placeholder="Mês" style="width:70px" onchange="patUpdateSaleSection()">
+              <input class="inp" id="pat-asset-sold-y" type="number" min="2000" max="2100" placeholder="Ano" style="width:90px" onchange="patUpdateSaleSection()">
+            </div>
+          </div>
+          <div class="field" style="margin:0;flex:1;min-width:120px">
+            <label class="lbl" id="pat-sale-value-label">Valor de venda</label>
+            <input class="inp" id="pat-asset-sold-value" type="number" step="0.01" placeholder="0,00" onchange="patUpdateSaleSection()">
+          </div>
+        </div>
+        <div id="pat-sale-payment-section" style="display:none;margin-top:10px">
+          <div class="field" style="margin:0;max-width:320px">
+            <label class="lbl">Forma de pagamento</label>
+            <select class="inp" id="pat-sale-payment-type" onchange="patUpdateSaleSection()">
+              <option value="vista">À vista</option>
+              <option value="parcelado">Parcelado</option>
+            </select>
+          </div>
+          <div id="pat-sale-installments-hint" class="info-box" style="display:none;margin-top:8px;font-size:12px">
+            Adicione as parcelas do recebimento na tabela de Movimentações, usando o tipo <strong>"🔴 Parcela de venda"</strong>.
+          </div>
+          <div id="pat-sale-vista-hint" class="info-box" style="margin-top:8px;font-size:12px">
+            Ao registrar o recebimento na conta bancária, vincule a transação a este ativo com o tipo <strong>"🔴 Venda"</strong>.
           </div>
         </div>
 
