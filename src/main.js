@@ -11,16 +11,44 @@ const syncPull = require('./sync/sync-pull');
 // Estado do sync (em memória)
 let _syncRunning = false;
 
-// Settings always stored in original userData (not redirected)
-function getSettingsPath() {
+// ── Multi-usuário (mesmo desktop) ──
+// Cada usuário cadastrado tem seu próprio conjunto de arquivos (banco,
+// configurações, índices, etc.) — diferenciados por um sufixo no nome do
+// arquivo. O usuário "padrão" (id=null, o que já existia antes desta
+// funcionalidade) continua usando exatamente os mesmos nomes de arquivo de
+// sempre — só usuários adicionais ganham o sufixo. Isso significa que quem
+// já usa o app com um único usuário não precisa de nenhuma migração.
+let _currentUserId = null;
+
+function getUserRegistryPath() {
   const base = app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..');
-  return path.join(base, '_settings.json');
+  return path.join(base, '_users_registry.json');
 }
-function loadSettings() {
-  try { return JSON.parse(fs.readFileSync(getSettingsPath(), 'utf8')); } catch(e) { return {}; }
+function loadUserRegistry() {
+  try {
+    return JSON.parse(fs.readFileSync(getUserRegistryPath(), 'utf8'));
+  } catch(e) {
+    // Primeira vez: registra implicitamente o usuário "padrão" (arquivos
+    // sem sufixo) — não precisa de nenhuma ação do usuário pra continuar
+    // funcionando como sempre funcionou.
+    return { users: [{ id: null, name: 'Principal' }] };
+  }
 }
-function saveSettings(s) {
-  fs.writeFileSync(getSettingsPath(), JSON.stringify(s, null, 2));
+function saveUserRegistry(r) {
+  fs.writeFileSync(getUserRegistryPath(), JSON.stringify(r, null, 2));
+}
+
+// Settings always stored in original userData (not redirected)
+function getSettingsPath(forUserId) {
+  const uid = forUserId !== undefined ? forUserId : _currentUserId;
+  const base = app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..');
+  return path.join(base, uid ? `_settings_${uid}.json` : '_settings.json');
+}
+function loadSettings(forUserId) {
+  try { return JSON.parse(fs.readFileSync(getSettingsPath(forUserId), 'utf8')); } catch(e) { return {}; }
+}
+function saveSettings(s, forUserId) {
+  fs.writeFileSync(getSettingsPath(forUserId), JSON.stringify(s, null, 2));
 }
 
 function getImportStatePath() {
@@ -38,7 +66,7 @@ function getDbPath() {
     ? settings.dataDir
     : (app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..'));
   if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true });
-  return path.join(base, 'cruzeiro_data.db');
+  return path.join(base, _currentUserId ? `cruzeiro_data_${_currentUserId}.db` : 'cruzeiro_data.db');
 }
 
 let SQL, db, win;
@@ -473,6 +501,7 @@ async function initDB() {
   // v4.5.9 / v4.7.2: late feature columns (also re-applied after DB decryption)
   ensureLateColumns();
   _backfillMissingFinancingTx();
+  _backfillMissingCompraTx();
   save();
 }
 
@@ -532,6 +561,7 @@ function ensureLateColumns() {
     'ALTER TABLE pat_assets ADD COLUMN mutuo_sync_account_id INTEGER',
     "ALTER TABLE pat_assets ADD COLUMN mutuo_juros_tipo TEXT DEFAULT 'simples'",
     "ALTER TABLE pat_assets ADD COLUMN mutuo_index_type TEXT DEFAULT 'none'",
+    'ALTER TABLE pat_assets ADD COLUMN mutuo_dia_incidencia INTEGER DEFAULT 1',
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance REAL',
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance_month TEXT',
     // Mês de aquisição (compra) — distinto do mês da 1ª parcela (first_month),
@@ -585,6 +615,36 @@ function _backfillMissingFinancingTx() {
     });
     if (missing.length) console.log(`[financing backfill] ${missing.length} movimentação(ões) de parcela paga restauradas`);
   } catch(e) { console.warn('[financing backfill] falhou:', e.message); }
+}
+
+// Acha o mês manual MAIS ANTIGO de cada ativo (a compra/principal) que não
+// tenha NENHUM pat_transactions registrado pra aquele mês, e cria o
+// lançamento 'compra' que faltou — mesmo valor do histórico. Sem isso, a
+// tabela de movimentações mostra uma linha "fantasma" (sem id, sem
+// total_value, só com o valor do histórico pra exibição) cujo tipo nunca
+// fica salvo de fato, por mais que o usuário troque o tipo na tela — porque
+// ela nunca tem um total_value pra disparar o salvamento real.
+function _backfillMissingCompraTx(assetId) {
+  try {
+    const missing = all(`
+      SELECT ph.asset_id, ph.month, ph.value
+      FROM pat_history ph
+      WHERE ph.manual = 1
+        AND ph.month = (SELECT MIN(month) FROM pat_history WHERE asset_id = ph.asset_id AND manual = 1)
+        AND ph.value > 0
+        ${assetId ? 'AND ph.asset_id = ?' : ''}
+        AND NOT EXISTS (
+          SELECT 1 FROM pat_transactions pt
+          WHERE pt.asset_id = ph.asset_id AND substr(pt.month,1,7) = substr(ph.month,1,7)
+        )
+    `, assetId ? [assetId] : []);
+    missing.forEach(row => {
+      run(`INSERT INTO pat_transactions (asset_id, month, tx_type, total_value, notes)
+           VALUES (?, ?, 'compra', ?, ?)`,
+        [row.asset_id, row.month, row.value, 'Valor de compra do ativo (registro retroativo)']);
+    });
+    if (missing.length) { save(); console.log(`[compra backfill] ${missing.length} movimentação(ões) de compra restauradas`); }
+  } catch(e) { console.warn('[compra backfill] falhou:', e.message); }
 }
 
 // ── DB HELPERS ──
@@ -1976,6 +2036,51 @@ function writeEmergencyBackup(plainBuf) {
 
 let loginWin = null;
 
+let selectUserWin = null;
+function createUserSelectWindow(users) {
+  selectUserWin = new BrowserWindow({
+    width: 420, height: 420, resizable: false, center: true,
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
+    title: 'Cruzeiro — Selecionar usuário',
+    webPreferences: { preload: path.join(__dirname,'preload.js'), contextIsolation:true, nodeIntegration:false },
+    frame: true, show: false,
+  });
+  const optionsHtml = users.map(u => `<option value="${u.id ?? ''}">${u.name.replace(/[<>&"]/g,'')}</option>`).join('');
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:system-ui,sans-serif;background:#1a1f2e;color:#e2e8f0;display:flex;align-items:center;justify-content:center;height:100vh;padding:32px}
+    .card{background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:32px;width:320px}
+    .logo{font-size:32px;font-weight:900;color:#f9a825;text-align:center;margin-bottom:4px}
+    .appname{font-size:16px;font-weight:700;color:#60a5fa;text-align:center;margin-bottom:4px}
+    .tagline{font-size:11px;color:#64748b;text-align:center;margin-bottom:24px}
+    label{font-size:12px;color:#94a3b8;display:block;margin-bottom:4px}
+    select{width:100%;padding:10px 12px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:14px;outline:none;margin-bottom:16px}
+    select:focus{border-color:#3b82f6}
+    .btn{width:100%;padding:10px;border-radius:8px;border:none;background:#004d40;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+    .btn:hover{background:#00695c}
+  </style></head><body>
+  <div class="card">
+    <div class="logo">C$</div>
+    <div class="appname">Cruzeiro</div>
+    <div class="tagline">Quem está usando o app agora?</div>
+    <label>Usuário</label>
+    <select id="user-sel">${optionsHtml}</select>
+    <button class="btn" onclick="continuar()">Continuar</button>
+  </div>
+  <script>
+    async function continuar() {
+      const id = document.getElementById('user-sel').value || null;
+      await window.ff?.usersSelect({ id });
+    }
+  </script></body></html>`;
+  const tmpPath = path.join(app.getPath('temp'), 'ff_select_user.html');
+  fs.writeFileSync(tmpPath, html);
+  selectUserWin.loadFile(tmpPath);
+  selectUserWin.once('ready-to-show', () => selectUserWin.show());
+  selectUserWin.on('closed', () => { if (!win && !loginWin && !_loggingIn) app.quit(); });
+}
+
 function createLoginWindow() {
   loginWin = new BrowserWindow({
     width: 460, height: 640, resizable: false, center: true,
@@ -2183,7 +2288,7 @@ function createWindow(showImmediately = false) {
   win.on('closed', () => { if (loginWin) loginWin.close(); });
 }
 
-app.whenReady().then(async () => {
+async function mainStartupFlow() {
   try { await initDB(); } catch(e) { dialog.showErrorBox('Erro ao iniciar banco de dados', e.message); app.quit(); return; }
   if (!_dbPendingDecrypt) doBackup();
   // Only run these if DB is fully loaded (not pending decryption)
@@ -2257,7 +2362,19 @@ app.whenReady().then(async () => {
     createWindow();
     setupAutoUpdater();
   }
+}
+
+app.whenReady().then(async () => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length===0) createWindow(); });
+  // Só mostra a tela de seleção de usuário se houver MAIS de um cadastrado —
+  // com 0 ou 1, segue exatamente como sempre funcionou, sem tela extra.
+  const registry = loadUserRegistry();
+  if (registry.users.length <= 1) {
+    _currentUserId = registry.users[0]?.id ?? null;
+    await mainStartupFlow();
+  } else {
+    createUserSelectWindow(registry.users);
+  }
 });
 
 // Sync final ao fechar o app (garante que últimas alterações cheguem ao mobile)
@@ -2349,6 +2466,11 @@ ipcMain.handle('update:install', () => {
 });
 
 ipcMain.handle('app:version', () => app.getVersion());
+
+ipcMain.handle('app:relaunch', () => {
+  app.relaunch();
+  app.exit(0);
+});
 
 // ── IMPORT DEFAULTS (persist per-bank account selection) ──
 ipcMain.handle('import-defaults:get', () => {
@@ -2751,7 +2873,7 @@ ipcMain.handle('pat:assets-list', () =>
 );
 
 ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, sold_month, sold_value, hidden, financed, financing_total, ownership_pct,
-  mutuo_taxa_juros, mutuo_indexador_base, mutuo_mes_incidencia, mutuo_data_termino, mutuo_sync_account_id, mutuo_juros_tipo, mutuo_index_type }) => {
+  mutuo_taxa_juros, mutuo_indexador_base, mutuo_mes_incidencia, mutuo_data_termino, mutuo_sync_account_id, mutuo_juros_tipo, mutuo_index_type, mutuo_dia_incidencia }) => {
   const ownPct = (asset_type === 'societario' && ownership_pct != null && ownership_pct !== '') ? parseFloat(ownership_pct) : null;
   const isMutuo = asset_type === 'mutuo';
   const mJuros   = isMutuo ? (parseFloat(mutuo_taxa_juros) || 0) : null;
@@ -2761,11 +2883,12 @@ ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, 
   const mConta   = isMutuo ? (mutuo_sync_account_id || null) : null;
   const mTipo    = isMutuo ? (mutuo_juros_tipo || 'simples') : null;
   const mIndex   = isMutuo ? (mutuo_index_type || 'none') : null;
+  const mDia     = isMutuo ? (Math.min(31, Math.max(1, parseInt(mutuo_dia_incidencia) || 1))) : null;
   if (id) {
     run(`UPDATE pat_assets SET name=?,asset_type=?,trend=?,sort_order=?,sold_month=?,sold_value=?,hidden=?,financed=?,financing_total=?,ownership_pct=?,
-      mutuo_taxa_juros=?,mutuo_indexador_base=?,mutuo_mes_incidencia=?,mutuo_data_termino=?,mutuo_sync_account_id=?,mutuo_juros_tipo=?,mutuo_index_type=? WHERE id=?`,
+      mutuo_taxa_juros=?,mutuo_indexador_base=?,mutuo_mes_incidencia=?,mutuo_data_termino=?,mutuo_sync_account_id=?,mutuo_juros_tipo=?,mutuo_index_type=?,mutuo_dia_incidencia=? WHERE id=?`,
       [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, ownPct,
-       mJuros, mBase, mMes, mFim, mConta, mTipo, mIndex, id]);
+       mJuros, mBase, mMes, mFim, mConta, mTipo, mIndex, mDia, id]);
     if (sold_month) {
       db.run('DELETE FROM pat_history WHERE asset_id=? AND month>? AND manual=0', [id, sold_month]);
       save();
@@ -2774,9 +2897,9 @@ ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, 
     return { id };
   } else {
     const newId = run(`INSERT INTO pat_assets (name,asset_type,trend,sort_order,sold_month,sold_value,hidden,financed,financing_total,ownership_pct,
-      mutuo_taxa_juros,mutuo_indexador_base,mutuo_mes_incidencia,mutuo_data_termino,mutuo_sync_account_id,mutuo_juros_tipo,mutuo_index_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      mutuo_taxa_juros,mutuo_indexador_base,mutuo_mes_incidencia,mutuo_data_termino,mutuo_sync_account_id,mutuo_juros_tipo,mutuo_index_type,mutuo_dia_incidencia) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, ownPct,
-       mJuros, mBase, mMes, mFim, mConta, mTipo, mIndex]);
+       mJuros, mBase, mMes, mFim, mConta, mTipo, mIndex, mDia]);
     const resolvedId = newId || first('SELECT id FROM pat_assets WHERE name=? ORDER BY id DESC LIMIT 1', [name])?.id;
     if (isMutuo && resolvedId) syncMutuoToBank(resolvedId);
     return { id: resolvedId };
@@ -3488,6 +3611,10 @@ function syncMutuoToBank(assetId) {
   const mesIncidencia = asset.mutuo_mes_incidencia;
   const dataTermino = asset.mutuo_data_termino; // 'YYYY-MM' ou null (indefinida)
   const jurosTipo = asset.mutuo_juros_tipo || 'simples';
+  const diaIncidencia = asset.mutuo_dia_incidencia || 1;
+  // Dia configurado, mas nunca além do último dia real do mês (ex: dia 31
+  // configurado cai no dia 30 em abril, ou 28/29 em fevereiro).
+  const diaDoMes = (y, mo) => Math.min(diaIncidencia, new Date(y, mo, 0).getDate());
 
   const now = new Date();
   const todayMonth = now.toISOString().slice(0,7);
@@ -3523,14 +3650,19 @@ function syncMutuoToBank(assetId) {
         const juros = balance * taxa;
         if (jurosTipo === 'compostos') {
           balance = balance + juros;
-        } else if (monthStr >= todayMonth && juros > 0.005) {
-          // SIMPLES: paga agora — nunca cria/atualiza retroativo.
-          if (asset.mutuo_sync_account_id) {
-            const dueDate = `${monthStr}-01`;
-            const existingTx = first('SELECT id, amount, cleared FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, monthStr]);
+        } else if (juros > 0.005) {
+          // SIMPLES: o juro deste período entra no fluxo nominal do ativo
+          // (pat_transactions) MESMO SE FOR PASSADO — um mútuo antigo
+          // precisa contar os juros pretéritos pra TIR/rentabilidade saírem
+          // corretas. A transação BANCÁRIA, porém, nunca é retroativa: criar
+          // uma transação "do passado" fabricaria histórico real de conta
+          // que nunca existiu de fato.
+          if (asset.mutuo_sync_account_id && monthStr >= todayMonth) {
+            const dueDate = `${monthStr}-${String(diaDoMes(y, mo)).padStart(2,'0')}`;
+            const existingTx = first('SELECT id, amount, cleared, date FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, monthStr]);
             if (existingTx) {
-              if (existingTx.cleared !== 1 && Math.abs((existingTx.amount ?? 0) - juros) > 0.005) {
-                run('UPDATE transactions SET amount=? WHERE id=?', [juros, existingTx.id]);
+              if (existingTx.cleared !== 1 && (Math.abs((existingTx.amount ?? 0) - juros) > 0.005 || existingTx.date !== dueDate)) {
+                run('UPDATE transactions SET amount=?, date=? WHERE id=?', [juros, dueDate, existingTx.id]);
                 updated++;
               }
             } else {
@@ -3540,25 +3672,33 @@ function syncMutuoToBank(assetId) {
               created++;
             }
           }
+          // pat_transactions sempre recebe account_id (mesmo pra meses
+          // passados, sem transação bancária real) — é o que faz a tabela
+          // de movimentações do ativo mostrar a conta vinculada em vez de
+          // "(sem conta)".
+          const newPatMonth = `${monthStr}-${String(diaDoMes(y, mo)).padStart(2,'0')}`;
           const existingPatTx = first(
-            `SELECT id, total_value FROM pat_transactions WHERE asset_id=? AND substr(month,1,7)=? AND tx_type='juros_mutuo'`,
+            `SELECT id, total_value, account_id, month FROM pat_transactions WHERE asset_id=? AND substr(month,1,7)=? AND tx_type='juros_mutuo'`,
             [assetId, monthStr]);
           if (existingPatTx) {
-            if (Math.abs(existingPatTx.total_value - juros) > 0.005) {
-              run('UPDATE pat_transactions SET total_value=? WHERE id=?', [juros, existingPatTx.id]);
+            if (Math.abs(existingPatTx.total_value - juros) > 0.005 || existingPatTx.account_id !== asset.mutuo_sync_account_id || existingPatTx.month !== newPatMonth) {
+              run('UPDATE pat_transactions SET total_value=?, account_id=?, month=? WHERE id=?', [juros, asset.mutuo_sync_account_id, newPatMonth, existingPatTx.id]);
             }
           } else {
-            run(`INSERT INTO pat_transactions (asset_id, month, tx_type, total_value, notes) VALUES (?,?,?,?,?)`,
-              [assetId, `${monthStr}-01`, 'juros_mutuo', juros, 'Juros previstos (mútuo, simples)']);
+            run(`INSERT INTO pat_transactions (asset_id, month, tx_type, total_value, notes, account_id) VALUES (?,?,?,?,?,?)`,
+              [assetId, newPatMonth, 'juros_mutuo', juros, 'Juros previstos (mútuo, simples)', asset.mutuo_sync_account_id]);
           }
         }
       }
     }
 
-    // Posição (saldo) deste mês — só regrava a partir do mês atual em
-    // diante; meses passados mantêm o que já foi de fato registrado (nunca
-    // sobrescreve histórico encerrado/manual).
-    if (monthStr >= todayMonth) {
+    // Posição (saldo) deste mês — inclui meses PASSADOS de propósito: um
+    // mútuo cadastrado com início antigo precisa que o histórico inteiro
+    // siga o modelo do próprio mútuo (taxa + indexador), não a tendência
+    // genérica de IPCA usada pros demais bens (ver pat:auto-project, que
+    // agora pula ativos do tipo mútuo de propósito). Continua nunca
+    // sobrescrevendo um valor que o usuário tenha definido manualmente.
+    {
       const existing = first('SELECT id, value, manual FROM pat_history WHERE asset_id=? AND month=?', [assetId, monthStr]);
       if (!existing) {
         run('INSERT INTO pat_history (asset_id, month, value, manual) VALUES (?,?,?,0)', [assetId, monthStr, balance]);
@@ -4347,9 +4487,10 @@ const PAT_TX_LABELS = {
   venda: 'Venda', venda_parcela: 'Parcela de venda',
 };
 
-ipcMain.handle('pat:tx-list', (_, { assetId }) =>
-  all('SELECT * FROM pat_transactions WHERE asset_id=? ORDER BY month, id', [assetId])
-);
+ipcMain.handle('pat:tx-list', (_, { assetId }) => {
+  _backfillMissingCompraTx(assetId);
+  return all('SELECT * FROM pat_transactions WHERE asset_id=? ORDER BY month, id', [assetId]);
+});
 
 ipcMain.handle('pat:tx-save', (_, { id, assetId, month, tx_type, total_value, notes, tx_date, account_id, skipHistoryEffect }) => {
   // If updating, read the OLD values first so we can reverse their effect
@@ -4468,6 +4609,12 @@ ipcMain.handle('pat:auto-project', (_, { ipcaMonthly }) => {
   for (const asset of assets) {
     if (asset.sold_month) {
       // Don't project past the sale month
+      continue;
+    }
+    if (asset.asset_type === 'mutuo') {
+      // Mútuo tem seu próprio modelo de projeção (taxa + indexador + tipo de
+      // juros, via syncMutuoToBank) — nunca deve seguir a tendência genérica
+      // de IPCA usada pros demais bens.
       continue;
     }
     const history = all('SELECT * FROM pat_history WHERE asset_id=? ORDER BY month', [asset.id]);
@@ -4887,6 +5034,55 @@ ipcMain.handle('categories:save', (_, { categories }) => {
     if (s.categories) { delete s.categories; saveSettings(s); }
     return { ok: true };
   } catch(e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('users:list', () => {
+  const registry = loadUserRegistry();
+  return registry.users.map(u => {
+    const s = loadSettings(u.id);
+    return { id: u.id, name: u.name, hasPassword: !!(s.passwordHash || s.hasEncryptedDB) };
+  });
+});
+
+ipcMain.handle('users:add', (_, { name, password }) => {
+  const registry = loadUserRegistry();
+  const trimmed = (name||'').trim();
+  if (!trimmed) return { ok: false, error: 'Informe um nome' };
+  const id = 'usr_' + Date.now();
+  registry.users.push({ id, name: trimmed });
+  saveUserRegistry(registry);
+  if (password) {
+    const s = loadSettings(id); // {} — arquivo ainda não existe
+    s.passwordHash = hashPassword(password);
+    saveSettings(s, id);
+  }
+  return { ok: true, id };
+});
+
+ipcMain.handle('users:rename', (_, { id, name }) => {
+  const registry = loadUserRegistry();
+  const u = registry.users.find(u => u.id === id);
+  if (!u) return { ok: false };
+  u.name = (name||'').trim() || u.name;
+  saveUserRegistry(registry);
+  return { ok: true };
+});
+
+// Define qual usuário está entrando e dispara o fluxo de inicialização
+// completo pra ele — a partir daqui, getSettingsPath()/getDbPath() (sem
+// argumento) já leem/escrevem os arquivos certos automaticamente, então
+// TODA a lógica de senha/criptografia/banco continua exatamente igual,
+// sem precisar saber que existe mais de um usuário.
+ipcMain.handle('users:select', async (_, { id }) => {
+  _currentUserId = id || null;
+  _loggingIn = true;
+  if (selectUserWin) { selectUserWin.destroy(); selectUserWin = null; }
+  try {
+    await mainStartupFlow();
+  } finally {
+    _loggingIn = false;
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('settings:get', () => {
@@ -5791,7 +5987,7 @@ ipcMain.handle('settings:reset-password', async (_, { code, newPassword }) => {
   db = new SQL.Database(plainDB);
   db.run('PRAGMA foreign_keys = ON;');
   _dbPendingDecrypt = false;
-  try { ensureLateColumns(); _backfillMissingFinancingTx(); } catch(e) {}
+  try { ensureLateColumns(); _backfillMissingFinancingTx(); _backfillMissingCompraTx(); } catch(e) {}
 
   // Save re-encrypted DB
   save();
@@ -5830,7 +6026,7 @@ ipcMain.handle('settings:check-password', (_, pw) => {
       _encryptedDBBuf  = null;
       _dbPendingDecrypt = false;
       // Run deferred startup tasks that were skipped during pending decrypt
-      try { ensureLateColumns(); _backfillMissingFinancingTx(); save(); } catch(e) {}
+      try { ensureLateColumns(); _backfillMissingFinancingTx(); _backfillMissingCompraTx(); save(); } catch(e) {}
       try { migrateRecurring(); } catch(e) {}
       setImmediate(() => {
         try { const recs = all('SELECT * FROM recurring WHERE active=1'); recs.forEach(rec => syncRecurringTxns(rec)); save(); } catch(e) {}
@@ -5966,7 +6162,7 @@ ipcMain.handle('login:check', (_, pw) => {
       _encryptedDBBuf  = null;
       _dbPendingDecrypt = false;
       // Run deferred startup tasks
-      try { ensureLateColumns(); _backfillMissingFinancingTx(); save(); } catch(e) {}
+      try { ensureLateColumns(); _backfillMissingFinancingTx(); _backfillMissingCompraTx(); save(); } catch(e) {}
       try { migrateRecurring(); } catch(e) {}
       setImmediate(() => {
         try {

@@ -8,6 +8,7 @@ const api = {
   deleteAccount:  (id)    => ipcRenderer.invoke('accounts:delete', id),
   reorderAccounts:(ids)   => ipcRenderer.invoke('accounts:reorder', ids),
   appVersion:     ()      => ipcRenderer.invoke('app:version'),
+  appRelaunch:    ()      => ipcRenderer.invoke('app:relaunch'),
   installUpdate:  ()      => ipcRenderer.invoke('update:install'),
   onUpdateStatus: (cb)    => ipcRenderer.on('update-status', (_, data) => cb(data)),
   onDbError:          (cb) => ipcRenderer.on('db:error', (_, data) => cb(data)),
@@ -168,6 +169,10 @@ const api = {
   // Login window handlers
   checkPassword:       (pw)  => ipcRenderer.invoke('login:check', pw),
   loginOk:             ()    => ipcRenderer.invoke('settings:login-ok'),
+  usersList:           ()    => ipcRenderer.invoke('users:list'),
+  usersAdd:            (d)   => ipcRenderer.invoke('users:add', d),
+  usersRename:         (d)   => ipcRenderer.invoke('users:rename', d),
+  usersSelect:         (d)   => ipcRenderer.invoke('users:select', d),
   evolucaoIpcaGet:    ()   => ipcRenderer.invoke('evolucao:ipca-get'),
   evolucaoIpcaSave:   (d)  => ipcRenderer.invoke('evolucao:ipca-save', d),
   evolucaoIpcaFetch:  ()   => ipcRenderer.invoke('evolucao:ipca-fetch'),

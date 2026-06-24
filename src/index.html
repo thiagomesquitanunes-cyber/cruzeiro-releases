@@ -722,6 +722,7 @@ select.inp option{background:var(--bg2);}
             <div id="import-dd-bank-builtin"></div>
             <div id="import-dd-bank-custom"></div>
             <div class="import-dd-item import-dd-other" onclick="pickImport('outro_banco','bank')">➕ Outro banco…</div>
+            <div class="import-dd-item import-dd-other" onclick="event.stopPropagation();openReorderModal('bank')">↕ Reordenar lista…</div>
           </div>
         </div>
 
@@ -734,6 +735,7 @@ select.inp option{background:var(--bg2);}
             <div id="import-dd-broker-builtin"></div>
             <div id="import-dd-broker-custom"></div>
             <div class="import-dd-item import-dd-other" onclick="pickBroker('outra_corretora')">➕ Outra corretora…</div>
+            <div class="import-dd-item import-dd-other" onclick="event.stopPropagation();openReorderModal('broker')">↕ Reordenar lista…</div>
           </div>
         </div>
 
@@ -746,6 +748,7 @@ select.inp option{background:var(--bg2);}
             <div id="import-dd-card-builtin"></div>
             <div id="import-dd-card-custom"></div>
             <div class="import-dd-item import-dd-other" onclick="pickImport('outro_cartao','card')">➕ Outro cartão…</div>
+            <div class="import-dd-item import-dd-other" onclick="event.stopPropagation();openReorderModal('card')">↕ Reordenar lista…</div>
           </div>
         </div>
       </div>
@@ -818,7 +821,7 @@ select.inp option{background:var(--bg2);}
         <button class="btn primary" onclick="triggerBrokerFile()">📂 Selecionar arquivo</button>
         <span id="broker-file-name" style="font-size:12px;color:var(--text3)"></span>
       </div>
-      <input type="file" id="broker-file-input" style="display:none" accept=".xlsx,.xls,.XLS,.XLSX,.csv,.CSV,.pdf,.PDF" onchange="onBrokerFileSelected(event)">
+      <input type="file" id="broker-file-input" style="display:none" accept=".xlsx,.xls,.XLS,.XLSX,.csv,.CSV,.ofx,.OFX,.pdf,.PDF" onchange="onBrokerFileSelected(event)">
       <div id="broker-preview" style="display:none;margin-top:14px"></div>
       <div id="broker-result" style="margin-top:10px"></div>
     </div>
@@ -2219,7 +2222,7 @@ select.inp option{background:var(--bg2);}
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
             <div class="field" style="margin:0">
-              <label class="lbl">Taxa de juros (%)</label>
+              <label class="lbl" id="pat-mutuo-juros-label">Taxa de juros (% mensal)</label>
               <input class="inp" id="pat-mutuo-juros" type="number" step="0.01" placeholder="Ex: 1,5">
             </div>
             <div class="field" style="margin:0">
@@ -2241,6 +2244,12 @@ select.inp option{background:var(--bg2);}
                 <option value="anual">Anual</option>
               </select>
             </div>
+            <div class="field" style="margin:0">
+              <label class="lbl">Dia de incidência<span title="Dia do mês em que os juros incidem e (se houver conta vinculada) são lançados — ex: dia 5, se o mútuo combina vencimento todo dia 5. Em meses mais curtos (ex: fevereiro), cai automaticamente no último dia do mês." style="cursor:help;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:1px solid var(--border);border-radius:50%;font-size:10px;color:var(--text3);margin-left:4px">?</span></label>
+              <input class="inp" id="pat-mutuo-dia-incidencia" type="number" min="1" max="31" step="1" placeholder="1">
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
             <div class="field" id="pat-mutuo-mes-incidencia-field" style="margin:0;display:none">
               <label class="lbl">Mês de incidência</label>
               <select class="inp" id="pat-mutuo-mes-incidencia">
@@ -2443,6 +2452,26 @@ select.inp option{background:var(--bg2);}
         <div>
           <button class="btn primary" onclick="savePassword()">Salvar senha</button>
           <button class="btn" id="settings-remove-pw-btn" onclick="removePassword()" style="display:none;margin-left:8px;color:var(--red)">Remover senha</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Usuários -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header"><h3>👥 Usuários</h3></div>
+      <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:13px;color:var(--text2)">
+          Permite que mais de uma pessoa use o Cruzeiro neste computador, cada uma com seus próprios dados (extratos, ativos, senha) separados.
+        </div>
+        <div id="settings-users-list" style="display:flex;flex-direction:column;gap:6px"></div>
+        <div>
+          <button class="btn primary" onclick="openAddUserModal()">+ Adicionar usuário</button>
+        </div>
+        <div id="settings-users-restart-hint" class="info-box" style="font-size:12px;display:none">
+          💡 Mais de um usuário cadastrado — ao reiniciar o app, uma tela vai pedir pra escolher quem está entrando.
+        </div>
+        <div id="settings-switch-user-row" style="display:none">
+          <button class="btn" onclick="switchUserNow()">🔁 Trocar de usuário agora</button>
         </div>
       </div>
     </div>
@@ -3116,7 +3145,36 @@ select.inp option{background:var(--bg2);}
         <div class="modal-footer" style="padding:12px 16px;display:flex;gap:8px;justify-content:flex-end" id="custom-parser-footer">
         </div>
       </div>
-    </div
+    </div>
+
+<!-- modal: adicionar usuário (multi-usuário no mesmo desktop) -->
+<div class="overlay" id="modal-add-user" style="z-index:8000">
+  <div class="modal" style="max-width:380px;width:96%">
+    <div class="modal-header">
+      <h3 style="margin:0;font-size:15px">+ Adicionar usuário</h3>
+      <button class="btn-icon" onclick="closeModal('modal-add-user')">✕</button>
+    </div>
+    <div class="modal-body" style="padding:16px">
+      <div class="field">
+        <label class="lbl">Nome</label>
+        <input class="inp" id="add-user-name" placeholder="Ex: Maria">
+      </div>
+      <div class="field">
+        <label class="lbl">Senha (opcional)</label>
+        <input class="inp" type="password" id="add-user-pw" placeholder="Deixe vazio para não usar senha">
+      </div>
+      <div class="field">
+        <label class="lbl">Confirmar senha</label>
+        <input class="inp" type="password" id="add-user-pw2" placeholder="Confirmar senha">
+      </div>
+      <div id="add-user-err" style="color:var(--red);font-size:12px;min-height:16px"></div>
+    </div>
+    <div class="modal-footer" style="padding:12px 16px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="closeModal('modal-add-user')">Cancelar</button>
+      <button class="btn primary" onclick="submitAddUser()">Adicionar</button>
+    </div>
+  </div>
+</div>
 
 
 <!-- ═══ TOUR DE BOAS-VINDAS ═══ -->
