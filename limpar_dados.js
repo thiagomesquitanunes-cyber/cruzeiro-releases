@@ -1,216 +1,148 @@
 /**
- * limpar_dados.js — Limpa todos os dados do usuário para distribuição limpa.
+ * limpar_dados.js — Apaga por completo os dados de TODOS os usuários
+ * cadastrados (multi-usuário no mesmo desktop), para distribuição limpa.
  * Uso: npm run clean-data
- * 
- * Suporta banco de dados criptografado (com senha) ou não.
+ *
+ * Em vez de abrir o banco e esvaziar as tabelas (o que exigia decifrar um
+ * banco criptografado antes), simplesmente APAGA os arquivos por completo —
+ * banco, configurações, arquivos auxiliares e backups de cada usuário. O
+ * app recria tudo do zero na próxima abertura, exatamente como uma
+ * instalação nova. Mais simples, mais confiável (não depende de enumerar
+ * cada campo a limpar) e não precisa mais de senha nenhuma.
  */
 
-const path      = require('path');
-const fs        = require('fs');
-const crypto    = require('crypto');
-const readline  = require('readline');
-const initSqlJs = require('./node_modules/sql.js');
+const path = require('path');
+const fs   = require('fs');
 
-const PROJECT_DIR  = __dirname;
-const SETTINGS_PATH = path.join(PROJECT_DIR, '_settings.json');
+const PROJECT_DIR   = __dirname;
+const REGISTRY_PATH = path.join(PROJECT_DIR, '_users_registry.json');
 
-// Resolve a mesma pasta de dados que o main.js usaria (getDbPath) — respeita
-// um dataDir customizado (ex: pasta Dropbox escolhida em "Configurações >
-// Pasta de dados"), em vez de sempre assumir a pasta do projeto. Sem isso,
-// quem configurou uma pasta de dados separada teria o banco/categorias REAIS
-// preservados intactos após o clean-data, enquanto o script limpava (ou
-// tentava limpar) um arquivo na pasta do projeto que não é o que está em uso.
-const DATA_DIR = (() => {
+// Varre a pasta do projeto por arquivos de usuários que não estejam (mais)
+// no registro — ex: se o registro já foi apagado numa limpeza anterior,
+// mas o banco/configuração de outro usuário ainda existem no disco. Tanto
+// "cruzeiro_data_X.db" quanto "_settings_X.json" sempre ficam na pasta do
+// projeto (nunca seguem dataDir customizado), então varrer aqui é
+// suficiente pra encontrar QUALQUER usuário, mesmo órfão do registro.
+function discoverOrphanUserIds() {
+  const ids = new Set();
   try {
-    const s = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+    const files = fs.readdirSync(PROJECT_DIR);
+    files.forEach(f => {
+      const m1 = f.match(/^cruzeiro_data_(.+)\.db$/);
+      const m2 = f.match(/^_settings_(.+)\.json$/);
+      if (m1) ids.add(m1[1]);
+      if (m2) ids.add(m2[1]);
+    });
+  } catch (e) {}
+  return ids;
+}
+
+// Descobre TODOS os usuários cadastrados (mesmo princípio do main.js: sem
+// arquivo de registro, existe implicitamente um único usuário "Principal",
+// usando os nomes de arquivo originais sem sufixo) — combinado com a
+// varredura de órfãos acima, pra nunca depender SÓ do registro.
+function loadUsers() {
+  const seen = new Map();
+  try {
+    const r = JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf8'));
+    (r.users || []).forEach(u => seen.set(u.id || null, u));
+  } catch (e) {}
+  if (!seen.has(null)) seen.set(null, { id: null, name: 'Principal' });
+  discoverOrphanUserIds().forEach(uid => {
+    if (!seen.has(uid)) seen.set(uid, { id: uid, name: `(encontrado na pasta, sem registro: ${uid})` });
+  });
+  return Array.from(seen.values());
+}
+
+// Resolve a mesma pasta de dados que o main.js usaria (getDbPath) PARA UM
+// USUÁRIO ESPECÍFICO — cada usuário pode ter sua própria "Pasta de dados"
+// customizada (Configurações > Pasta de dados).
+function resolveDataDir(uid) {
+  const settingsPath = path.join(PROJECT_DIR, uid ? `_settings_${uid}.json` : '_settings.json');
+  try {
+    const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     if (s.dataDir && fs.existsSync(s.dataDir)) return s.dataDir;
   } catch (e) {}
   return PROJECT_DIR;
-})();
-const DB_PATH     = path.join(DATA_DIR, 'cruzeiro_data.db');
-const DB_MAGIC    = Buffer.from('CRUZEIRO1');
-
-function isEncrypted(buf) {
-  return buf.length > DB_MAGIC.length && buf.slice(0, DB_MAGIC.length).equals(DB_MAGIC);
 }
 
-function deriveKey(password, salt) {
-  return crypto.pbkdf2Sync(String(password), salt, 100_000, 32, 'sha256');
-}
-
-function decryptDB(encBuf, password) {
-  let off = DB_MAGIC.length;
-  const salt = encBuf.slice(off, off + 32); off += 32;
-  const iv   = encBuf.slice(off, off + 12); off += 12;
-  const tag  = encBuf.slice(off, off + 16); off += 16;
-  const enc  = encBuf.slice(off);
-  const key  = deriveKey(password, salt);
-  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(enc), decipher.final()]);
-}
-
-function ask(question) {
-  return new Promise(resolve => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    // Hide input for password
-    process.stdout.write(question);
-    let pw = '';
-    process.stdin.setRawMode?.(true);
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', function handler(ch) {
-      if (ch === '\n' || ch === '\r' || ch === '\u0003') {
-        process.stdin.setRawMode?.(false);
-        process.stdin.pause();
-        process.stdin.removeListener('data', handler);
-        process.stdout.write('\n');
-        rl.close();
-        resolve(pw);
-      } else if (ch === '\u007f') {
-        pw = pw.slice(0, -1);
-      } else {
-        pw += ch;
-        process.stdout.write('*');
-      }
-    });
-  });
-}
-
-if (!fs.existsSync(DB_PATH)) {
-  console.error(`❌ Banco de dados não encontrado em: ${DB_PATH}`);
-  process.exit(1);
-}
-
-(async () => {
-  console.log('🧹 Iniciando limpeza de dados...');
-  console.log(`   Pasta de dados: ${DATA_DIR}${DATA_DIR !== PROJECT_DIR ? ' (customizada — configurada em Configurações > Pasta de dados)' : ' (pasta do projeto)'}`);
-  console.log(`   DB: ${DB_PATH}\n`);
-
-  const SQL = await initSqlJs();
-  let rawBuf = fs.readFileSync(DB_PATH);
-
-  // Handle encrypted DB
-  if (isEncrypted(rawBuf)) {
-    console.log('   🔐 Banco de dados está criptografado.');
-    let decrypted = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const pw = await ask(`   Senha (tentativa ${attempt}/3): `);
-      try {
-        decrypted = decryptDB(rawBuf, pw);
-        console.log('   ✅ Senha correta.\n');
-        break;
-      } catch(e) {
-        if (attempt === 3) {
-          console.error('   ❌ Senha incorreta 3 vezes. Abortando.');
-          process.exit(1);
-        }
-        console.log('   ❌ Senha incorreta, tente novamente.');
-      }
-    }
-    rawBuf = decrypted;
+function removeIfExists(fpath, label) {
+  if (fs.existsSync(fpath)) {
+    fs.unlinkSync(fpath);
+    console.log(`   ✅ Removido: ${label || path.basename(fpath)}`);
+    return true;
   }
+  return false;
+}
 
-  const db = new SQL.Database(rawBuf);
+// Apaga por completo os arquivos de UM usuário.
+function cleanUser(user) {
+  const uid = user.id || null;
+  const label = user.name || 'Principal';
+  const dataDir = resolveDataDir(uid);
+  const dbPath = path.join(dataDir, uid ? `cruzeiro_data_${uid}.db` : 'cruzeiro_data.db');
+  const settingsPath = path.join(PROJECT_DIR, uid ? `_settings_${uid}.json` : '_settings.json');
+  const dbPrefix = uid ? `cruzeiro_data_${uid}` : 'cruzeiro_data';
 
-  // Discover ALL tables dynamically
-  const allTables = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
-  const tableNames = allTables[0]?.values.map(r => r[0]) || [];
+  console.log(`\n👤 Usuário: ${label}${uid ? '' : ' (padrão)'}`);
+  console.log(`   Pasta de dados: ${dataDir}${dataDir !== PROJECT_DIR ? ' (customizada)' : ' (pasta do projeto)'}`);
 
-  let totalRows = 0;
-  for (const table of tableNames) {
-    try {
-      const count = db.exec(`SELECT COUNT(*) FROM "${table}"`)[0]?.values[0][0] || 0;
-      db.run(`DELETE FROM "${table}"`);
-      try { db.run(`DELETE FROM sqlite_sequence WHERE name=?`, [table]); } catch(e) {}
-      const icon = count > 0 ? '✅' : '  ';
-      console.log(`   ${icon} ${table}: ${count} registros removidos`);
-      totalRows += Number(count);
-    } catch (e) {
-      console.log(`   ⚠️  ${table}: ${e.message}`);
-    }
-  }
+  const hadDb = removeIfExists(dbPath, `${path.basename(dbPath)} (banco de dados)`);
+  if (!hadDb) console.log('   ℹ️  Sem banco de dados ainda — nada a apagar aqui.');
+  removeIfExists(settingsPath, `${path.basename(settingsPath)} (configurações)`);
 
-  // Save clean DB (always plaintext — no point encrypting an empty DB)
-  fs.writeFileSync(DB_PATH, Buffer.from(db.export()));
-  db.close();
-  console.log('');
-
-  // _settings.json
-  const settingsPath = path.join(PROJECT_DIR, '_settings.json');
-  if (fs.existsSync(settingsPath)) {
-    try {
-      const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-      delete s.passwordHash;
-      delete s.hasEncryptedDB;
-      delete s.recoveryEmail;
-      delete s.resetCode;
-      delete s.resetExpires;
-      delete s.licenseCode;
-      delete s.licenseEmail;
-      delete s.firstRun;
-      s.tourDone   = false;
-      s.categories = [];
-      s.benchmarks = { cdi: {}, ibov: {}, lastUpdate: null };
-      delete s.dataDir;
-      fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
-      console.log('   ✅ _settings.json: dados pessoais removidos');
-    } catch(e) {
-      console.log(`   ⚠️  _settings.json: ${e.message}`);
-    }
-  }
-
-  // Arquivos JSON "laterais" — a maioria é derivada de getDbPath() no main.js
-  // (prefixo "cruzeiro_data_"), então segue o mesmo DATA_DIR do banco. Só
-  // _bank_parsers.json e latest.json são de fato relativos à pasta do
-  // projeto (mesmo padrão de _settings.json), independente de dataDir.
-  const dataDirFiles = [
-    'cruzeiro_data_financing_indexes.json',
-    'cruzeiro_data_import_defaults.json',
-    'cruzeiro_data_ml_export.json',
-    'cruzeiro_data_benchmarks.json',
-    'cruzeiro_data_ipca.json',
-    'cruzeiro_data_pat_ipca_monthly.json',
-    'cruzeiro_data_overview_config.json',
-    'cruzeiro_data_report_config.json',
-    'cruzeiro_data_saved_reports.json',
-    'cruzeiro_data_cat_types.json',
-    'cruzeiro_data_col_config.json',
-    'cruzeiro_data_categories.json',
-    'cruzeiro_data_recovery.enc',        // era '_recovery.enc' — nome não batia com o que o main.js realmente grava
-    'cruzeiro_data_emergency.db.bak',     // backup de emergência do banco — faltava na lista
-    '_categories.json',                  // nome legado, de versões anteriores ao dataDir
+  // Arquivos JSON "laterais" — todos derivados de getDbPath() no main.js
+  // (mesmo prefixo do banco deste usuário específico, trocando a extensão).
+  const sideFileSuffixes = [
+    'financing_indexes.json', 'import_defaults.json', 'ml_export.json', 'benchmarks.json',
+    'ipca.json', 'pat_ipca_monthly.json', 'overview_config.json', 'report_config.json',
+    'saved_reports.json', 'cat_types.json', 'col_config.json', 'categories.json',
+    'recovery.enc', 'emergency.db.bak',
   ];
-  const projectDirFiles = [
-    'latest.json',
-    '_bank_parsers.json',
-  ];
-
-  for (const fname of dataDirFiles) {
-    const fpath = path.join(DATA_DIR, fname);
-    if (fs.existsSync(fpath)) {
-      fs.unlinkSync(fpath);
-      console.log(`   ✅ Removido: ${fname}`);
-    }
-  }
-  for (const fname of projectDirFiles) {
-    const fpath = path.join(PROJECT_DIR, fname);
-    if (fs.existsSync(fpath)) {
-      fs.unlinkSync(fpath);
-      console.log(`   ✅ Removido: ${fname}`);
-    }
+  for (const suffix of sideFileSuffixes) {
+    removeIfExists(path.join(dataDir, `${dbPrefix}_${suffix}`));
   }
 
-  // Backups folder — também segue dataDir (ver getBackupDir em main.js)
-  const backupsDir = path.join(DATA_DIR, 'backups');
+  // Backups DESTE usuário — pro usuário padrão, exclui explicitamente
+  // arquivos de outros usuários (já que "cruzeiro_data_" é prefixo de
+  // "cruzeiro_data_usr_X_").
+  const backupsDir = path.join(dataDir, 'backups');
   if (fs.existsSync(backupsDir)) {
-    const files = fs.readdirSync(backupsDir);
-    files.forEach(f => {
-      try { fs.unlinkSync(path.join(backupsDir, f)); } catch(e) {}
+    const allFiles = fs.readdirSync(backupsDir);
+    const mine = allFiles.filter(f => {
+      if (!f.startsWith(dbPrefix + '_') || !f.endsWith('.db')) return false;
+      if (uid) return true;
+      return !/^usr_/.test(f.slice(dbPrefix.length + 1));
     });
-    if (files.length) console.log(`   ✅ backups/: ${files.length} arquivo(s) removido(s)`);
+    mine.forEach(f => { try { fs.unlinkSync(path.join(backupsDir, f)); } catch (e) {} });
+    if (mine.length) console.log(`   ✅ backups/: ${mine.length} arquivo(s) deste usuário removido(s)`);
+  }
+}
+
+(() => {
+  console.log('🧹 Iniciando limpeza de dados...');
+
+  const users = loadUsers();
+  console.log(`   ${users.length} usuário(s) cadastrado(s): ${users.map(u => u.name).join(', ')}`);
+
+  for (const user of users) {
+    cleanUser(user);
   }
 
-  console.log(`\n✨ Limpeza concluída! ${totalRows} registros removidos.`);
-  console.log('   Todas as tabelas estão vazias. App pronto para distribuição.\n');
+  // Arquivos verdadeiramente compartilhados entre usuários (não seguem
+  // dataDir nem sufixo de usuário — ex: parsers de banco customizados,
+  // que fazem sentido ficarem disponíveis pra qualquer um no mesmo PC).
+  console.log('');
+  const projectDirFiles = ['latest.json', '_bank_parsers.json', '_categories.json'];
+  for (const fname of projectDirFiles) {
+    if (removeIfExists(path.join(PROJECT_DIR, fname), `${fname} (compartilhado)`)) {}
+  }
+
+  // Reseta o registro de usuários — uma distribuição limpa não deve levar
+  // os perfis extras criados durante desenvolvimento/testes; na próxima
+  // abertura, volta a ser o fluxo de usuário único de sempre.
+  removeIfExists(REGISTRY_PATH, '_users_registry.json (volta a abrir como usuário único)');
+
+  console.log(`\n✨ Limpeza concluída para ${users.length} usuário(s).`);
+  console.log('   Todos os arquivos foram apagados — o app recria tudo do zero na próxima abertura, como uma instalação nova.\n');
 })();

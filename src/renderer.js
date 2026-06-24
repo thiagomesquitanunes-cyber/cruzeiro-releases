@@ -381,6 +381,7 @@ async function renderSidebar() {
     { page:'recurring',  icon:`<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="display:inline-block;vertical-align:-2px"><path d="M13 8A5 5 0 0 1 3 8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><polyline points="1.5,6.5 3,8 4.5,6.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M3 8A5 5 0 0 1 13 8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><polyline points="11.5,9.8 13,8 14.5,9.8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`, label:t('nav_recurring') },
     { page:'evolucao',   icon:'📈', label:t('nav_evolucao') },
     { page:'patrimonio', icon:'🏛', label:t('nav_patrimonio') },
+    // { page:'irpf', icon:'🧾', label:'Relatório IRPF' }, // desativado a pedido do usuário — precisa de mais testes antes de reativar. Código completo continua no app (funções, página, handlers); só essa entrada de navegação foi removida.
     { page:'categories', icon:'🏷', label:t('nav_categories') },
     { page:'ml',         icon:'🧠', label:t('nav_ml') },
     { page:'backup',     icon:'⚙️', label:t('nav_backup') },
@@ -459,6 +460,7 @@ async function goPage(name) {
     aposentadoria: '🏖️ Aposentadoria',
     reports:    'Relatórios',
     projecao:   '📅 Projeção de Fluxo de Caixa',
+    irpf:       '🧾 Relatório IRPF — Bens e Direitos',
   };
   G('page-title').textContent = titles[name] || name;
   G('search-wrap').style.display = name === 'account' ? 'flex' : 'none';
@@ -478,6 +480,11 @@ async function goPage(name) {
   if (name === 'import')    populateAccountSelects();
   if (name === 'reports')   { await initReportFilters(); onReportTypeChange(); }
   if (name === 'projecao')  refreshProjecao();
+  if (name === 'irpf' && !G('irpf-year').options.length) {
+    const curY = new Date().getFullYear();
+    const sel = G('irpf-year');
+    for (let y = curY - 1; y >= curY - 10; y--) sel.innerHTML += `<option value="${y}">${y}</option>`;
+  }
   if (name === 'backup') {
     refreshBackup();
     refreshSyncStatus();
@@ -4440,19 +4447,24 @@ async function doImportFromTable() {
 
 // Shared tail of the import flow (called directly or after memo-dup resolution)
 async function finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks) {
-  await doImport(finalRows, updatedInstallments, accountId, checkDailySaldo);
+  const importResult = await doImport(finalRows, updatedInstallments, accountId, checkDailySaldo);
+  if (!importResult) return; // erro já exibido por doImport
 
+  let patLinkedCount = 0;
   for (const p of (patLinks || [])) {
     // Evita duas linhas conflitantes pro mesmo ativo+mês: se já existe um
     // pat_transactions pra este mês (de qualquer tipo), atualiza em vez de
     // inserir outro — assim a tabela de movimentações do ativo nunca mostra
     // dois lançamentos competindo pelo mesmo mês.
     const existing = (_pat.txAll || []).find(t => t.asset_id === p.assetId && t.month.slice(0,7) === p.month && t.tx_type === p.txType);
-    await ff.patTxSave({
-      id: existing?.id || null, assetId: p.assetId, month: p.month,
-      tx_type: p.txType, total_value: p.amount, notes: p.memo || null,
-      tx_date: p.txDate || null,
-    }).catch(() => {});
+    try {
+      await ff.patTxSave({
+        id: existing?.id || null, assetId: p.assetId, month: p.month,
+        tx_type: p.txType, total_value: p.amount, notes: p.memo || null,
+        tx_date: p.txDate || null,
+      });
+      patLinkedCount++;
+    } catch(e) { console.error('Erro ao vincular a bem/direito:', e); }
   }
   if (patLinks?.length) {
     _pat.txAll = await ff.patTxAll().catch(() => _pat.txAll);
@@ -4460,12 +4472,44 @@ async function finishImportWithPatLinks(finalRows, updatedInstallments, accountI
   }
 
   // Processar vínculos de dívida pessoal
+  let debtLinkedCount = 0;
   for (const d of (debtLinks || [])) {
-    await ff.debtMarkPaid({ debtId: d.debtId, month: d.month, amount: d.amount }).catch(() => {});
-    _pat.debtInstallments = _pat.debtInstallments || {};
-    _pat.debtInstallments[d.debtId] = await ff.debtInstallmentsGet({ debtId: d.debtId }).catch(() => []);
+    try {
+      await ff.debtMarkPaid({ debtId: d.debtId, month: d.month, amount: d.amount });
+      debtLinkedCount++;
+      _pat.debtInstallments = _pat.debtInstallments || {};
+      _pat.debtInstallments[d.debtId] = await ff.debtInstallmentsGet({ debtId: d.debtId }).catch(() => []);
+    } catch(e) { console.error('Erro ao vincular a dívida pessoal:', e); }
   }
   if (debtLinks?.length && currentPage === 'patrimonio') refreshPatrimonioTable();
+
+  showImportSummaryModal({ ...importResult, patLinkedCount, debtLinkedCount });
+}
+
+// Resumo proeminente (modal, não toast) ao final de uma importação — antes
+// só aparecia um toast pequeno no canto, e quando havia vínculos a bens/
+// direitos ou dívidas, não dava pra confirmar quantos realmente "pegaram"
+// sem abrir cada um manualmente.
+function showImportSummaryModal({ inserted, transferCount, installCount, accountId, patLinkedCount, debtLinkedCount, dailyMismatches }) {
+  const accName = accounts.find(a => a.id === accountId)?.name || 'conta';
+  const total = (inserted||0) + (transferCount||0);
+  const plural = (n, s='', p='s') => n === 1 ? s : p;
+  G('custom-parser-title').textContent = '✅ Importação concluída';
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:14px;line-height:1.7">
+      <div style="font-size:16px;font-weight:600;margin-bottom:14px">
+        ${total} transaç${total===1?'ão':'ões'} importada${plural(total)} para <strong>${esc(accName)}</strong>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;padding-left:6px;color:var(--text2)">
+        <div>📦 <strong style="color:var(--text)">${patLinkedCount||0}</strong> vinculada${plural(patLinkedCount||0)} a Bens e Direitos</div>
+        <div>💳 <strong style="color:var(--text)">${debtLinkedCount||0}</strong> vinculada${plural(debtLinkedCount||0)} a Dívidas Pessoais</div>
+        <div>🔁 <strong style="color:var(--text)">${transferCount||0}</strong> registrada${plural(transferCount||0)} como transferência a outras contas</div>
+        ${installCount ? `<div>📅 <strong style="color:var(--text)">${installCount}</strong> parcela${plural(installCount)} futura${plural(installCount)} criada${plural(installCount)}</div>` : ''}
+      </div>
+      ${dailyMismatches?.length ? `<div class="warn-box" style="margin-top:14px;font-size:13px">⚠️ Divergências de saldo em ${dailyMismatches.length} dia(s) — vale revisar o extrato.</div>` : ''}
+    </div>`;
+  G('custom-parser-footer').innerHTML = `<button class="btn primary" onclick="closeModal('modal-custom-parser')">Fechar</button>`;
+  openModal('modal-custom-parser');
 }
 
 // ── Round-2 dup resolution UI: same memo+category, variable amount ──
@@ -4667,12 +4711,13 @@ async function doImport(finalRows, parcelInstallments, accountId, checkDailySald
     await loadAccounts();
     if (currentPage === 'account') refreshAccount();
     if (currentPage === 'patrimonio') refreshPatrimonio();
-    toast(`${(result.inserted||0)+transferCount} lançamentos importados${installCount?` + ${installCount} parcelas`:''}${transferCount?` (${transferCount} transferência(s))`:''}`);
     _pendingImport = null;
     _importEditRows = [];
     clearPersistedImportState();
+    return { inserted: result.inserted||0, transferCount, installCount, accountId, dailyMismatches: result.dailyMismatches||[] };
   } catch(e) {
     G('bank-result').innerHTML = `<div class="warn-box">❌ Erro: ${esc(e.message)}</div>`;
+    return null;
   }
 }
 
@@ -14835,6 +14880,225 @@ async function patFetchIPCA() {
 }
 
 // ── Main refresh ──
+// ── Relatório IRPF — Bens e Direitos / Dívidas e Ônus Reais ──
+let _irpfData = null;
+
+function _irpfFmtBRL(v) {
+  return (v||0).toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+}
+
+async function generateIrpfReport() {
+  const year = parseInt(G('irpf-year').value);
+  if (!year || year < 2000 || year > 2100) { toast('Informe um ano válido'); return; }
+  G('irpf-report-container').innerHTML = '<div class="info-box">⏳ Gerando relatório…</div>';
+  G('irpf-export-btn').style.display = 'none';
+  try {
+    _irpfData = await ff.irpfReport({ year });
+    renderIrpfReport();
+    if (_irpfData.bens.length || _irpfData.dividas.length) G('irpf-export-btn').style.display = '';
+  } catch(e) {
+    G('irpf-report-container').innerHTML = `<div class="warn-box">❌ Erro: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderIrpfReport() {
+  if (!_irpfData) return;
+  const { year, bens, dividas, rendimentos } = _irpfData;
+  let html = '';
+
+  const sourceLabels = { pat: '🏛 Bens do Patrimônio', account: '🏦 Contas bancárias e dinheiro', inv: '📈 Investimentos financeiros' };
+  let lastSource = null;
+
+  html += `<div class="tbl-card" style="margin-bottom:14px">
+    <div class="tbl-header"><h3>📋 Bens e Direitos (${bens.length})</h3></div>
+    <div style="overflow-x:auto"><table class="tbl"><thead><tr>
+      <th>Ativo</th><th style="width:70px">Grupo</th><th style="width:100px">Código</th>
+      <th style="min-width:280px">Discriminação</th>
+      <th style="width:150px;text-align:right">31/12/${year-1}</th>
+      <th style="width:150px;text-align:right">31/12/${year}</th>
+    </tr></thead><tbody>`;
+  if (!bens.length) {
+    html += `<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:20px">Nenhum bem com posição relevante neste período.</td></tr>`;
+  }
+  bens.forEach(b => {
+    if (b.source !== lastSource) {
+      html += `<tr><td colspan="6" style="background:var(--bg3);font-weight:600;font-size:12px;padding:6px 10px">${sourceLabels[b.source]||b.source}</td></tr>`;
+      lastSource = b.source;
+    }
+    html += `<tr>
+      <td>${esc(b.name)}${b.financed ? ' <span style="font-size:11px;color:var(--text3)">(financiado)</span>' : ''}${b.encerrado ? ` <span style="font-size:11px;color:var(--orange)">(encerrado ${esc(b.encerrado)})</span>` : ''}</td>
+      <td>${esc(b.grupoSugerido)}</td>
+      <td><input class="inp" style="width:90px;font-size:12px" value="${esc(b.codigoSugerido)}" title="${esc(b.codigoLabel)}" onchange="updateIrpfField('${b.source}',${b.id},'codigo',this.value)"></td>
+      <td><textarea class="inp" style="width:100%;min-height:54px;font-size:12px;resize:vertical" onchange="updateIrpfField('${b.source}',${b.id},'discriminacao',this.value)">${esc(b.discriminacao)}</textarea></td>
+      <td style="text-align:right">${_irpfFmtBRL(b.valorAnoAnterior)}</td>
+      <td style="text-align:right">${_irpfFmtBRL(b.valorAnoAtual)}</td>
+    </tr>`;
+  });
+  html += `</tbody></table></div></div>`;
+
+  html += `<div class="tbl-card">
+    <div class="tbl-header"><h3>💳 Dívidas e Ônus Reais (${dividas.length})</h3></div>
+    <div class="info-box" style="margin:10px 16px;font-size:12px">Financiamentos de bens com garantia (alienação fiduciária/hipoteca) NÃO entram aqui — já aparecem em Bens e Direitos, pelo valor pago. Esta seção é só para empréstimos/dívidas sem bem dado como garantia, com saldo devedor acima de R$ 5.000,00.</div>
+    <div style="overflow-x:auto"><table class="tbl"><thead><tr>
+      <th>Dívida</th><th style="width:200px">Tipo de credor</th>
+      <th style="width:150px;text-align:right">31/12/${year-1}</th>
+      <th style="width:150px;text-align:right">31/12/${year}</th>
+    </tr></thead><tbody>`;
+  if (!dividas.length) {
+    html += `<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:20px">Nenhuma dívida cruzou o limite de R$ 5.000,00 neste período.</td></tr>`;
+  }
+  dividas.forEach(d => {
+    html += `<tr>
+      <td>${esc(d.name)}</td>
+      <td><select class="inp" style="font-size:12px" onchange="updateIrpfDebtField(${d.debtId},this.value)">
+        <option value="11" ${d.codigoSugerido==='11'?'selected':''}>11 — Banco comercial</option>
+        <option value="12" ${d.codigoSugerido==='12'?'selected':''}>12 — Financeira</option>
+        <option value="13" ${d.codigoSugerido==='13'?'selected':''}>13 — Outra pessoa jurídica</option>
+        <option value="14" ${d.codigoSugerido==='14'?'selected':''}>14 — Pessoa física</option>
+      </select></td>
+      <td style="text-align:right">${_irpfFmtBRL(d.balAnoAnterior)}</td>
+      <td style="text-align:right">${_irpfFmtBRL(d.balAnoAtual)}</td>
+    </tr>`;
+  });
+  html += `</tbody></table></div></div>`;
+
+  const fichaLabels = { isento: '🟢 Rendimentos Isentos e Não Tributáveis', exclusiva: '🔵 Rendimentos Sujeitos à Tributação Exclusiva/Definitiva', tributavel: '🟠 Rendimentos Tributáveis (carnê-leão)', outro: '⚪ Verificar classificação' };
+  html += `<div class="tbl-card" style="margin-bottom:14px">
+    <div class="tbl-header"><h3>💰 Rendimentos no ano (${rendimentos.length})</h3></div>
+    <div class="info-box" style="margin:10px 16px;font-size:12px">Resumo das movimentações que <strong>você mesmo classificou</strong> no app (tipo de movimentação e categoria do investimento) — não é uma leitura oficial da Receita. O app não sabe, por exemplo, se um aluguel foi pago por pessoa física ou jurídica, ou se um título específico é isento. Confira cada item contra o informe de rendimentos antes de declarar.</div>
+    <div style="overflow-x:auto"><table class="tbl"><thead><tr>
+      <th>Origem</th><th>Tipo</th><th style="width:150px;text-align:right">Valor no ano</th><th style="min-width:260px">Ficha sugerida</th>
+    </tr></thead><tbody>`;
+  if (!rendimentos.length) {
+    html += `<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:20px">Nenhum rendimento classificado (aluguel, dividendo, JCP, juros) neste ano.</td></tr>`;
+  }
+  let lastFicha = null;
+  let subtotal = 0;
+  const rendSorted = [...rendimentos].sort((a,b) => (a.ficha||'').localeCompare(b.ficha||''));
+  rendSorted.forEach((r, i) => {
+    if (r.ficha !== lastFicha) {
+      if (lastFicha !== null) html += `<tr><td colspan="2" style="text-align:right;font-weight:600;font-size:12px">Subtotal:</td><td style="text-align:right;font-weight:600">${_irpfFmtBRL(subtotal)}</td><td></td></tr>`;
+      html += `<tr><td colspan="4" style="background:var(--bg3);font-weight:600;font-size:12px;padding:6px 10px">${fichaLabels[r.ficha]||r.ficha}</td></tr>`;
+      lastFicha = r.ficha; subtotal = 0;
+    }
+    subtotal += r.valor;
+    html += `<tr>
+      <td>${esc(r.name)}</td>
+      <td>${esc((r.source === 'pat' ? PAT_TX_CASH : INV_TX_TYPES)[r.txType]?.label || r.txType)}</td>
+      <td style="text-align:right">${_irpfFmtBRL(r.valor)}</td>
+      <td style="font-size:12px;color:var(--text2)">${esc(r.fichaLabel)}</td>
+    </tr>`;
+    if (i === rendSorted.length - 1) html += `<tr><td colspan="2" style="text-align:right;font-weight:600;font-size:12px">Subtotal:</td><td style="text-align:right;font-weight:600">${_irpfFmtBRL(subtotal)}</td><td></td></tr>`;
+  });
+  html += `</tbody></table></div></div>`;
+
+  G('irpf-report-container').innerHTML = html;
+}
+
+async function updateIrpfField(source, id, field, value) {
+  const b = _irpfData?.bens.find(x => x.source === source && x.id === id);
+  if (!b) return;
+  if (field === 'codigo') b.codigoSugerido = value;
+  if (field === 'discriminacao') b.discriminacao = value;
+  // Sempre envia o par completo — só o campo editado teria sobrescrito (com
+  // null) o override já salvo do OUTRO campo.
+  await ff.irpfSaveOverride({ source, id, irpf_codigo: b.codigoSugerido, irpf_discriminacao: b.discriminacao }).catch(()=>{});
+}
+
+async function updateIrpfDebtField(debtId, value) {
+  const d = _irpfData?.dividas.find(x => x.debtId === debtId);
+  if (d) d.codigoSugerido = value;
+  await ff.irpfSaveDebtOverride({ debtId, irpf_codigo: value }).catch(()=>{});
+}
+
+async function exportIrpfPdf() {
+  if (!_irpfData) return;
+  const { year, bens, dividas, rendimentos } = _irpfData;
+  const f2 = v => (v||0).toLocaleString('pt-BR', { minimumFractionDigits:2, maximumFractionDigits:2 });
+
+  const sourceLabelsPdf = { pat: 'Bens do Patrimônio', account: 'Contas bancárias e dinheiro', inv: 'Investimentos financeiros' };
+  let lastSourcePdf = null;
+  const bensRows = bens.map(b => {
+    let row = '';
+    if (b.source !== lastSourcePdf) {
+      row += `<tr><td colspan="6" style="background:#eee;font-weight:bold">${sourceLabelsPdf[b.source]||b.source}</td></tr>`;
+      lastSourcePdf = b.source;
+    }
+    row += `
+    <tr>
+      <td>${esc(b.grupoSugerido)}</td><td>${esc(b.codigoSugerido)}</td><td>${esc(b.name)}</td>
+      <td style="font-size:10px">${esc(b.discriminacao)}</td>
+      <td style="text-align:right">${f2(b.valorAnoAnterior)}</td>
+      <td style="text-align:right">${f2(b.valorAnoAtual)}</td>
+    </tr>`;
+    return row;
+  }).join('');
+
+  const dividasRows = dividas.map(d => `
+    <tr>
+      <td>${esc(d.codigoSugerido)} — ${esc(d.codigoLabel||'')}</td><td>${esc(d.name)}</td>
+      <td style="text-align:right">${f2(d.balAnoAnterior)}</td>
+      <td style="text-align:right">${f2(d.balAnoAtual)}</td>
+    </tr>`).join('');
+
+  const fichaLabelsPdf = { isento: 'Rendimentos Isentos e Não Tributáveis', exclusiva: 'Rendimentos Sujeitos à Tributação Exclusiva/Definitiva', tributavel: 'Rendimentos Tributáveis (carnê-leão)', outro: 'Verificar classificação' };
+  let lastFichaPdf = null;
+  const rendSortedPdf = [...rendimentos].sort((a,b) => (a.ficha||'').localeCompare(b.ficha||''));
+  const rendimentosRows = rendSortedPdf.map(r => {
+    let row = '';
+    if (r.ficha !== lastFichaPdf) {
+      row += `<tr><td colspan="4" style="background:#eee;font-weight:bold">${fichaLabelsPdf[r.ficha]||r.ficha}</td></tr>`;
+      lastFichaPdf = r.ficha;
+    }
+    row += `
+    <tr>
+      <td>${esc(r.name)}</td>
+      <td>${esc((r.source === 'pat' ? PAT_TX_CASH : INV_TX_TYPES)[r.txType]?.label || r.txType)}</td>
+      <td style="text-align:right">${f2(r.valor)}</td>
+      <td style="font-size:10px">${esc(r.fichaLabel)}</td>
+    </tr>`;
+    return row;
+  }).join('');
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    body{font-family:Arial,sans-serif;font-size:12px;color:#222;padding:24px}
+    h1{font-size:16px;margin-bottom:2px}
+    h2{font-size:13px;margin:20px 0 8px;border-bottom:1px solid #ccc;padding-bottom:4px}
+    table{width:100%;border-collapse:collapse;margin-bottom:10px}
+    th,td{border:1px solid #ddd;padding:5px 7px;text-align:left;font-size:10.5px;vertical-align:top}
+    th{background:#f5f5f5}
+    .sub{font-size:11px;color:#555;margin-bottom:6px}
+    .note{font-size:9.5px;color:#888;margin-top:18px;line-height:1.5}
+  </style></head><body>
+    <h1>Relatório de apoio — Declaração de IRPF ${year+1} (ano-calendário ${year})</h1>
+    <div class="sub">Gerado pelo Cruzeiro em ${new Date().toLocaleDateString('pt-BR')} — rascunho para conferência, revise antes de transcrever para a declaração oficial.</div>
+
+    <h2>Bens e Direitos</h2>
+    <table>
+      <thead><tr><th>Grupo</th><th>Código</th><th>Bem/Direito</th><th>Discriminação</th><th>31/12/${year-1} (R$)</th><th>31/12/${year} (R$)</th></tr></thead>
+      <tbody>${bensRows || '<tr><td colspan="6">Nenhum item.</td></tr>'}</tbody>
+    </table>
+
+    <h2>Dívidas e Ônus Reais</h2>
+    <table>
+      <thead><tr><th>Tipo de credor</th><th>Dívida</th><th>31/12/${year-1} (R$)</th><th>31/12/${year} (R$)</th></tr></thead>
+      <tbody>${dividasRows || '<tr><td colspan="4">Nenhum item acima do limite de R$ 5.000,00.</td></tr>'}</tbody>
+    </table>
+
+    <h2>Rendimentos no ano (classificação feita pelo próprio usuário no app — confira contra o informe de rendimentos)</h2>
+    <table>
+      <thead><tr><th>Origem</th><th>Tipo</th><th>Valor (R$)</th><th>Ficha sugerida</th></tr></thead>
+      <tbody>${rendimentosRows || '<tr><td colspan="4">Nenhum rendimento classificado neste ano.</td></tr>'}</tbody>
+    </table>
+
+    <div class="note">Documento gerado automaticamente a partir dos dados cadastrados no Cruzeiro. Não substitui orientação contábil ou tributária profissional — confira valores, códigos e discriminação (inclusive dados que o app não tem, como CPF do devedor ou matrícula de imóvel) antes de usar na declaração.</div>
+  </body></html>`;
+
+  const result = await ff.reportExportPdf({ html, suggestedName: `irpf_bens_direitos_${year}.pdf` }).catch(e => ({ ok:false, error: e.message }));
+  if (result?.ok) toast('✅ PDF salvo');
+  else if (!result?.canceled) toast('❌ Erro ao exportar PDF: ' + (result?.error || ''));
+}
+
 async function refreshPatrimonio() {
   try {
   _pat.assets          = await ff.patAssetsList();

@@ -562,6 +562,13 @@ function ensureLateColumns() {
     "ALTER TABLE pat_assets ADD COLUMN mutuo_juros_tipo TEXT DEFAULT 'simples'",
     "ALTER TABLE pat_assets ADD COLUMN mutuo_index_type TEXT DEFAULT 'none'",
     'ALTER TABLE pat_assets ADD COLUMN mutuo_dia_incidencia INTEGER DEFAULT 1',
+    'ALTER TABLE pat_assets ADD COLUMN irpf_codigo TEXT',
+    'ALTER TABLE pat_assets ADD COLUMN irpf_discriminacao TEXT',
+    'ALTER TABLE personal_debts ADD COLUMN irpf_codigo TEXT',
+    'ALTER TABLE accounts ADD COLUMN irpf_codigo TEXT',
+    'ALTER TABLE accounts ADD COLUMN irpf_discriminacao TEXT',
+    'ALTER TABLE inv_assets ADD COLUMN irpf_codigo TEXT',
+    'ALTER TABLE inv_assets ADD COLUMN irpf_discriminacao TEXT',
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance REAL',
     'ALTER TABLE pat_financing_contracts ADD COLUMN keys_balance_month TEXT',
     // Mês de aquisição (compra) — distinto do mês da 1ª parcela (first_month),
@@ -1720,11 +1727,23 @@ function doBackup() {
     const bdir = getBackupDir();
     if (!fs.existsSync(bdir)) fs.mkdirSync(bdir, { recursive: true });
     const ts   = new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);
-    const dest = path.join(bdir, `cruzeiro_data_${ts}.db`);
+    // Inclui o id do usuário atual no nome — sem isso, backups de usuários
+    // diferentes caem na mesma pasta com o mesmo padrão de nome, e a
+    // limpeza de "manter só os últimos 30" trataria todos como um único
+    // pool, podendo apagar backups de um usuário pra abrir espaço pro outro.
+    const prefix = _currentUserId ? `cruzeiro_data_${_currentUserId}_` : 'cruzeiro_data_';
+    const dest = path.join(bdir, `${prefix}${ts}.db`);
     fs.copyFileSync(getDbPath(), dest);
-    // Keep only last 30 backups
+    // Keep only last 30 backups DESTE usuário (não mexe nos de outros)
     const files = fs.readdirSync(bdir)
-      .filter(f => f.startsWith('cruzeiro_data_') && f.endsWith('.db'))
+      .filter(f => {
+        if (!f.startsWith(prefix) || !f.endsWith('.db')) return false;
+        if (_currentUserId) return true; // prefixo já inclui o id, é específico o bastante
+        // Usuário padrão: "cruzeiro_data_" é prefixo de QUALQUER usuário
+        // nomeado também ("cruzeiro_data_usr_123_...") — sem esta checagem
+        // extra, a limpeza do padrão contaria/apagaria backups de outros.
+        return !/^usr_/.test(f.slice(prefix.length));
+      })
       .sort();
     if (files.length > 30) {
       files.slice(0, files.length - 30).forEach(f => {
@@ -4038,6 +4057,352 @@ ipcMain.handle('pat:financing-installment-set', (_, { assetId, month, installmen
   return { ok: true };
 });
 
+
+// ══ RELATÓRIO IRPF — BENS E DIREITOS / DÍVIDAS E ÔNUS REAIS ══════════════
+// Mapeamento pro código/grupo da Receita Federal mais próximo de cada tipo
+// de ativo do app (tabela vigente na declaração 2026/ano-base 2025).
+// "imovel" e "societario" usam um código padrão "genérico" do grupo (99/02)
+// porque o tipo do ativo no app não distingue apartamento/casa/terreno nem
+// ações/quotas — por isso o relatório permite sobrescrever por ativo.
+const IRPF_CODIGO_MAP = {
+  imovel:     { grupo: '01', codigo: '99', label: 'Outros bens imóveis (ajuste o código se for apartamento/casa/terreno/etc)' },
+  veiculo:    { grupo: '02', codigo: '01', label: 'Veículo automotor terrestre' },
+  barco:      { grupo: '02', codigo: '03', label: 'Embarcação' },
+  clube:      { grupo: '99', codigo: '02', label: 'Título de clube e assemelhado' },
+  societario: { grupo: '03', codigo: '02', label: 'Quotas ou quinhões de capital (ajuste se for ações)' },
+  mutuo:      { grupo: '05', codigo: '01', label: 'Empréstimos concedidos' },
+  outro:      { grupo: '99', codigo: '99', label: 'Outros bens e direitos' },
+};
+// Conta bancária comum não distingue corrente/poupança no app — código
+// padrão é conta-corrente (mais frequente); o usuário ajusta se for o caso.
+const IRPF_ACCOUNT_CODIGO_MAP = {
+  bank:       { grupo: '06', codigo: '01', label: 'Depósito em conta-corrente (ajuste pro Grupo 04/código 01 se for conta poupança)' },
+  cash:       { grupo: '06', codigo: '10', label: 'Dinheiro em espécie — moeda nacional' },
+  investment: { grupo: '04', codigo: '99', label: 'Outras aplicações e investimentos — especifique o tipo' },
+};
+// Categoria do app -> grupo/código mais provável. "renda_fixa" e "fundos"
+// têm submodalidades isentas/tributadas que o app não distingue — por isso
+// o rótulo já avisa qual ajuste considerar.
+const IRPF_INV_CODIGO_MAP = {
+  tesouro:        { grupo: '04', codigo: '02', label: 'Títulos públicos sujeitos a tributação (Tesouro Direto)' },
+  renda_fixa:     { grupo: '04', codigo: '02', label: 'Títulos sujeitos a tributação (CDB/RDB) — use código 03 se for isento (LCI/LCA/CRI/CRA/debênture incentivada)' },
+  fundos:         { grupo: '07', codigo: '04', label: 'Fundos de investimento — ajuste conforme o tipo (FII=03, multimercado=13, Fiagro=02, etc)' },
+  renda_variavel: { grupo: '03', codigo: '01', label: 'Ações (inclusive listadas em bolsa) — use Grupo 04/código 04 se forem opções, BDR ou outro derivativo' },
+  previdencia:    { grupo: '99', codigo: '06', label: 'VGBL — atenção: PGBL tem tratamento diferente da Receita, não usar este código se for PGBL' },
+  private_equity: { grupo: '07', codigo: '06', label: 'FIP / Private Equity' },
+  valor_em_caixa: { grupo: '06', codigo: '99', label: 'Saldo em conta de corretora' },
+};
+const IRPF_CREDOR_CODIGOS = {
+  '11': 'Banco comercial', '12': 'Financeira/instituição não bancária',
+  '13': 'Outra pessoa jurídica', '14': 'Pessoa física',
+};
+
+function _irpfValueAtYearEnd(asset, year) {
+  const yearEndMonth = `${year}-12`;
+  // Vendido até o fim daquele ano -> não compõe mais o patrimônio em 31/12.
+  if (asset.sold_month && asset.sold_month <= yearEndMonth) return 0;
+
+  // Bem financiado ou mútuo: o crescimento do valor é LEGÍTIMO (parcelas
+  // realmente pagas, ou juros/correção de um crédito) — usa o histórico
+  // como está, incluindo entradas não-manuais (manual=0) geradas por essas
+  // sincronizações.
+  if (asset.financed || asset.asset_type === 'mutuo') {
+    const exact = first('SELECT value FROM pat_history WHERE asset_id=? AND month=?', [asset.id, yearEndMonth]);
+    if (exact) return exact.value;
+    const before = first('SELECT value FROM pat_history WHERE asset_id=? AND month<=? ORDER BY month DESC LIMIT 1', [asset.id, yearEndMonth]);
+    return before ? before.value : 0;
+  }
+
+  // Bem comum (imóvel, veículo, societário, etc., sem financiamento): a
+  // Receita exige custo histórico de aquisição, NUNCA valor de mercado —
+  // por isso só considera entradas MANUAIS (manual=1). Entradas manual=0
+  // pra esses tipos só existem por causa da projeção automática por
+  // tendência/IPCA (pat:auto-project), que serve pra exibição/gráfico, não
+  // pra declaração — usar isso aqui inflaria o valor declarado ano a ano
+  // mesmo sem ter havido nenhuma melhoria real no bem.
+  const exact = first('SELECT value FROM pat_history WHERE asset_id=? AND month=? AND manual=1', [asset.id, yearEndMonth]);
+  if (exact) return exact.value;
+  const before = first('SELECT value FROM pat_history WHERE asset_id=? AND month<=? AND manual=1 ORDER BY month DESC LIMIT 1', [asset.id, yearEndMonth]);
+  return before ? before.value : 0;
+}
+
+// Texto exigido pela Receita pra "dar baixa" de um bem vendido/encerrado no
+// ano: data, valor recebido e identificação do comprador — sem isso a
+// Receita pode entender que o bem "desapareceu" sem explicação.
+function _irpfVendaTexto(verbo, dataMes, valor) {
+  const valorTxt = valor != null ? `R$ ${Number(valor).toLocaleString('pt-BR',{minimumFractionDigits:2})}` : '[informar o valor recebido]';
+  return `${verbo} em ${dataMes} por ${valorTxt}, para [preencher: nome e CPF/CNPJ do comprador]. Verifique se há apuração de ganho de capital a fazer (Programa GCAP).`;
+}
+
+function _irpfSuggestDiscriminacao(asset) {
+  if (asset.irpf_discriminacao) return asset.irpf_discriminacao; // usuário já refinou manualmente
+  const parts = [asset.name + '.'];
+  if (asset.asset_type === 'mutuo') {
+    const base = asset.mutuo_indexador_base === 'anual' ? 'a.a.' : 'a.m.';
+    const tipoJuros = asset.mutuo_juros_tipo === 'compostos' ? 'juros compostos' : 'juros simples';
+    const indexador = asset.mutuo_index_type && asset.mutuo_index_type !== 'none' ? ` + ${asset.mutuo_index_type}` : '';
+    parts.push(`Empréstimo concedido a terceiro, ${tipoJuros}, taxa de ${asset.mutuo_taxa_juros||0}% ${base}${indexador}.`);
+    parts.push('[Preencher: nome completo e CPF/CNPJ do devedor]');
+  } else if (asset.financed) {
+    parts.push('Bem financiado — valor refere-se apenas ao montante já pago até 31/12 (a Receita orienta não incluir aqui o saldo devedor restante, que não entra em Dívidas e Ônus Reais por ter o próprio bem como garantia).');
+  } else {
+    parts.push('Valor pelo custo histórico de aquisição (não ajustado por valorização de mercado, conforme exigido pela Receita).');
+  }
+  if (asset.sold_month) {
+    parts.push(_irpfVendaTexto('Vendido', asset.sold_month, asset.sold_value));
+  }
+  return parts.join(' ');
+}
+
+function _debtBalanceAtYearEnd(debtId, year) {
+  const yearEndMonth = `${year}-12`;
+  const exact = first('SELECT balance_end FROM personal_debt_installments WHERE debt_id=? AND month=?', [debtId, yearEndMonth]);
+  if (exact && exact.balance_end != null) return exact.balance_end;
+  const before = first('SELECT balance_end FROM personal_debt_installments WHERE debt_id=? AND month<=? ORDER BY month DESC LIMIT 1', [debtId, yearEndMonth]);
+  return (before && before.balance_end != null) ? before.balance_end : 0;
+}
+
+// Saldo de conta bancária/dinheiro em 31/12 — mesma fórmula já usada em
+// outros pontos do app (soma de todas as transações até a data, sem filtro
+// de "conferido", já que a data é o que determina se entra na posição).
+function _accountBalanceAtYearEnd(accountId, year) {
+  const yearEnd = `${year}-12-31`;
+  const row = first('SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND date<=?', [accountId, yearEnd]);
+  return row ? row.bal : 0;
+}
+
+function _irpfSuggestAccountDiscriminacao(acc) {
+  if (acc.irpf_discriminacao) return acc.irpf_discriminacao;
+  if (acc.type === 'cash') return `${acc.name}. Dinheiro em espécie.`;
+  return `${acc.name}. [Preencher: nome do banco/instituição financeira, agência e número da conta${acc.type==='bank' ? ' — se a conta for conjunta, nome e CPF do co-titular' : ''}]`;
+}
+
+// Custo de aquisição acumulado (compras/aportes menos vendas/resgates) — é
+// isso que a Receita exige pra ações e participações, NUNCA o valor de
+// mercado da posição (que é o que "atualizacao" representa).
+function _invCostBasisAtYearEnd(assetId, year) {
+  const yearEndMonth = `${year}-12`;
+  const row = first(`
+    SELECT COALESCE(SUM(
+      CASE WHEN tx_type IN ('compra','aporte') THEN total_value
+           WHEN tx_type IN ('venda','amortizacao') THEN -total_value
+           ELSE 0 END
+    ), 0) as cost
+    FROM inv_transactions WHERE asset_id=? AND month<=?`, [assetId, yearEndMonth]);
+  return row ? Math.max(0, row.cost) : 0;
+}
+
+// Posição de investimento em 31/12. A base de valor depende da categoria:
+//  - ações/renda variável: custo de aquisição (nunca valor de mercado) —
+//    a Receita é explícita sobre isso, e o "atualizacao" importado da
+//    corretora normalmente É o valor de mercado da posição.
+//  - renda fixa/tesouro/previdência/caixa de corretora: usa o saldo
+//    informado ("atualizacao") — convenção comum pra esses produtos, que
+//    não têm risco de mercado especulativo (o saldo já reflete o valor a
+//    resgatar, não uma cotação flutuante).
+//  - fundos/private equity: a orientação encontrada foi genuinamente
+//    divergente entre fontes (algumas pedem custo, outras pedem saldo) —
+//    por isso usa o saldo, mas o relatório avisa explicitamente sobre essa
+//    divergência na discriminação, em vez de decidir silenciosamente.
+function _invValueAtYearEnd(asset, year) {
+  const yearEndMonth = `${year}-12`;
+  if (asset.closed_month && asset.closed_month <= yearEndMonth) return 0;
+  if (asset.category === 'renda_variavel') {
+    return _invCostBasisAtYearEnd(asset.id, year);
+  }
+  const row = first(
+    `SELECT total_value FROM inv_transactions WHERE asset_id=? AND tx_type='atualizacao' AND month<=? ORDER BY month DESC LIMIT 1`,
+    [asset.id, yearEndMonth]);
+  return row ? row.total_value : 0;
+}
+
+function _irpfSuggestInvDiscriminacao(asset) {
+  if (asset.irpf_discriminacao) return asset.irpf_discriminacao;
+  const parts = [`${asset.name}${asset.broker ? ` (${asset.broker})` : ''}.`];
+  if (asset.inv_type) parts.push(`Tipo: ${asset.inv_type}.`);
+  if (asset.category === 'renda_variavel') {
+    parts.push('Valor pelo custo de aquisição acumulado (compras − vendas), não pelo valor de mercado, conforme exigido pela Receita para ações/participações.');
+  } else if (asset.category === 'fundos' || asset.category === 'private_equity') {
+    parts.push('⚠️ Atenção: para fundos, há orientações divergentes entre usar o custo de aquisição ou o saldo/cota atual — confira no seu informe de rendimentos qual o fundo/administradora recomenda antes de declarar.');
+  }
+  parts.push('[Preencher: CNPJ da instituição financeira/emissor, e número da conta/aplicação se houver]');
+  if (asset.closed_month) {
+    parts.push(_irpfVendaTexto('Resgatado/encerrado', asset.closed_month, null));
+  }
+  return parts.join(' ');
+}
+
+// ── Rendimentos no ano — não é uma ficha oficial em si, é um resumo das
+// movimentações que o PRÓPRIO USUÁRIO já classificou no app (tipo de
+// movimentação + categoria do investimento), agrupado pelo destino mais
+// provável na declaração. Sempre exibido com aviso de que depende da
+// classificação feita pelo usuário — o app não sabe, por exemplo, se um
+// "aluguel" foi recebido de pessoa física ou jurídica, ou se um título é
+// isento de fato.
+const IRPF_REND_FICHA = {
+  aluguel:     { ficha: 'tributavel', label: 'Tributável recebido de PF — carnê-leão mensal, se aplicável' },
+  dividendo:   { ficha: 'isento',     label: 'Isento (dividendo)' },
+  jcp:         { ficha: 'exclusiva',  label: 'Tributação exclusiva (JCP, 15% retido na fonte)' },
+  juros_mutuo: { ficha: 'tributavel', label: 'Tributável — juros de empréstimo a pessoa física, carnê-leão mensal, se aplicável' },
+};
+
+function _irpfRendFichaInv(category, txType, irpfCodigo) {
+  if (txType === 'dividendo') return { ficha: 'isento', label: 'Isento (dividendo)' };
+  if (txType === 'jcp') return { ficha: 'exclusiva', label: 'Tributação exclusiva (JCP, 15% retido na fonte)' };
+  if (txType === 'cupom') {
+    return irpfCodigo === '03'
+      ? { ficha: 'isento', label: 'Isento (cupom de título isento)' }
+      : { ficha: 'exclusiva', label: 'Tributação exclusiva (cupom de título tributado)' };
+  }
+  if (txType === 'juros') {
+    if (category === 'renda_fixa' && irpfCodigo === '03') return { ficha: 'isento', label: 'Isento (juros de título isento — LCI/LCA/etc)' };
+    return { ficha: 'exclusiva', label: 'Tributação exclusiva (rendimento de aplicação financeira, IR retido na fonte)' };
+  }
+  return { ficha: 'outro', label: 'Verificar classificação — tipo não mapeado' };
+}
+
+ipcMain.handle('irpf:report', (_, { year }) => {
+  const y = parseInt(year);
+  const bens = [];
+
+  // 1) Ativos do Patrimônio (imóvel, veículo, mútuo, societário, etc.)
+  const assets = all('SELECT * FROM pat_assets ORDER BY sort_order, id'); // inclui ocultados — bem ocultado pode ser exatamente o que precisa de baixa na declaração
+  for (const asset of assets) {
+    const valorAnoAnterior = _irpfValueAtYearEnd(asset, y - 1);
+    const valorAnoAtual = _irpfValueAtYearEnd(asset, y);
+    if (valorAnoAnterior <= 0 && valorAnoAtual <= 0) continue; // sem posição relevante no período
+    const map = IRPF_CODIGO_MAP[asset.asset_type] || IRPF_CODIGO_MAP.outro;
+    bens.push({
+      source: 'pat', id: asset.id, name: asset.name, assetType: asset.asset_type,
+      grupoSugerido: map.grupo, codigoSugerido: asset.irpf_codigo || map.codigo, codigoLabel: map.label,
+      discriminacao: _irpfSuggestDiscriminacao(asset),
+      valorAnoAnterior, valorAnoAtual,
+      financed: !!asset.financed, encerrado: asset.sold_month || null,
+    });
+  }
+
+  // 2) Contas bancárias e dinheiro em espécie — cartão de crédito não entra
+  // aqui (não é bem/direito).
+  const accounts = all("SELECT * FROM accounts WHERE type IN ('bank','cash','investment') ORDER BY sort_order, id"); // inclui ocultadas
+  for (const acc of accounts) {
+    const valorAnoAnterior = _accountBalanceAtYearEnd(acc.id, y - 1);
+    const valorAnoAtual = _accountBalanceAtYearEnd(acc.id, y);
+    if (valorAnoAnterior <= 0 && valorAnoAtual <= 0) continue;
+    const map = IRPF_ACCOUNT_CODIGO_MAP[acc.type] || IRPF_ACCOUNT_CODIGO_MAP.bank;
+    bens.push({
+      source: 'account', id: acc.id, name: acc.name, assetType: 'conta',
+      grupoSugerido: map.grupo, codigoSugerido: acc.irpf_codigo || map.codigo, codigoLabel: map.label,
+      discriminacao: _irpfSuggestAccountDiscriminacao(acc),
+      valorAnoAnterior, valorAnoAtual,
+      financed: false, encerrado: null,
+    });
+  }
+
+  // 3) Investimentos financeiros (posições de corretora importadas/lançadas)
+  const invAssets = all('SELECT * FROM inv_assets ORDER BY sort_order, id'); // inclui ocultados
+  for (const inv of invAssets) {
+    const valorAnoAnterior = _invValueAtYearEnd(inv, y - 1);
+    const valorAnoAtual = _invValueAtYearEnd(inv, y);
+    if (valorAnoAnterior <= 0 && valorAnoAtual <= 0) continue;
+    const map = IRPF_INV_CODIGO_MAP[inv.category] || IRPF_INV_CODIGO_MAP.renda_fixa;
+    bens.push({
+      source: 'inv', id: inv.id, name: inv.name, assetType: inv.category,
+      grupoSugerido: map.grupo, codigoSugerido: inv.irpf_codigo || map.codigo, codigoLabel: map.label,
+      discriminacao: _irpfSuggestInvDiscriminacao(inv),
+      valorAnoAnterior, valorAnoAtual,
+      financed: false, encerrado: inv.closed_month || null,
+    });
+  }
+
+  // Dívidas e ônus reais — só entram as que cruzam o limite de R$5.000 da
+  // Receita em pelo menos um dos dois anos (financiamento de bem com
+  // garantia NÃO entra aqui — já foi tratado em Bens e Direitos acima).
+  const debts = all('SELECT * FROM personal_debts ORDER BY sort_order, id'); // inclui ocultados
+  const dividas = [];
+  for (const debt of debts) {
+    const balAnoAnterior = _debtBalanceAtYearEnd(debt.id, y - 1);
+    const balAnoAtual = _debtBalanceAtYearEnd(debt.id, y);
+    if (balAnoAnterior <= 5000 && balAnoAtual <= 5000) continue;
+    dividas.push({
+      debtId: debt.id, name: debt.name,
+      codigoSugerido: debt.irpf_codigo || '11', codigoLabel: IRPF_CREDOR_CODIGOS[debt.irpf_codigo || '11'],
+      notes: debt.notes || '',
+      balAnoAnterior, balAnoAtual,
+    });
+  }
+
+  // Rendimentos no ano — soma por ativo+tipo de movimentação, filtrando só
+  // pelo ANO (não 31/12 — rendimento é o que entrou DURANTE o ano, não uma
+  // posição num instante).
+  const rendimentos = [];
+  for (const asset of assets) {
+    const rows = all(`SELECT tx_type, SUM(total_value) as total FROM pat_transactions
+      WHERE asset_id=? AND tx_type IN ('aluguel','dividendo','jcp','juros_mutuo') AND substr(month,1,4)=?
+      GROUP BY tx_type HAVING total > 0`, [asset.id, String(y)]);
+    rows.forEach(r => {
+      const map = IRPF_REND_FICHA[r.tx_type] || { ficha: 'outro', label: 'Verificar classificação' };
+      rendimentos.push({ source: 'pat', name: asset.name, txType: r.tx_type, valor: r.total, ficha: map.ficha, fichaLabel: map.label });
+    });
+  }
+  for (const inv of invAssets) {
+    const rows = all(`SELECT tx_type, SUM(total_value) as total FROM inv_transactions
+      WHERE asset_id=? AND tx_type IN ('dividendo','juros','jcp','cupom') AND substr(month,1,4)=?
+      GROUP BY tx_type HAVING total > 0`, [inv.id, String(y)]);
+    rows.forEach(r => {
+      const map = _irpfRendFichaInv(inv.category, r.tx_type, inv.irpf_codigo);
+      rendimentos.push({ source: 'inv', name: inv.name, txType: r.tx_type, valor: r.total, ficha: map.ficha, fichaLabel: map.label });
+    });
+  }
+
+  return { year: y, bens, dividas, rendimentos };
+});
+
+// Handler único pra salvar override de código/discriminação, qualquer que
+// seja a origem do item (ativo do patrimônio, conta bancária, ou posição de
+// investimento) — evita triplicar o mesmo handler por tabela.
+ipcMain.handle('irpf:save-override', (_, { source, id, irpf_codigo, irpf_discriminacao }) => {
+  const table = source === 'account' ? 'accounts' : source === 'inv' ? 'inv_assets' : 'pat_assets';
+  run(`UPDATE ${table} SET irpf_codigo=?, irpf_discriminacao=? WHERE id=?`,
+    [irpf_codigo || null, irpf_discriminacao || null, id]);
+  return { ok: true };
+});
+
+ipcMain.handle('irpf:save-debt-override', (_, { debtId, irpf_codigo }) => {
+  run('UPDATE personal_debts SET irpf_codigo=? WHERE id=?', [irpf_codigo || null, debtId]);
+  return { ok: true };
+});
+
+// Exportação genérica de HTML pra PDF — usa uma janela invisível só pra
+// renderizar o HTML e gerar o PDF via printToPDF, depois pede ao usuário
+// onde salvar. O app não tinha nenhum mecanismo de exportar PDF ainda.
+ipcMain.handle('report:export-pdf', async (_, { html, suggestedName }) => {
+  let pdfWin;
+  try {
+    pdfWin = new BrowserWindow({ show: false, webPreferences: { offscreen: true } });
+    const tmpHtmlPath = path.join(app.getPath('temp'), `ff_report_${Date.now()}.html`);
+    fs.writeFileSync(tmpHtmlPath, html, 'utf8');
+    await pdfWin.loadFile(tmpHtmlPath);
+    const pdfBuffer = await pdfWin.webContents.printToPDF({
+      printBackground: true, pageSize: 'A4',
+      margins: { marginType: 'custom', top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
+    });
+    fs.unlinkSync(tmpHtmlPath);
+
+    const { filePath, canceled } = await dialog.showSaveDialog(win, {
+      title: 'Salvar relatório em PDF',
+      defaultPath: suggestedName || 'relatorio.pdf',
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+    if (canceled || !filePath) return { ok: false, canceled: true };
+    fs.writeFileSync(filePath, pdfBuffer);
+    require('electron').shell.showItemInFolder(filePath);
+    return { ok: true, filePath };
+  } catch(e) {
+    return { ok: false, error: e.message };
+  } finally {
+    if (pdfWin) pdfWin.destroy();
+  }
+});
 
 ipcMain.handle('debt:list', () =>
   all('SELECT * FROM personal_debts ORDER BY sort_order, id')

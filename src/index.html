@@ -2369,8 +2369,31 @@ select.inp option{background:var(--bg2);}
     </div>
   </div>
 
+  <!-- RELATÓRIO IRPF -->
+  <div id="page-irpf" class="page">
+    <div class="page-header">
+      <h2>🧾 Relatório IRPF — Bens e Direitos</h2>
+    </div>
+
+    <div class="info-box" style="margin-bottom:14px;font-size:13px;line-height:1.7">
+      Gera um rascunho com os códigos, discriminação e valores de 31/12 sugeridos para a ficha <strong>Bens e Direitos</strong> (e, separadamente, <strong>Dívidas e Ônus Reais</strong>) da declaração de Imposto de Renda. Revise cada item — em especial a discriminação, que precisa de dados como CPF do devedor ou matrícula do imóvel que o app não tem — antes de usar no programa da Receita Federal. Isto não substitui orientação contábil.
+    </div>
+
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div style="padding:14px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <label class="lbl" style="margin:0">Ano-calendário (referente à declaração do ano seguinte)</label>
+        <select class="inp" id="irpf-year" style="width:120px"></select>
+        <button class="btn primary" onclick="generateIrpfReport()">Gerar relatório</button>
+        <button class="btn" id="irpf-export-btn" onclick="exportIrpfPdf()" style="display:none">📄 Exportar PDF</button>
+      </div>
+    </div>
+
+    <div id="irpf-report-container"></div>
+  </div>
+
   <!-- BACKUP -->
   <div id="page-backup" class="page">
+
 
     <!-- Language selector -->
     <div class="tbl-card" style="margin-bottom:14px">
