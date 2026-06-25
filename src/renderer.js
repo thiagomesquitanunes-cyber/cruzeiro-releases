@@ -704,10 +704,8 @@ async function buildEvolucaoCategorySeries() {
   const excl = [..._excludedCats];
   const catRows = await ff.evolucaoByCat({ excludedCats: excl }).catch(() => []);
 
-  const currentYear = new Date().getFullYear();
-  const ipcaYears = Object.keys(_ev.ipca).map(Number).filter(y => y < currentYear).sort((a,b)=>a-b);
-  const refYear = ipcaYears.length ? ipcaYears[ipcaYears.length-1] : currentYear;
-  const corr = (v, m) => inflateMonth(v, m, refYear);
+  const refMonth = getIpcaRefMonth() || todayStr().slice(0,7);
+  const corr = (v, m) => inflateMonth(v, m, refMonth);
 
   const today = todayStr();
   const curM = today.slice(0,7);
@@ -729,7 +727,7 @@ async function buildEvolucaoCategorySeries() {
     series[cat] = { months: allMonths, raw: rawNet, ma12 };
   });
 
-  return { allMonths, allCats, series, refYear };
+  return { allMonths, allCats, series, refMonth };
 }
 
 // targetMonth/filters: período (quantos meses), categorias (lista ou vazio=todas),
@@ -1108,6 +1106,533 @@ function overviewToday() {
   refreshOverview();
 }
 
+// ══ PAINEL FINANCEIRO (novo) — gráfico integrado, orçamento, categorias,
+// gauge de despesa/receita e cartões, todos sincronizados pelo mês
+// selecionado no primeiro gráfico. ══
+const DASH_COLORS = [
+  '#ef5350','#43a047','#a855f7','#3b82f6','#f43f5e','#eab308',
+  '#22c55e','#06b6d4','#f97316','#8b5cf6','#ec4899','#84cc16'
+];
+let _dash = {
+  flowChart: null, budgetDonut: null, catBarChart: null, gaugeChart: null,
+  flowMonths: null, flowIncome: null, flowExpense: null,
+  selectedMonth: null, catMode: 'exp', periodMonths: 12,
+  useIpca: true, useMa: true,
+  _lastByCatFull: null, _lastMonthStr: null,
+};
+
+function monthLabelFull(m) {
+  const [y, mo] = m.split('-');
+  return ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][parseInt(mo)-1] + ' ' + y;
+}
+
+// Tooltip externo compartilhado por todos os gráficos do Painel — substitui
+// a caixinha preta padrão do Chart.js por um cartão branco arredondado,
+// com título e linhas com bolinha colorida (estilo da referência visual).
+function dashTooltip(context, opts) {
+  const { chart, tooltip } = context;
+  let el = document.getElementById('chart-tooltip-shared');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'chart-tooltip-shared';
+    el.className = 'chart-tooltip';
+    document.body.appendChild(el);
+  }
+  if (tooltip.opacity === 0 || !tooltip.dataPoints || !tooltip.dataPoints.length) {
+    el.classList.remove('show');
+    return;
+  }
+  const dp = tooltip.dataPoints;
+  const title = opts.getTitle ? opts.getTitle(dp) : (tooltip.title?.[0] || '');
+  const rows  = opts.getRows  ? opts.getRows(dp)  : [];
+  el.innerHTML = `<div class="ct-title">${esc(title)}</div>` + rows.map(r =>
+    `<div class="ct-row"><span class="ct-dot" style="background:${r.color}"></span><span class="ct-label">${esc(r.label)}</span><span class="ct-value">${esc(r.value)}</span></div>`
+  ).join('');
+  el.classList.add('show'); // precisa estar visível antes de medir a largura
+
+  const rect = chart.canvas.getBoundingClientRect();
+  const idealLeft = rect.left + window.scrollX + tooltip.caretX;
+  const idealTop  = rect.top  + window.scrollY + tooltip.caretY;
+  const tw = el.offsetWidth;
+  const margin = 10;
+  const vw = window.innerWidth;
+
+  // Por padrão centraliza no ponto (translateX -50%) — mas isso jogaria o
+  // tooltip pra fora da tela pros pontos perto das bordas (o mês mais
+  // recente, sempre o último à direita, é o caso mais comum). Ancora pela
+  // esquerda ou direita nesses casos, em vez de centralizar.
+  let translateX = '-50%';
+  let left = idealLeft;
+  if (idealLeft - tw/2 < margin) {
+    translateX = '0%';
+    left = margin;
+  } else if (idealLeft + tw/2 > vw - margin) {
+    translateX = '-100%';
+    left = vw - margin;
+  }
+  el.style.left = left + 'px';
+  el.style.top = idealTop + 'px';
+  el.style.transform = `translate(${translateX}, -100%) translateY(-10px)`;
+}
+
+// Plugin que desenha a linha pontilhada vertical no mês selecionado, igual
+// à referência visual (print 1).
+const _dashSelectedLinePlugin = {
+  id: 'dashSelectedLine',
+  afterDatasetsDraw(chart) {
+    const idx = chart.config._selectedIdx;
+    if (idx == null) return;
+    const meta = chart.getDatasetMeta(0);
+    const point = meta?.data?.[idx];
+    if (!point) return;
+    const { ctx, chartArea } = chart;
+    ctx.save();
+    ctx.beginPath();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(100,116,139,.45)';
+    ctx.lineWidth = 1.5;
+    ctx.moveTo(point.x, chartArea.top);
+    ctx.lineTo(point.x, chartArea.bottom);
+    ctx.stroke();
+    ctx.restore();
+  }
+};
+
+// Busca o detalhamento mensal por categoria — mesma fonte usada pela aba
+// Evolução (evolucao:monthly-by-category), que já exclui transferências
+// corretamente (transfer_id E as 4 variantes do texto da categoria) e
+// aplica a lista manual de categorias excluídas. Retorna no formato
+// {mes: {categoria: {income, expenses}}}, pronto pra computeSummaryFromByCat.
+async function _dashFetchByCat() {
+  const catRows = await ff.evolucaoByCat({ excludedCats: [..._excludedCats] }).catch(() => []);
+  const byCatFull = {};
+  catRows.forEach(r => {
+    if (!byCatFull[r.month]) byCatFull[r.month] = {};
+    byCatFull[r.month][r.category] = { income: r.income || 0, expenses: r.expenses || 0 };
+  });
+  return byCatFull;
+}
+
+// (i) Receitas e despesas — janela de N meses (escolhido no seletor de
+// período) TERMINANDO no mês selecionado — ou seja, a janela "anda junto"
+// conforme o usuário navega pelos meses, em vez de ficar fixa nos últimos
+// 12 meses a partir de hoje. Usa a MESMA fonte e o MESMO método de cálculo
+// da aba Evolução (saldo líquido por categoria, mês a mês) — em vez de
+// reimplementar a lógica, chama diretamente ff.evolucaoByCat +
+// computeSummaryFromByCat, as mesmas funções que a Evolução usa. Isso já
+// cobre corretamente a exclusão de transferências (transfer_id E as 4
+// variantes do texto da categoria) e a configuração de categorias da
+// Evolução, exatamente como lá. Recalcula sempre (nunca cacheia).
+async function ensureDashFlowChart(byCatFullArg) {
+  if (typeof Chart === 'undefined') return;
+
+  const anchor = _dash.selectedMonth || overviewMonthStr();
+  const byCatFull = byCatFullArg || await _dashFetchByCat();
+
+  // Todos os meses disponíveis até o mês selecionado — precisamos do
+  // histórico completo (não só a janela exibida) porque a média móvel de
+  // 12 meses precisa "olhar pra trás" além do início da janela.
+  const allAvailMonths = Object.keys(byCatFull).filter(m => m <= anchor).sort();
+  if (!allAvailMonths.length) return;
+
+  const n = _dash.periodMonths || 12;
+  let months;
+  if (n === 'all') {
+    months = allAvailMonths;
+  } else {
+    const [ay, am] = anchor.split('-').map(Number);
+    months = [];
+    for (let i = n - 1; i >= 0; i--) {
+      const d = new Date(ay, am - 1 - i, 1);
+      months.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+    }
+  }
+
+  // Mesma metodologia da aba Evolução: corrigido pelo IPCA mensal (valores
+  // de hoje) e suavizado por média móvel de 12 meses — agora controlável
+  // pelos toggles ao lado do gráfico, em vez de sempre fixo.
+  const summary  = computeSummaryFromByCat(allAvailMonths, byCatFull);
+  const refMonth = getIpcaRefMonth();
+  const corr = (v, m) => _dash.useIpca && refMonth ? inflateMonth(v, m, refMonth) : (v || 0);
+  const rawInc = allAvailMonths.map(m => corr(summary[m]?.income   || 0, m));
+  const rawExp = allAvailMonths.map(m => corr(summary[m]?.expenses || 0, m));
+  const maInc  = _dash.useMa ? allAvailMonths.map((_,i) => movAvg12(rawInc, i)) : rawInc;
+  const maExp  = _dash.useMa ? allAvailMonths.map((_,i) => movAvg12(rawExp, i)) : rawExp;
+  const idxOf = {}; allAvailMonths.forEach((m,i) => idxOf[m] = i);
+  const incomeArr  = months.map(m => maInc[idxOf[m]] ?? 0);
+  const expenseArr = months.map(m => maExp[idxOf[m]] ?? 0);
+
+  _dash.flowMonths = months;
+  _dash.flowIncome = incomeArr;
+  _dash.flowExpense = expenseArr;
+
+  const canvas = G('dash-flow-chart');
+  if (!canvas) return;
+  const shortLabels = months.map(monthLabelShort);
+  const suffixParts = [];
+  if (_dash.useIpca) suffixParts.push('IPCA');
+  if (_dash.useMa) suffixParts.push('MM12m');
+  const suffix = suffixParts.length ? ` (${suffixParts.join(', ')})` : '';
+  const subEl = canvas.closest('.dash-card')?.querySelector('.dash-sub');
+  if (subEl) {
+    const bits = [];
+    if (_dash.useIpca) bits.push(`corrigido pelo IPCA (R$ de ${refMonth?monthLabelFull(refMonth):'hoje'})`);
+    if (_dash.useMa) bits.push('média móvel de 12 meses');
+    subEl.textContent = (bits.length ? bits.join(', ') + ' — ' : '') + 'clique em um mês para ver os detalhes nos painéis abaixo';
+  }
+
+  if (_dash.flowChart) {
+    // Atualiza a instância existente em vez de recriar — mesmo princípio
+    // de transição suave usado nos outros widgets. Os rótulos também
+    // mudam (a janela inteira pode ter se deslocado), não só os valores.
+    _dash.flowChart.data.labels = shortLabels;
+    _dash.flowChart.data.datasets[0].data = incomeArr;
+    _dash.flowChart.data.datasets[0].label = 'Receitas' + suffix;
+    _dash.flowChart.data.datasets[1].data = expenseArr;
+    _dash.flowChart.data.datasets[1].label = 'Despesas' + suffix;
+    _dash.flowChart.update();
+    return;
+  }
+
+  const selIdx = () => _dash.flowMonths.indexOf(_dash.selectedMonth);
+
+  const ctx = canvas.getContext('2d');
+  const chartH = canvas.height || 260;
+  _dash.flowChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: shortLabels,
+      datasets: [
+        { label:'Receitas'+suffix, data: incomeArr, borderColor:'#43a047', backgroundColor:evChartGradient(ctx,'#43a047',chartH),
+          fill:true, tension:.4, borderWidth:2.5, pointBackgroundColor:'#43a047', pointBorderColor:'#fff', pointBorderWidth:2,
+          pointRadius: (c) => c.dataIndex === selIdx() ? 7 : 0, pointHoverRadius: 6 },
+        { label:'Despesas'+suffix, data: expenseArr, borderColor:'#ef5350', backgroundColor:evChartGradient(ctx,'#ef5350',chartH),
+          fill:true, tension:.4, borderWidth:2.5, pointBackgroundColor:'#ef5350', pointBorderColor:'#fff', pointBorderWidth:2,
+          pointRadius: (c) => c.dataIndex === selIdx() ? 7 : 0, pointHoverRadius: 6 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      onClick: (evt, _els, chart) => {
+        const pts = chart.getElementsAtEventForMode(evt, 'index', { intersect:false }, true);
+        if (pts.length) dashSelectMonth(_dash.flowMonths[pts[0].index]);
+      },
+      onHover: (evt, els, chart) => { chart.canvas.style.cursor = els.length ? 'pointer' : 'default'; },
+      plugins: {
+        legend: { display:true, position:'top', align:'end', labels:{ boxWidth:10, boxHeight:10, usePointStyle:true, pointStyle:'circle', font:{size:11.5, weight:'600'} } },
+        tooltip: {
+          enabled: false,
+          external: (context) => dashTooltip(context, {
+            getTitle: (dp) => monthLabelFull(_dash.flowMonths[dp[0].dataIndex]),
+            getRows:  (dp) => dp.map(d => ({ color: d.dataset.borderColor, label: d.dataset.label, value: fmtBRL(d.parsed.y) })),
+          }),
+        }
+      },
+      scales: {
+        x: { grid:{display:false}, ticks:{font:{size:11}} },
+        y: { min:0, grid:{color:'rgba(0,0,0,.05)'}, ticks:{font:{size:10}, callback: v => 'R$'+(Math.abs(v)>=1000?(v/1000).toFixed(0)+'k':v.toFixed(0))} },
+      }
+    },
+    plugins: [_dashSelectedLinePlugin]
+  });
+}
+
+// Troca o período (6/12/24/36 meses) no seletor — a janela recalcula
+// terminando no mês atualmente selecionado.
+async function dashToggleFlowIpca() {
+  _dash.useIpca = !_dash.useIpca;
+  G('dash-flow-ipca-pill')?.classList.toggle('active', _dash.useIpca);
+  await ensureDashFlowChart();
+}
+async function dashToggleFlowMa() {
+  _dash.useMa = !_dash.useMa;
+  G('dash-flow-ma-pill')?.classList.toggle('active', _dash.useMa);
+  await ensureDashFlowChart();
+}
+async function dashSetPeriod(n) {
+  _dash.periodMonths = n === 'all' ? 'all' : (parseInt(n) || 12);
+  await ensureDashFlowChart();
+  if (_dash.flowChart) {
+    const idx = _dash.flowMonths.indexOf(_dash.selectedMonth);
+    _dash.flowChart.config._selectedIdx = idx >= 0 ? idx : null;
+    _dash.flowChart.update();
+  }
+}
+
+function monthLabelShort(m) {
+  const [y, mo] = m.split('-');
+  return ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][parseInt(mo)-1] + '/' + y.slice(2);
+}
+
+// Disparado ao clicar num ponto do gráfico (i) — atualiza o seletor de mês
+// já existente no topo da página, e dispara o refresh completo (stats +
+// todos os widgets do Painel), garantindo uma única fonte de verdade pro
+// "mês selecionado".
+async function dashSelectMonth(monthStr) {
+  if (!monthStr) return;
+  const [y, mo] = monthStr.split('-').map(Number);
+  _overviewYear = y; _overviewMonth = mo;
+  await refreshOverview();
+}
+
+async function refreshDashboardWidgets({ monthStr, fromDate, toDate, rows, income, expenses }) {
+  if (typeof Chart === 'undefined') {
+    // Chart.js ainda carregando do CDN — tenta de novo em breve, mesmo
+    // padrão já usado pelos outros gráficos do app.
+    setTimeout(() => refreshDashboardWidgets({ monthStr, fromDate, toDate, rows, income, expenses }), 400);
+    return;
+  }
+  _dash.selectedMonth = monthStr;
+
+  // Busca uma vez só e compartilha entre os widgets que dependem do mesmo
+  // cálculo (fluxo, participação por categoria, gauge) — em vez de cada um
+  // buscar (e potencialmente calcular) por conta própria.
+  const byCatFull = await _dashFetchByCat();
+  const monthSummary = computeSummaryFromByCat([monthStr], byCatFull)[monthStr] || { income:0, expenses:0 };
+
+  await ensureDashFlowChart(byCatFull);
+  if (_dash.flowChart) {
+    const idx = _dash.flowMonths.indexOf(monthStr);
+    _dash.flowChart.config._selectedIdx = idx >= 0 ? idx : null;
+    _dash.flowChart.update();
+  }
+
+  await renderDashBudget(monthStr);
+  renderDashCatBars(byCatFull, monthStr);
+  renderDashGauge(monthSummary.income, monthSummary.expenses);
+  await renderDashCards(fromDate, toDate);
+}
+
+// (ii) Orçado vs. realizado — barras horizontais por categoria + rosca
+// agregada (% do total orçado já consumido no mês selecionado).
+async function renderDashBudget(monthStr) {
+  const monthNamesFull = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const [yy, mo] = monthStr.split('-').map(Number);
+  const monthLbl = G('dash-budget-month');
+  if (monthLbl) monthLbl.textContent = `— ${monthNamesFull[mo-1]} ${yy}`;
+
+  const budgets = await ff.budgetList().catch(() => []);
+  const actuals = await ff.budgetActuals({ month: monthStr }).catch(() => []);
+  const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: monthStr }).catch(() => ({}));
+  const actMap = {};
+  actuals.forEach(a => { actMap[a.category] = a.spent || 0; });
+
+  const enriched = budgets.map(b => {
+    const rollAcc = (b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0;
+    const effLimit = b.monthly_limit + rollAcc;
+    const spent = actMap[b.category] || 0;
+    return { category: b.category, spent, effLimit, pct: effLimit > 0 ? (spent / effLimit * 100) : 0 };
+  }).filter(b => b.effLimit > 0).sort((a,b) => b.pct - a.pct);
+
+  const barsEl = G('dash-budget-bars');
+  if (barsEl) {
+    if (!enriched.length) {
+      barsEl.innerHTML = `<div class="info-box" style="text-align:center;padding:24px;font-size:13px">Nenhuma meta de orçamento cadastrada ainda. <a href="#" onclick="goPage('budget');return false">Criar uma meta →</a></div>`;
+    } else {
+      barsEl.innerHTML = enriched.slice(0, 8).map(b => {
+        const color = b.pct >= 100 ? 'var(--chart-expense)' : b.pct >= 85 ? '#f0a93a' : 'var(--chart-income)';
+        return `<div class="budget-bar-row">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(b.category)}">${esc(b.category)}</span>
+          <div class="budget-bar-track"><div class="budget-bar-fill" style="width:${Math.min(100,b.pct)}%;background:${color}"></div></div>
+          <span style="font-weight:700;color:${color};text-align:right">${b.pct.toFixed(1)}%</span>
+          <span style="color:var(--text2);text-align:right;font-family:'DM Mono',monospace">${fmtBRL(b.spent)}</span>
+        </div>`;
+      }).join('');
+    }
+  }
+
+  const totalSpent  = enriched.reduce((s,b) => s + b.spent, 0);
+  const totalBudget = enriched.reduce((s,b) => s + b.effLimit, 0);
+  const pctTotal = totalBudget > 0 ? (totalSpent / totalBudget * 100) : 0;
+  const donutColor = pctTotal >= 100 ? '#ef5350' : pctTotal >= 85 ? '#f0a93a' : '#43a047';
+
+  const labelEl = G('dash-budget-donut-label');
+  if (labelEl) { labelEl.textContent = `${pctTotal.toFixed(0)}%`; labelEl.style.color = donutColor; }
+  const subEl = G('dash-budget-donut-sub');
+  if (subEl) subEl.textContent = enriched.length ? `${fmtBRL(totalSpent)} de ${fmtBRL(totalBudget)} orçados` : 'Sem metas no mês';
+
+  const canvas = G('dash-budget-donut');
+  if (canvas) {
+    if (_dash.budgetDonut) {
+      // Atualiza a instância existente — o Chart.js anima a transição entre
+      // os valores antigo e novo suavemente, em vez de só "aparecer" do
+      // zero (que é o que destruir-e-recriar faria a cada mês clicado).
+      _dash.budgetDonut.data.datasets[0].data = [Math.min(100,pctTotal), Math.max(0,100-Math.min(100,pctTotal))];
+      _dash.budgetDonut.data.datasets[0].backgroundColor = [donutColor,'rgba(0,0,0,.06)'];
+      _dash.budgetDonut.update();
+    } else {
+      _dash.budgetDonut = new Chart(canvas.getContext('2d'), {
+        type: 'doughnut',
+        data: { datasets: [{ data: [Math.min(100,pctTotal), Math.max(0,100-Math.min(100,pctTotal))], backgroundColor: [donutColor,'rgba(0,0,0,.06)'], borderWidth: 0 }] },
+        options: { cutout:'78%', responsive:true, maintainAspectRatio:false, animation:{ animateRotate:true, duration:600 }, plugins:{ legend:{display:false}, tooltip:{enabled:false} } }
+      });
+    }
+  }
+}
+
+// (iii) Participação por categoria — barras horizontais, alternando entre
+// despesas e receitas do mês selecionado.
+function dashSetCatMode(mode) {
+  _dash.catMode = mode;
+  document.querySelectorAll('#dash-cat-toggle button').forEach(b => b.classList.toggle('active', b.dataset.v === mode));
+  renderDashCatBars(_dash._lastByCatFull, _dash._lastMonthStr);
+}
+
+function renderDashCatBars(byCatFull, monthStr) {
+  if (!byCatFull) return;
+  _dash._lastByCatFull = byCatFull; _dash._lastMonthStr = monthStr;
+  const isExp = _dash.catMode === 'exp';
+
+  // Mesma classificação por saldo líquido usada no total (igual à
+  // computeSummaryFromByCat da Evolução): cada categoria entra em UM dos
+  // dois grupos (receita OU despesa) pelo saldo líquido dela no mês, nunca
+  // nos dois — garantindo que a soma das barras bate exatamente com o
+  // total mostrado, mês a mês.
+  const modeOf = {};
+  _ev.catConfig.forEach(({cat,mode}) => modeOf[cat] = mode);
+  const catConfigActive = _ev.catConfig.length > 0;
+
+  const mo = byCatFull[monthStr] || {};
+  const byCat = {};
+  Object.entries(mo).forEach(([cat,d]) => {
+    if (modeOf[cat] === 'excluded') return;
+    if (catConfigActive && modeOf[cat] === undefined) return;
+    const net = (d.income||0) - (d.expenses||0);
+    if (isExp && net < 0) byCat[cat] = Math.abs(net);
+    else if (!isExp && net > 0) byCat[cat] = net;
+  });
+
+  const total = Object.values(byCat).reduce((s,v) => s+v, 0);
+  const entries = Object.entries(byCat).sort((a,b) => b[1]-a[1]).slice(0, 8);
+
+  const canvas = G('dash-cat-bar-chart');
+  const emptyEl = G('dash-cat-bar-empty');
+  if (!canvas || typeof Chart === 'undefined') return;
+
+  if (!entries.length) {
+    canvas.style.display = 'none';
+    if (emptyEl) { emptyEl.style.display = ''; emptyEl.textContent = `Sem ${isExp?'despesas':'receitas'} no mês selecionado.`; }
+    return;
+  }
+  canvas.style.display = '';
+  if (emptyEl) emptyEl.style.display = 'none';
+
+  const labels = entries.map(([c]) => c);
+  const data   = entries.map(([,v]) => v);
+  const colors = entries.map((_,i) => DASH_COLORS[i % DASH_COLORS.length]);
+
+  if (_dash.catBarChart) {
+    // Atualiza a instância existente — Chart.js anima o crescimento/
+    // encolhimento das barras suavemente entre um mês e outro, em vez de
+    // recriar o gráfico do zero a cada clique.
+    _dash.catBarChart.config._catTotal = total;
+    _dash.catBarChart.data.labels = labels;
+    _dash.catBarChart.data.datasets[0].data = data;
+    _dash.catBarChart.data.datasets[0].backgroundColor = colors;
+    _dash.catBarChart.update();
+    return;
+  }
+
+  _dash.catBarChart = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data, backgroundColor: colors, borderRadius: 8, maxBarThickness: 26 }]
+    },
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+      onClick: (evt, els, chart) => {
+        if (!els.length) return;
+        const cat = chart.data.labels[els[0].index];
+        const m = _dash.selectedMonth;
+        if (!m) return;
+        const [yy, mm] = m.split('-').map(Number);
+        const lastDay = new Date(yy, mm, 0).getDate();
+        openCatDetail(cat, `${m}-01`, `${m}-${String(lastDay).padStart(2,'0')}`);
+      },
+      onHover: (evt, els, chart) => { chart.canvas.style.cursor = els.length ? 'pointer' : 'default'; },
+      plugins: {
+        legend: { display:false },
+        tooltip: {
+          enabled: false,
+          // Lê o total do config do PRÓPRIO gráfico (não de uma variável
+          // capturada por closure) — assim continua correto depois de
+          // updates futuros na mesma instância, não só na criação.
+          external: (context) => dashTooltip(context, {
+            getTitle: (dp) => dp[0].label,
+            getRows:  (dp) => {
+              const tot = context.chart.config._catTotal || 0;
+              return [{ color: dp[0].dataset.backgroundColor[dp[0].dataIndex], label: tot>0 ? `${(dp[0].parsed.x/tot*100).toFixed(1)}% do total — clique para ver as transações` : '', value: fmtBRL(dp[0].parsed.x) }];
+            },
+          }),
+        }
+      },
+      scales: {
+        x: { grid:{color:'rgba(0,0,0,.05)'}, ticks:{ callback: v => 'R$'+(Math.abs(v)>=1000?(v/1000).toFixed(0)+'k':v.toFixed(0)) } },
+        y: { grid:{display:false} },
+      },
+      animation: { duration: 500 }
+    }
+  });
+  _dash.catBarChart.config._catTotal = total;
+}
+
+// (iv) Gauge "enchendo" — % de despesas em relação à receita do mês.
+function renderDashGauge(income, expenses) {
+  const pct = income > 0 ? (expenses / income * 100) : (expenses > 0 ? 999 : 0);
+  const clamped = Math.min(100, pct);
+  const color = pct >= 100 ? '#ef5350' : pct >= 80 ? '#f0a93a' : '#43a047';
+
+  const labelEl = G('dash-gauge-label');
+  if (labelEl) labelEl.innerHTML = `<div style="font-size:25px;font-weight:800;color:${color}">${pct.toFixed(0)}%</div><div style="font-size:10px;color:var(--text3)">da receita</div>`;
+  const subEl = G('dash-gauge-sub');
+  if (subEl) subEl.textContent = income <= 0 ? 'Sem receita no mês' : (pct >= 100 ? '⚠️ Gastando mais do que ganha' : 'Dentro da receita do mês');
+
+  const canvas = G('dash-gauge-chart');
+  if (!canvas || typeof Chart === 'undefined') return;
+  if (_dash.gaugeChart) {
+    _dash.gaugeChart.data.datasets[0].data = [clamped, 100-clamped];
+    _dash.gaugeChart.data.datasets[0].backgroundColor = [color,'rgba(0,0,0,.06)'];
+    _dash.gaugeChart.update();
+  } else {
+    _dash.gaugeChart = new Chart(canvas.getContext('2d'), {
+      type: 'doughnut',
+      data: { datasets: [{ data: [clamped, 100-clamped], backgroundColor: [color,'rgba(0,0,0,.06)'], borderWidth: 0 }] },
+      options: { cutout:'78%', responsive:true, maintainAspectRatio:false, animation:{ animateRotate:true, duration:700 }, plugins:{ legend:{display:false}, tooltip:{enabled:false} } }
+    });
+  }
+}
+
+// (v) Cartões de crédito — fatura do mês selecionado vs. limite.
+async function renderDashCards(fromDate, toDate) {
+  const cardEl = G('dash-cards-card');
+  const cards = (accounts || []).filter(a => a.type === 'credit' && !a.hidden && a.credit_limit > 0);
+  if (!cardEl) return;
+  if (!cards.length) { cardEl.style.display = 'none'; return; }
+  cardEl.style.display = '';
+
+  const results = [];
+  for (const c of cards) {
+    const txs = await ff.listTx({ accountId: c.id, fromDate }).catch(() => []);
+    const spent = txs.filter(t => t.date <= toDate && t.amount < 0).reduce((s,t) => s - t.amount, 0);
+    results.push({ name: c.name, spent, limit: c.credit_limit, pct: c.credit_limit > 0 ? (spent / c.credit_limit * 100) : 0 });
+  }
+  results.sort((a,b) => b.pct - a.pct);
+
+  const barsEl = G('dash-cards-bars');
+  if (!barsEl) return;
+  barsEl.innerHTML = results.map(r => {
+    const color = r.pct >= 90 ? 'var(--chart-expense)' : r.pct >= 70 ? '#f0a93a' : 'var(--chart-income)';
+    return `<div class="card-bar-row">
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name)}">💳 ${esc(r.name)}</span>
+      <div class="budget-bar-track"><div class="budget-bar-fill" style="width:${Math.min(100,r.pct)}%;background:${color}"></div></div>
+      <span style="font-weight:700;color:${color};text-align:right">${r.pct.toFixed(1)}%</span>
+      <span style="color:var(--text2);text-align:right;font-family:'DM Mono',monospace">${fmtBRL(r.spent)}</span>
+    </div>`;
+  }).join('');
+}
+
 function persistOverviewSettings() {
   ff.overviewConfigSave({
     excludedCats:      [..._excludedCats],
@@ -1145,7 +1670,7 @@ async function refreshOverview() {
   const rows = await ff.reportSummary({ fromDate, toDate, excludeTransfers: true });
   let income = 0, expenses = 0;
   rows.forEach(r => {
-    if (_excludedCats.has(r.category)) return;
+    if (_excludedCats.has(r.category||'')) return;
     income   += r.income;
     expenses += r.expenses;
   });
@@ -1162,83 +1687,16 @@ async function refreshOverview() {
     <div class="stat-card"><div class="stat-lbl">Saídas no mês</div><div class="stat-val red">${fmtBRL(expenses)}</div></div>
     <div class="stat-card"><div class="stat-lbl">Resultado</div><div class="stat-val ${income-expenses>=0?'green':'red'}">${fmtBRL(income-expenses)}</div></div>`;
 
-  // Pie charts — net per category (income - expenses), apply excluded filter
-  const catNet = {};
-  rows.forEach(r => {
-    if (_excludedCats.has(r.category)) return;
-    const cat = r.category || 'Outros';
-    if (!catNet[cat]) catNet[cat] = 0;
-    catNet[cat] += r.income - r.expenses;
-  });
-  const netExp = Object.entries(catNet).filter(([,v])=>v<0).sort((a,b)=>a[1]-b[1]).map(([label,v])=>({label,value:Math.abs(v)}));
-  const netInc = Object.entries(catNet).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]).map(([label,v])=>({label,value:v}));
-  drawPie('pie-expenses', 'pie-expenses-legend', netExp, fromDate, toDate);
-  drawPie('pie-income',   'pie-income-legend',   netInc, fromDate, toDate);
   renderCatFilterChips();
 
   // Future pending
   await refreshFuturePending();
 
-  // Trend charts data
-  _monthlyByCat = await ff.reportMonthlyByCategory({ excludeTransfers: true });
-  renderTrendCharts();
+  // Novo painel financeiro: gráfico integrado, orçamento, categorias, cartões
+  await refreshDashboardWidgets({ monthStr, fromDate, toDate, rows, income, expenses });
 
   // AI insights card (shown only if API key configured)
   maybeShowInsightsCard();
-}
-
-function drawPie(canvasId, legendId, data, fromDate, toDate) {
-  const canvas = G(canvasId);
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height, cx = W/2, cy = H/2, R = Math.min(W,H)/2 - 6;
-  ctx.clearRect(0, 0, W, H);
-
-  if (!data.length) {
-    ctx.fillStyle = '#e2e8f0';
-    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 2*Math.PI); ctx.fill();
-    G(legendId).innerHTML = '<span style="color:var(--text3)">Sem dados</span>';
-    return;
-  }
-
-  const total = data.reduce((s,d) => s+d.value, 0);
-  const threshold = total * 0.02;
-  const main  = data.filter(d => d.value >= threshold);
-  const other = data.filter(d => d.value < threshold);
-  const items = [...main];
-  if (other.length) items.push({ label: 'Outros', value: other.reduce((s,d)=>s+d.value,0), isOther: true });
-
-  let angle = -Math.PI/2;
-  items.forEach((d, i) => {
-    const slice = (d.value / total) * 2 * Math.PI;
-    ctx.beginPath(); ctx.moveTo(cx, cy);
-    ctx.arc(cx, cy, R, angle, angle+slice); ctx.closePath();
-    ctx.fillStyle = CHART_COLORS[i % CHART_COLORS.length];
-    ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
-    angle += slice;
-  });
-  ctx.beginPath(); ctx.arc(cx, cy, R*0.45, 0, 2*Math.PI);
-  ctx.fillStyle = '#fff'; ctx.fill();
-
-  // Legend — clickable via data attributes (safe with colons in category names)
-  const legendEl = G(legendId);
-  legendEl.innerHTML = items.slice(0,10).map((d,i) =>
-    `<div class="pie-leg-item" data-cat="${esc(d.label)}" data-from="${fromDate||''}" data-to="${toDate||''}"
-      style="display:flex;align-items:center;gap:6px;white-space:nowrap;cursor:${d.isOther?'default':'pointer'};padding:2px 4px;border-radius:4px">
-      <span style="width:10px;height:10px;border-radius:50%;background:${CHART_COLORS[i%CHART_COLORS.length]};flex-shrink:0;display:inline-block"></span>
-      <span style="overflow:hidden;text-overflow:ellipsis;max-width:140px" title="${esc(d.label)}">${esc(d.label)}</span>
-      <span style="margin-left:auto;font-family:'DM Mono',monospace;color:var(--text2);padding-left:8px">${fmtBRL(d.value)}</span>
-    </div>`
-  ).join('');
-
-  // Attach click via event listeners (not inline JS — safe for colons in names)
-  legendEl.querySelectorAll('.pie-leg-item').forEach(el => {
-    const cat = el.dataset.cat;
-    if (cat === 'Outros') return;
-    el.addEventListener('mouseover', () => el.style.background = 'var(--bg3)');
-    el.addEventListener('mouseout',  () => el.style.background = '');
-    el.addEventListener('click', () => openCatDetail(cat, el.dataset.from, el.dataset.to));
-  });
 }
 
 async function refreshFuturePending() {
@@ -1304,6 +1762,9 @@ async function openCatDetail(category, fromDate, toDate) {
 
   const netCls   = net >= 0 ? 'amt-inc' : 'amt-exp';
   const netLabel = net >= 0 ? 'Rendimento líquido' : 'Despesa líquida';
+  const accentColor = net >= 0 ? '#43a047' : '#ef5350';
+  const modalEl = document.querySelector('#modal-cat-detail .modal');
+  if (modalEl) modalEl.style.borderTop = `4px solid ${accentColor}`;
 
   let html = `<table style="width:100%;border-collapse:collapse;font-size:13px">
     <thead>
@@ -1655,7 +2116,7 @@ function renderCatFilterChips() {
     return;
   }
   chips.innerHTML = [..._excludedCats].slice(0,6).map(c =>
-    `<span style="background:var(--red-bg);color:var(--red);font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid #fca5a5">${esc(c)}</span>`
+    `<span style="background:var(--red-bg);color:var(--red);font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid #fca5a5">${c===''?'<em>(Sem categoria)</em>':esc(c)}</span>`
   ).join('') + (_excludedCats.size > 6 ? `<span style="font-size:11px;color:var(--text3)">+${_excludedCats.size-6} mais</span>` : '');
 }
 
@@ -1665,15 +2126,21 @@ async function openCatFilterModal() {
   // (CATS_RAW) — relying only on transaction history misses any category
   // that was created but never actually used in a lançamento yet.
   const allRows = await ff.reportSummary({ excludeTransfers: false });
+  const hasUncategorized = allRows.some(r => !r.category);
   const usedCats = allRows.map(r => r.category).filter(Boolean);
   _allCatsForFilter = [...new Set([...CATS_RAW, ...usedCats])].sort((a,b) => a.localeCompare(b,'pt-BR'));
+  // "(Sem categoria)" representa a categoria vazia ('') — sempre no topo da
+  // lista, pra não passar batido (esses lançamentos antes não apareciam
+  // como opção alguma pra excluir, mesmo entrando nas somas dos gráficos).
+  if (hasUncategorized) _allCatsForFilter.unshift('');
 
   let html = _allCatsForFilter.map((c,i) => {
     const checked = _excludedCats.has(c);
     const isSuggested = SUGGESTED_EXCLUDE.has(c);
+    const label = c === '' ? '(Sem categoria)' : esc(c);
     return `<label style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:5px;cursor:pointer;${isSuggested?'background:var(--red-bg)':''}">
       <input type="checkbox" class="cf-chk" data-i="${i}" ${checked?'checked':''} style="cursor:pointer">
-      <span style="font-size:13px;${isSuggested?'color:var(--red)':''}">${esc(c)}</span>
+      <span style="font-size:13px;${isSuggested?'color:var(--red)':''}${c===''?'font-style:italic;color:var(--text3)':''}">${label}</span>
       ${isSuggested?'<span style="font-size:10px;color:var(--red);margin-left:auto">conta</span>':''}
     </label>`;
   }).join('');
@@ -2357,7 +2824,7 @@ async function saveTx() {
     const patResult = await ff.patTxSave({
       id: existingPatTxId, assetId: patAssetId, month: txMonth,
       tx_type: patTxType, total_value: Math.abs(amount),
-      notes: memo || null,
+      notes: memo || null, tx_date: date, account_id: account_id || null,
     });
     // If it's a financing installment, mark it as paid (handles both create and edit)
     if (patTxType === 'parcela_financiamento') {
@@ -2739,7 +3206,7 @@ async function initReportFilters() {
     }
     if (cfg.rep_accounts) document.querySelectorAll('.rep-acc-chk').forEach(e => { e.checked = cfg.rep_accounts.includes(parseInt(e.value)); });
     if (cfg.rep_cats)     document.querySelectorAll('.rep-cat-chk').forEach(e => { e.checked = cfg.rep_cats.includes(e.value); });
-    if (cfg.rep_excludeTransfers !== undefined) { const chk = G('rep-exclude-transfers'); if (chk) chk.checked = cfg.rep_excludeTransfers; }
+    if (cfg.rep_excludeTransfers !== undefined) { const chk = G('rep-exclude-transfers'); if (chk) chk.checked = cfg.rep_excludeTransfers; G('rep-exclude-transfers-pill')?.classList.toggle('active', cfg.rep_excludeTransfers); }
   } else {
     G('rep-period-preset').value = 'last-month';
     applyPeriodPreset('last-month');
@@ -2807,7 +3274,7 @@ async function loadSavedReport(id) {
   if (r.accounts) document.querySelectorAll('.rep-acc-chk').forEach(e => { e.checked = r.accounts.includes(parseInt(e.value)); });
   if (r.cats)     document.querySelectorAll('.rep-cat-chk').forEach(e => { e.checked = r.cats.includes(e.value); });
   const chk = G('rep-exclude-transfers');
-  if (chk && r.excludeTransfers !== undefined) chk.checked = r.excludeTransfers;
+  if (chk && r.excludeTransfers !== undefined) { chk.checked = r.excludeTransfers; G('rep-exclude-transfers-pill')?.classList.toggle('active', r.excludeTransfers); }
   runReport();
 }
 
@@ -2860,6 +3327,12 @@ function buildTree(rows, categories) {
   return { parents, totalExp, totalInc };
 }
 
+function repToggleExcludeTransfersPill() {
+  const cb = G('rep-exclude-transfers');
+  cb.checked = !cb.checked;
+  G('rep-exclude-transfers-pill')?.classList.toggle('active', cb.checked);
+  runReport();
+}
 async function runReport() {
   const type = G('report-type').value;
   if (type.startsWith('saved:')) { loadSavedReport(parseInt(type.replace('saved:',''))); return; }
@@ -3014,7 +3487,7 @@ async function runReport() {
     // Render as canvas chart
     el.innerHTML = `<div class="tbl-card" style="padding:18px">
       <h3 style="font-size:14px;font-weight:600;margin-bottom:16px">Evolução patrimonial</h3>
-      <canvas id="nw-history-chart" height="300" style="width:100%;display:block"></canvas>
+      <div style="position:relative;height:300px"><canvas id="nw-history-chart"></canvas></div>
     </div>`;
     requestAnimationFrame(() => {
       const canvas = G('nw-history-chart');
@@ -3033,7 +3506,7 @@ async function runReport() {
     expRows.forEach(r=>{
       const pct=total>0?r.expenses/total*100:0;
       const alpha=Math.max(0.15,Math.min(0.85,pct/20));
-      html+=`<div style="background:rgba(220,38,38,${alpha.toFixed(2)});border-radius:8px;padding:14px;border:1px solid #fca5a5">
+      html+=`<div style="background:rgba(239,83,80,${alpha.toFixed(2)});border-radius:10px;padding:14px;border:1px solid #ffcdd2;box-shadow:0 1px 3px rgba(0,0,0,.05)">
         <div style="font-size:11px;color:rgba(0,0,0,.6);margin-bottom:4px">${esc(r.category||'Outros')}</div>
         <div style="font-size:16px;font-weight:700;font-family:'DM Mono',monospace;color:#1a2332">${fmtBRL(r.expenses)}</div>
         <div style="font-size:10px;color:rgba(0,0,0,.5);margin-top:2px">${pct.toFixed(1)}% do total</div>
@@ -3047,79 +3520,36 @@ async function runReport() {
 }
 
 function drawNetWorthChart(canvas, months, values) {
-  const dpr = window.devicePixelRatio || 1;
-  const W   = canvas.parentElement?.offsetWidth - 36 || 800;
-  const H   = 300;
-  canvas.width  = W * dpr; canvas.height = H * dpr;
-  canvas.style.width = W+'px'; canvas.style.height = H+'px';
+  if (typeof Chart === 'undefined') { setTimeout(() => drawNetWorthChart(canvas, months, values), 400); return; }
+  if (canvas._chart) { try { canvas._chart.destroy(); } catch(e) {} }
   const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0,0,W,H);
-
-  const PAD_L=80, PAD_R=20, PAD_T=20, PAD_B=40;
-  const cW=W-PAD_L-PAD_R, cH=H-PAD_T-PAD_B;
-  const maxVal=Math.max(...values.map(Math.abs),1);
-  const minVal=Math.min(...values);
-  const range = Math.max(maxVal - minVal, 1);
-  const zero  = PAD_T + cH - ((0 - minVal) / range) * cH;
-
-  // Grid
-  ctx.strokeStyle='#e2e8f0'; ctx.lineWidth=1;
-  for (let i=0;i<=4;i++) {
-    const v = minVal + (range/4)*i;
-    const y = PAD_T + cH - ((v - minVal)/range)*cH;
-    ctx.beginPath(); ctx.moveTo(PAD_L,y); ctx.lineTo(PAD_L+cW,y); ctx.stroke();
-    ctx.fillStyle='#94a3b8'; ctx.font='11px sans-serif'; ctx.textAlign='right';
-    ctx.fillText(fmtBRLshort(v), PAD_L-5, y+4);
-  }
-
-  // Zero line
-  if (minVal < 0) {
-    ctx.strokeStyle='#94a3b8'; ctx.lineWidth=1.5;
-    ctx.beginPath(); ctx.moveTo(PAD_L,zero); ctx.lineTo(PAD_L+cW,zero); ctx.stroke();
-  }
-
-  // Fill area
-  ctx.beginPath();
-  values.forEach((v,i) => {
-    const x = PAD_L + (i/(months.length-1||1))*cW;
-    const y = PAD_T + cH - ((v-minVal)/range)*cH;
-    i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  const monthLabels = months.map(m => monthLabelShort(m.slice(0,7)));
+  canvas._chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: monthLabels, datasets: [{
+      label: 'Patrimônio líquido', data: values,
+      borderColor: '#43a047', backgroundColor: evChartGradient(ctx, '#43a047', canvas.height||300),
+      fill: true, tension: .3, borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 6,
+      pointHoverBackgroundColor: c => (values[c.dataIndex] < 0 ? '#ef5350' : '#43a047'), pointHoverBorderColor:'#fff', pointHoverBorderWidth:2,
+      segment: { borderColor: c => (c.p1.parsed.y < 0 ? '#ef5350' : '#43a047') },
+    }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode:'index', intersect:false },
+      plugins: {
+        legend: { display:false },
+        tooltip: { enabled:false, external: (context) => dashTooltip(context, {
+          getTitle: (dp) => monthLabelFull(months[dp[0].dataIndex].slice(0,7)),
+          getRows:  (dp) => [{ color: dp[0].parsed.y<0?'#ef5350':'#43a047', label:'Patrimônio líquido', value: fmtBRL(dp[0].parsed.y) }],
+        }) }
+      },
+      scales: {
+        x: { grid:{display:false}, ticks:{font:{size:10}, maxTicksLimit:12} },
+        y: { ticks:{ callback: v => 'R$'+(Math.abs(v)>=1000?(v/1000).toFixed(0)+'k':v) },
+             grid:{ color: c => c.tick.value===0 ? 'rgba(239,83,80,.4)' : 'rgba(0,0,0,.05)' } },
+      }
+    }
   });
-  const lastX = PAD_L + cW;
-  const firstX = PAD_L;
-  ctx.lineTo(lastX, Math.min(zero,PAD_T+cH));
-  ctx.lineTo(firstX, Math.min(zero,PAD_T+cH));
-  ctx.closePath();
-  ctx.fillStyle = values[values.length-1] >= 0 ? 'rgba(22,163,74,.12)' : 'rgba(220,38,38,.12)';
-  ctx.fill();
-
-  // Line
-  ctx.beginPath(); ctx.strokeStyle='#2563eb'; ctx.lineWidth=2;
-  values.forEach((v,i) => {
-    const x = PAD_L + (i/(months.length-1||1))*cW;
-    const y = PAD_T + cH - ((v-minVal)/range)*cH;
-    i===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
-  });
-  ctx.stroke();
-
-  // X labels
-  const step = Math.max(1, Math.floor(months.length/12));
-  ctx.fillStyle='#94a3b8'; ctx.font='10px sans-serif'; ctx.textAlign='center';
-  months.forEach((m,i) => {
-    if (i%step!==0 && i!==months.length-1) return;
-    const x = PAD_L + (i/(months.length-1||1))*cW;
-    ctx.fillText(m.slice(0,7), x, H-8);
-  });
-
-  // Last value
-  const lv = values[values.length-1];
-  const lx = PAD_L + cW;
-  const ly = PAD_T + cH - ((lv-minVal)/range)*cH;
-  ctx.beginPath(); ctx.arc(lx,ly,5,0,2*Math.PI);
-  ctx.fillStyle='#2563eb'; ctx.fill();
-  ctx.fillStyle='#1a2332'; ctx.font='bold 12px sans-serif'; ctx.textAlign='right';
-  ctx.fillText(fmtBRL(lv), lx, ly-10);
 }
 
 async function runBudgetReport(from, to, accountIds, categories, excludeTransfers) {
@@ -3664,7 +4094,7 @@ function pickImport(bankId, type) {
     window._selBank = bankId;
     const label = G('bank-selected-label');
     if (label) label.textContent = `Selecionado: ${custom.name}`;
-    G('bank-file-trigger').style.display = 'flex';
+    G('bank-file-trigger').style.display = 'block';
     G('bank-file-input').accept = ALL_IMPORT_EXT;
     cancelBankImport();
     return;
@@ -3681,7 +4111,7 @@ function pickImport(bankId, type) {
   if (label) label.innerHTML = `<span style="display:flex;align-items:center;gap:8px">Selecionado: ${builtinDef ? bankLogoHtml({...builtinDef,...(_builtinOverrides[bankId]||{})},18) : ''} <strong>${esc(builtinName)}</strong></span>`;
 
   G('bank-file-input').accept = ALL_IMPORT_EXT;
-  G('bank-file-trigger').style.display = 'flex';
+  G('bank-file-trigger').style.display = 'block';
 
   const bankSel = G('bank-account');
   if (bankSel) {
@@ -3698,6 +4128,23 @@ function triggerBankFile() {
 
 async function onBankFileSelected(event) {
   const file = event.target.files[0];
+  await processBankFile(file);
+  event.target.value = '';
+}
+
+// Aceita o arquivo arrastado pra zona de drop, e processa exatamente igual
+// a quando é escolhido pelo seletor — mesma função por baixo, pra não ter
+// dois caminhos de código fazendo a mesma coisa de formas diferentes.
+async function onBankFileDropped(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.classList.remove('dragover');
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  await processBankFile(file);
+}
+
+async function processBankFile(file) {
   if (!file) return;
   G('bank-file-name').textContent = file.name;
   let buffer = await file.arrayBuffer();
@@ -3706,7 +4153,7 @@ async function onBankFileSelected(event) {
   // password and decrypt before handing off to XLSX/parsers below.
   if (/\.xlsx?$/i.test(file.name)) {
     const decrypted = await decryptOfficeBufferIfNeeded(buffer, 'arquivo');
-    if (decrypted === null) { G('bank-file-name').textContent = ''; event.target.value = ''; return; }
+    if (decrypted === null) { G('bank-file-name').textContent = ''; return; }
     buffer = decrypted;
   }
 
@@ -3746,7 +4193,6 @@ async function onBankFileSelected(event) {
       G('bank-result').innerHTML = `<div class="warn-box">❌ Erro ao ler o arquivo: ${esc(e.message)}</div>`;
     }
   }
-  event.target.value = '';
 }
 
 async function parseBankFile(buffer) {
@@ -11741,6 +12187,18 @@ function suggestLiquidations(deficit, needDate, invAssetsEnriched) {
   return { options, needWithMargin };
 }
 
+function projToggleCreditPill() {
+  const cb = G('proj-include-credit');
+  cb.checked = !cb.checked;
+  G('proj-credit-pill')?.classList.toggle('active', cb.checked);
+  refreshProjecao();
+}
+function projToggleInvestmentPill() {
+  const cb = G('proj-include-investment');
+  cb.checked = !cb.checked;
+  G('proj-investment-pill')?.classList.toggle('active', cb.checked);
+  refreshProjecao();
+}
 async function refreshProjecao() {
   const horizon = parseInt(G('proj-horizon')?.value || '6');
   const includeCredit = G('proj-include-credit')?.checked || false;
@@ -11895,19 +12353,23 @@ async function refreshProjecao() {
       type: 'line',
       data: { labels, datasets: [{
         label: 'Saldo projetado', data: vals,
-        borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)',
-        fill: true, tension: 0.2, borderWidth: 2, pointRadius: 0,
-        segment: { borderColor: c => (c.p1.parsed.y < 0 ? '#dc2626' : '#2563eb') },
+        borderColor: '#43a047', backgroundColor: evChartGradient(ctx,'#43a047',ctx.canvas.height||300),
+        fill: true, tension: 0.2, borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 6,
+        pointHoverBackgroundColor: c => (vals[c.dataIndex] < 0 ? '#ef5350' : '#43a047'), pointHoverBorderColor:'#fff', pointHoverBorderWidth:2,
+        segment: { borderColor: c => (c.p1.parsed.y < 0 ? '#ef5350' : '#43a047') },
       }]},
       options: {
-        responsive: true, maintainAspectRatio: true,
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode:'index', intersect:false },
         plugins: { legend: { display: false },
-          tooltip: { callbacks: { title: items => fmtDate(items[0].label),
-            label: item => 'Saldo: ' + fmtBRL(item.parsed.y) } } },
+          tooltip: { enabled:false, external: (context) => dashTooltip(context, {
+            getTitle: (dp) => fmtDate(dp[0].label),
+            getRows:  (dp) => [{ color: dp[0].parsed.y < 0 ? '#ef5350' : '#43a047', label: 'Saldo projetado', value: fmtBRL(dp[0].parsed.y) }],
+          }) } },
         scales: {
-          x: { ticks: { maxTicksLimit: 12, callback: function(v){ const d=this.getLabelForValue(v); return d ? d.slice(8,10)+'/'+d.slice(5,7) : ''; } } },
+          x: { grid:{display:false}, ticks: { maxTicksLimit: 12, callback: function(v){ const d=this.getLabelForValue(v); return d ? d.slice(8,10)+'/'+d.slice(5,7) : ''; } } },
           y: { ticks: { callback: v => 'R$'+(Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v) },
-               grid: { color: c => c.tick.value === 0 ? 'rgba(220,38,38,.4)' : 'rgba(0,0,0,.05)' } }
+               grid: { color: c => c.tick.value === 0 ? 'rgba(239,83,80,.4)' : 'rgba(0,0,0,.05)' } }
         }
       }
     });
@@ -13252,8 +13714,8 @@ async function saveEvConfig() {
 }
 
 async function loadEvolucaoConfig() {
-  const ipca = await ff.evolucaoIpcaGet().catch(()=>({}));
-  _ev.ipca = Object.fromEntries(Object.entries(ipca).filter(([k,v])=>parseInt(k)>=2000&&v>0&&v<1));
+  const ipca = await ff.patIpcaMonthlyGet().catch(()=>({}));
+  _ev.ipca = Object.fromEntries(Object.entries(ipca).filter(([k,v])=>/^\d{4}-\d{2}$/.test(k)&&v>0&&v<1));
   const cfg = await ff.overviewConfigGet().catch(()=>null);
   if (!cfg) return;
   if (cfg.ev_catConfig?.length)      _ev.catConfig     = cfg.ev_catConfig;
@@ -13261,8 +13723,145 @@ async function loadEvolucaoConfig() {
   if (cfg.ev_view)    evSetView(cfg.ev_view);
   if (cfg.ev_display) evSetDisplay(cfg.ev_display);
   if (cfg.ev_year    && G('ev-year'))    G('ev-year').value    = cfg.ev_year;
-  if (cfg.ev_ipca    === false && G('ev-ipca')) G('ev-ipca').checked = false;
-  if (cfg.ev_ma      === false && G('ev-ma'))   G('ev-ma').checked   = false;
+  if (cfg.ev_ipca    === false && G('ev-ipca')) { G('ev-ipca').checked = false; G('ev-ipca-pill')?.classList.remove('active'); }
+  if (cfg.ev_ma      === false && G('ev-ma'))   { G('ev-ma').checked   = false; G('ev-ma-pill')?.classList.remove('active'); }
+}
+
+// ── Painel de filtros lateral (pills) ──
+function evRenderYearPills(years, selYear) {
+  const el = G('ev-year-pills');
+  if (!el) return;
+  let html = `<button class="ev-pill ev-pill-all ${selYear==='all'?'active':''}" onclick="evSelectYear('all')">Todos os anos</button>`;
+  html += years.map(y => `<button class="ev-pill ${selYear===y?'active':''}" onclick="evSelectYear('${y}')">${y}</button>`).join('');
+  el.innerHTML = html;
+}
+function evSelectYear(y) {
+  const sel = G('ev-year');
+  if (sel) sel.value = y;
+  saveEvConfig();
+  refreshEvolucao();
+}
+function evToggleIpcaPill() {
+  const cb = G('ev-ipca');
+  cb.checked = !cb.checked;
+  G('ev-ipca-pill')?.classList.toggle('active', cb.checked);
+  saveEvConfig();
+  refreshEvolucao();
+}
+function evToggleMaPill() {
+  const cb = G('ev-ma');
+  cb.checked = !cb.checked;
+  G('ev-ma-pill')?.classList.toggle('active', cb.checked);
+  saveEvConfig();
+  refreshEvolucao();
+}
+
+// Lista de categorias SEM aplicar a exclusão manual — usada só pra montar
+// os pills. Sem isso, uma categoria excluída desaparecia da lista de
+// categorias (já que a consulta que monta _ev.allCats já vem filtrada),
+// em vez de continuar visível, só "colorida e tachada".
+async function evLoadAllCatsStable() {
+  const rows = await ff.reportSummary({ excludeTransfers: false }).catch(() => []);
+  const transferCats = new Set(['Transferência','Transferências','Transferencia','Transferencias']);
+  const accountNames = new Set((accounts||[]).map(a=>a.name));
+  _ev.allCatsStable = [...new Set(rows.map(r=>r.category).filter(c => c && !transferCats.has(c) && !accountNames.has(c)))]
+    .sort((a,b)=>a.localeCompare(b,'pt-BR'));
+}
+function _evCatHasSubs(parent) {
+  return (_ev.allCatsStable||[]).some(c => c.startsWith(parent + ':'));
+}
+// Garante que TODAS as categorias conhecidas tenham uma entrada explícita
+// no config antes de alterar uma específica — sem isso, buildAllowedCats/
+// buildCatColumns tratam um config parcialmente preenchido como se fosse a
+// lista COMPLETA, e qualquer categoria ainda não clicada desaparece
+// silenciosamente (em vez de contar com seu modo padrão).
+function _evEnsureFullConfig(key, isCategories) {
+  const arr = _ev[key];
+  const existing = new Set(arr.map(e => e.cat));
+  (_ev.allCatsStable || []).forEach(cat => {
+    if (existing.has(cat)) return;
+    const isParent = !cat.includes(':');
+    const defaultMode = isCategories && isParent && _evCatHasSubs(cat) ? 'consolidated' : 'self';
+    arr.push({ cat, mode: defaultMode });
+  });
+}
+
+// As escolhas de categoria são DISTINTAS entre Resumo e Por categoria —
+// cada visualização edita seu próprio _ev.catConfig/_ev.catConfigCats, não
+// uma lista compartilhada.
+function evRenderCatPills() {
+  const el = G('ev-cat-pills');
+  if (!el) return;
+  const isCategories = G('ev-view-categories')?.classList.contains('primary');
+  const configKey = isCategories ? 'catConfigCats' : 'catConfig';
+  const modeOf = {};
+  (_ev[configKey]||[]).forEach(({cat,mode}) => modeOf[cat] = mode);
+
+  const cats = _ev.allCatsStable || [];
+  const parents = {};
+  cats.forEach(c => {
+    const p = c.split(':')[0];
+    if (!parents[p]) parents[p] = [];
+    if (c.includes(':')) parents[p].push(c);
+  });
+
+  let html = '';
+  Object.entries(parents).sort(([a],[b])=>a.localeCompare(b,'pt-BR')).forEach(([parent, subs]) => {
+    const hasSubs = subs.length > 0;
+    const pMode = modeOf[parent] || (isCategories && hasSubs ? 'consolidated' : 'self');
+    const pExcluded = pMode === 'excluded';
+    html += `<div class="ev-pill-row">
+      <button class="ev-cat-pill ${pExcluded?'excluded':''}" data-cat="${esc(parent)}" data-key="${configKey}" onclick="evToggleCatPillMode(this)">${esc(parent)}</button>
+      ${(!pExcluded && isCategories && hasSubs) ? `<button class="ev-pill-mode-btn" data-cat="${esc(parent)}" data-key="${configKey}" data-modes="self,consolidated" onclick="evCycleCatPillMode(this,event)" title="${pMode==='consolidated'?'Consolidada com subcategorias — clique p/ mudar':'Só a categoria própria — clique p/ mudar'}">${pMode==='consolidated'?'📊':'📋'}</button>` : ''}
+    </div>`;
+    subs.sort((a,b)=>a.localeCompare(b,'pt-BR')).forEach(sub => {
+      const sMode = modeOf[sub] || 'self';
+      const sExcluded = sMode === 'excluded';
+      const subLabel = sub.split(':').slice(1).join(':');
+      html += `<div class="ev-pill-row ev-pill-row-sub">
+        <button class="ev-cat-pill ev-cat-pill-sub ${sExcluded?'excluded':''}" data-cat="${esc(sub)}" data-key="${configKey}" onclick="evToggleCatPillMode(this)">${esc(subLabel)}</button>
+        ${(!sExcluded && isCategories) ? `<button class="ev-pill-mode-btn" data-cat="${esc(sub)}" data-key="${configKey}" data-modes="self,in-total" onclick="evCycleCatPillMode(this,event)" title="${sMode==='in-total'?'Só conta no total — clique p/ mudar':'Coluna própria + total — clique p/ mudar'}">${sMode==='in-total'?'⊂':'📋'}</button>` : ''}
+      </div>`;
+    });
+  });
+  el.innerHTML = html;
+}
+
+// Clique principal do pill — alterna só entre incluída/excluída. O modo
+// "própria vs. consolidada" (categorias-mãe) ou "própria vs. só no total"
+// (subcategorias) fica no botãozinho ao lado, separado de propósito.
+async function evToggleCatPillMode(btn) {
+  const cat = btn.dataset.cat, key = btn.dataset.key;
+  const isCategories = key === 'catConfigCats';
+  _evEnsureFullConfig(key, isCategories);
+  const arr = _ev[key];
+  const idx = arr.findIndex(e => e.cat === cat);
+  const cur = idx >= 0 ? arr[idx].mode : undefined;
+  const isParent = !cat.includes(':');
+  const defaultMode = isCategories && isParent && _evCatHasSubs(cat) ? 'consolidated' : 'self';
+  const newMode = cur === 'excluded' ? defaultMode : 'excluded';
+  if (idx >= 0) arr[idx].mode = newMode; else arr.push({ cat, mode: newMode });
+  saveEvConfig();
+  evRenderCatPills();
+  await refreshEvolucao();
+}
+
+// Botãozinho de modo — alterna entre as duas opções não-excluídas
+// (própria/consolidada, ou própria/só-no-total), sem afetar se a
+// categoria está incluída ou não.
+async function evCycleCatPillMode(btn, evt) {
+  evt.stopPropagation();
+  const cat = btn.dataset.cat, key = btn.dataset.key;
+  _evEnsureFullConfig(key, key === 'catConfigCats');
+  const modes = btn.dataset.modes.split(',');
+  const arr = _ev[key];
+  const idx = arr.findIndex(e => e.cat === cat);
+  const cur = idx >= 0 ? arr[idx].mode : modes[0];
+  const newMode = modes[(modes.indexOf(cur) + 1) % modes.length] ?? modes[0];
+  if (idx >= 0) arr[idx].mode = newMode; else arr.push({ cat, mode: newMode });
+  saveEvConfig();
+  evRenderCatPills();
+  await refreshEvolucao();
 }
 
 function evSetView(val) {
@@ -13284,17 +13883,30 @@ function onEvViewChange()    { saveEvConfig(); refreshEvolucao(); }
 function onEvDisplayChange() { saveEvConfig(); refreshEvolucao(); }
 
 // ── IPCA ──
-function inflateAnnual(value, fromYear, refYear) {
-  if (!value || fromYear > refYear) return value || 0;
+// Último mês disponível no IPCA mensal carregado — referência única usada
+// em todo canto que precisa saber "até quando dá pra corrigir".
+function getIpcaRefMonth() {
+  const months = Object.keys(_ev.ipca || {}).sort();
+  return months.length ? months[months.length - 1] : null;
+}
+// Composição MENSAL do IPCA, mês a mês, do mês do valor (exclusive) até o
+// último mês disponível (inclusive) — antes isso compunha por ANO inteiro,
+// tratando um valor de janeiro e um de dezembro do mesmo ano como se
+// tivessem exatamente a mesma defasagem em relação a hoje, o que não é
+// correto.
+function inflateMonth(value, fromMonth, refMonth) {
+  if (!value || !refMonth || fromMonth >= refMonth) return value || 0;
+  let [y, m] = fromMonth.split('-').map(Number);
+  m++; if (m > 12) { m = 1; y++; }
   let f = 1;
-  for (let y = fromYear; y <= refYear; y++) {
-    const rate = _ev.ipca[String(y)] ?? _ev.ipca[y] ?? 0;
+  let cur = `${y}-${String(m).padStart(2,'0')}`;
+  while (cur <= refMonth) {
+    const rate = _ev.ipca[cur] ?? 0;
     if (rate > 0) f *= (1 + rate);
+    m++; if (m > 12) { m = 1; y++; }
+    cur = `${y}-${String(m).padStart(2,'0')}`;
   }
   return value * f;
-}
-function inflateMonth(value, fromMonth, refYear) {
-  return inflateAnnual(value, parseInt(fromMonth.slice(0,4)), refYear);
 }
 function movAvg12(arr, i) {
   const w = arr.slice(Math.max(0,i-11),i+1).filter(v=>v!==0&&!isNaN(v));
@@ -13303,10 +13915,9 @@ function movAvg12(arr, i) {
 
 // ── Data ──
 async function getEvolucaoData() {
-  const excl = [..._excludedCats];
   const [sumRows, catRows] = await Promise.all([
-    ff.evolucaoSummary({ excludedCats: excl }),
-    ff.evolucaoByCat({ excludedCats: excl }),
+    ff.evolucaoSummary({ excludedCats: [] }),
+    ff.evolucaoByCat({ excludedCats: [] }),
   ]);
   _ev.allCats = [...new Set(catRows.map(r=>r.category))].sort();
 
@@ -13374,8 +13985,9 @@ function computeSummaryFromByCat(months, byCatFull) {
 
 // ── Cat columns for "Por Categoria" ──
 function buildCatColumns(byCategory, months) {
-  const config = _ev.catConfigCats.length ? _ev.catConfigCats
-    : _ev.allCats.slice(0,10).map(c=>({cat:c,mode:'self'}));
+  const config = (_ev.catConfigCats.length ? _ev.catConfigCats
+    : _ev.allCats.slice(0,10).map(c=>({cat:c,mode:'self'})))
+    .slice().sort((a,b)=>a.cat.localeCompare(b.cat,'pt-BR'));
   const modeOf = {};
   config.forEach(({cat,mode}) => modeOf[cat] = mode);
   return config
@@ -13409,14 +14021,13 @@ async function refreshEvolucao() {
   const selYear = G('ev-year')?.value    || 'all';
 
   // IPCA status
-  const currentYear = new Date().getFullYear();
-  const ipcaYears = Object.keys(_ev.ipca).map(Number).filter(y=>y<currentYear).sort((a,b)=>a-b);
-  const refYear   = ipcaYears.length ? ipcaYears[ipcaYears.length-1] : null;
+  const ipcaMonthsAvail = Object.keys(_ev.ipca).sort();
+  const refMonth  = getIpcaRefMonth();
   const statusEl  = G('ev-ipca-status');
   if (statusEl) {
-    if (ipcaYears.length) {
+    if (ipcaMonthsAvail.length) {
       statusEl.style.display='block';
-      statusEl.textContent=`IPCA carregado: ${ipcaYears[0]}–${refYear} — valores em R$ de dez/${refYear}`;
+      statusEl.textContent=`IPCA mensal carregado: ${ipcaMonthsAvail[0]} a ${refMonth} — valores em R$ de ${monthLabelFull(refMonth)}`;
     } else if (useIPCA) {
       statusEl.style.display='block';
       statusEl.textContent='⚠ IPCA não carregado — clique em "📡 Atualizar IPCA"';
@@ -13424,7 +14035,7 @@ async function refreshEvolucao() {
       statusEl.style.display='none';
     }
   }
-  if (G('ev-ipca-note')) G('ev-ipca-note').textContent = useIPCA&&refYear ? `R$ de ${refYear}` : '';
+  if (G('ev-ipca-note')) G('ev-ipca-note').textContent = useIPCA&&refMonth ? `R$ de ${monthLabelFull(refMonth)}` : '';
 
   const { byCategory, byCatFull } = await getEvolucaoData();
   const now2 = new Date();
@@ -13448,7 +14059,11 @@ async function refreshEvolucao() {
   }
 
   const months = selYear==='all' ? allMonths : allMonths.filter(m=>m.startsWith(selYear));
-  const corr = (v,m) => useIPCA&&refYear ? inflateMonth(v,m,refYear) : (v||0);
+  const corr = (v,m) => useIPCA&&refMonth ? inflateMonth(v,m,refMonth) : (v||0);
+
+  evRenderYearPills(years, selYear);
+  await evLoadAllCatsStable();
+  evRenderCatPills();
 
   // Show/hide panels
   G('ev-table-view').style.display  = display==='table'  ? '' : 'none';
@@ -13708,7 +14323,109 @@ function evDetailTable(rows, title, total) {
 }
 
 // ── Gráficos Resumo ──
+// ── Gráficos da Evolução — construtor genérico em Chart.js (substitui o
+// desenho manual em canvas puro de antes: sem gradiente, sem curvas
+// suaves, sem tooltip bonito). Reaproveita o mesmo dashTooltip do Painel.
+let _evChartInstances = [];
+function evDestroyCharts() {
+  _evChartInstances.forEach(c => { try { c.destroy(); } catch(e) {} });
+  _evChartInstances = [];
+}
+function evChartGradient(ctx, color, height) {
+  const grad = ctx.createLinearGradient(0, 0, 0, height || 200);
+  grad.addColorStop(0, color + '33');
+  grad.addColorStop(1, color + '02');
+  return grad;
+}
+function evMakeChart(canvas, type, labels, series, opts={}) {
+  if (typeof Chart === 'undefined' || !canvas) return null;
+  const ctx = canvas.getContext('2d');
+  const h = canvas.height || 200;
+  const datasets = series.map(s => ({
+    label: s.label, data: s.data, borderColor: s.color,
+    backgroundColor: type === 'line' ? evChartGradient(ctx, s.color, h) : (s.colors || s.color),
+    fill: type === 'line', tension: .4, borderWidth: 2.5,
+    borderRadius: type === 'bar' ? 6 : 0, maxBarThickness: 32,
+    pointRadius: 0, pointHoverRadius: 6, pointHoverBackgroundColor: s.color,
+    pointHoverBorderColor: '#fff', pointHoverBorderWidth: 2,
+  }));
+  const fmtTick = v => opts.isPct ? v.toFixed(0)+'%' : 'R$'+(Math.abs(v)>=1000?(v/1000).toFixed(0)+'k':v.toFixed(0));
+  const chart = new Chart(ctx, {
+    type,
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode:'index', intersect:false },
+      plugins: {
+        legend: { display: series.length>1, position:'top', align:'end', labels:{boxWidth:10,boxHeight:10,usePointStyle:true,pointStyle:'circle',font:{size:11,weight:'600'}} },
+        tooltip: {
+          enabled: false,
+          external: (context) => dashTooltip(context, {
+            getTitle: (dp) => labels[dp[0].dataIndex],
+            getRows:  (dp) => dp.map(d => ({ color: d.dataset.borderColor, label: d.dataset.label, value: opts.isPct ? d.parsed.y.toFixed(1)+'%' : fmtBRL(d.parsed.y) })),
+          }),
+        }
+      },
+      scales: {
+        x: { grid:{display:false}, ticks:{font:{size:10}, maxTicksLimit: 12} },
+        y: { min: opts.beginAtZero ? 0 : undefined, grid:{color:'rgba(0,0,0,.05)'}, ticks:{font:{size:10}, callback: fmtTick} },
+      },
+      animation: { duration: 500 }
+    }
+  });
+  _evChartInstances.push(chart);
+  return chart;
+}
+
 function renderEvSummaryCharts(months, summary, corr, useMA) {
+  const inc = months.map(m=>corr(summary[m]?.income||0,m));
+  const exp = months.map(m=>corr(summary[m]?.expenses||0,m));
+  const luc = inc.map((v,i)=>v-exp[i]);
+  const dI=months.map((_,i)=>useMA?movAvg12(inc,i):inc[i]);
+  const dE=months.map((_,i)=>useMA?movAvg12(exp,i):exp[i]);
+  const dL=months.map((_,i)=>useMA?movAvg12(luc,i):luc[i]);
+  const yT={};
+  months.forEach((m,i)=>{const y=m.slice(0,4);if(!yT[y])yT[y]={inc:0,exp:0,luc:0};yT[y].inc+=inc[i];yT[y].exp+=exp[i];yT[y].luc+=luc[i];});
+  const years=[...new Set(months.map(m=>m.slice(0,4)))].sort();
+  const monthLabels = months.map(monthLabelShort);
+
+  evDestroyCharts();
+  const container=G('ev-charts-container'); container.innerHTML='';
+
+  // Gráfico integrado receitas/despesas — mesmo estilo do Painel da Visão
+  // Geral, pedido também pra esta aba.
+  const flowWrap = document.createElement('div');
+  flowWrap.className = 'dash-card';
+  flowWrap.style.marginBottom = '16px';
+  flowWrap.innerHTML = `<h3 style="margin-bottom:2px">📈 Receitas e Despesas</h3>
+    <div class="dash-sub">Por mês, no período selecionado</div>
+    <div style="position:relative;height:260px"><canvas height="260"></canvas></div>`;
+  container.appendChild(flowWrap);
+  evMakeChart(flowWrap.querySelector('canvas'), 'line', monthLabels,
+    [{ label:'Receitas', data:dI, color:'#43a047' }, { label:'Despesas', data:dE, color:'#ef5350' }],
+    { beginAtZero: true });
+
+  const grid1=document.createElement('div'); grid1.style.cssText='display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin-bottom:14px'; container.appendChild(grid1);
+  const grid2=document.createElement('div'); grid2.style.cssText='display:grid;grid-template-columns:repeat(3,1fr);gap:14px'; container.appendChild(grid2);
+  const row1=[
+    {title:'Despesas anuais',data:years.map(y=>yT[y]?.exp||0),color:'#ef5350',type:'bar',labels:years},
+    {title:'Renda anual',data:years.map(y=>yT[y]?.inc||0),color:'#43a047',type:'bar',labels:years},
+  ];
+  const row2=[
+    {title:'Lucro mensal',data:dL,color:'#3b82f6',type:'line',labels:monthLabels},
+    {title:'Lucro anual',data:years.map(y=>yT[y]?.luc||0),color:'#3b82f6',type:'bar',labels:years},
+    {title:'% Lucro anual',data:years.map(y=>{const t=yT[y];return t?.inc>0?(t.luc/t.inc*100):0;}),color:'#a855f7',type:'bar',labels:years,isPct:true},
+  ];
+  [[row1,grid1],[row2,grid2]].forEach(([charts,grid])=>charts.forEach(c=>{
+    const wrap=document.createElement('div');
+    wrap.className = 'dash-card';
+    wrap.innerHTML=`<h4 style="margin:0 0 12px;font-size:13px;color:var(--text2);font-weight:700">${c.title}</h4><div style="position:relative;height:180px"><canvas height="180"></canvas></div>`;
+    grid.appendChild(wrap);
+    evMakeChart(wrap.querySelector('canvas'), c.type, c.labels, [{ data:c.data, color:c.color }], { isPct:c.isPct });
+  }));
+}
+
+function _OLD_renderEvSummaryCharts(months, summary, corr, useMA) {
   const inc = months.map(m=>corr(summary[m]?.income||0,m));
   const exp = months.map(m=>corr(summary[m]?.expenses||0,m));
   const luc = inc.map((v,i)=>v-exp[i]);
@@ -13745,23 +14462,22 @@ function renderEvSummaryCharts(months, summary, corr, useMA) {
 // ── Gráficos Por Categoria ──
 function renderEvCatCharts(months, byCategory, corr, useMA) {
   const columns=buildCatColumns(byCategory,months);
+  evDestroyCharts();
   const container=G('ev-charts-container'); container.innerHTML='';
   if(!columns.length){container.innerHTML='<div class="empty" style="padding:2rem"><p>Clique em 🏷 Cat. Categorias para selecionar</p></div>';return;}
   const grid=document.createElement('div'); grid.style.cssText='display:grid;grid-template-columns:repeat(3,1fr);gap:14px'; container.appendChild(grid);
-  const COLORS=['#dc2626','#d97706','#7c3aed','#0891b2','#db2777','#65a30d','#ea580c','#059669','#2563eb','#9333ea'];
   columns.forEach((col,ci)=>{
     const rawNet=months.map((m,i)=>corr(col.values[i].net,m));
     const isIncome=rawNet.filter(v=>v!==0).reduce((s,v)=>s+v,0)<0;
     const raw=rawNet.map(v=>isIncome?-v:v);
     const disp=months.map((_,i)=>useMA?movAvg12(raw,i):raw[i]);
     const firstNZ=disp.findIndex(v=>v!==0); const start=firstNZ<0?0:firstNZ;
-    const color=isIncome?'#16a34a':COLORS[ci%COLORS.length];
+    const color=isIncome?'#43a047':DASH_COLORS[ci%DASH_COLORS.length];
     const wrap=document.createElement('div');
-    wrap.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px';
-    wrap.innerHTML=`<h4 style="margin:0 0 12px;font-size:13px;color:${color}">${esc(col.label)} ${isIncome?'📈':'📉'}</h4><canvas height="160" style="width:100%;display:block"></canvas>`;
+    wrap.className = 'dash-card';
+    wrap.innerHTML=`<h4 style="margin:0 0 12px;font-size:13px;color:${color};font-weight:700">${esc(col.label)} ${isIncome?'📈':'📉'}</h4><div style="position:relative;height:160px"><canvas height="160"></canvas></div>`;
     grid.appendChild(wrap);
-    const canvas=wrap.querySelector('canvas');
-    requestAnimationFrame(()=>requestAnimationFrame(()=>drawEvLine(canvas,months.slice(start),disp.slice(start),color)));
+    evMakeChart(wrap.querySelector('canvas'), 'line', months.slice(start).map(monthLabelShort), [{ data: disp.slice(start), color }]);
   });
 }
 
@@ -13893,13 +14609,12 @@ function openEvCatSelector(context) {
 // ── Atualizar IPCA ──
 async function fetchIPCA() {
   toast('⏳ Buscando IPCA do Banco Central…');
-  const result = await ff.evolucaoIpcaFetch();
+  const result = await ff.patIpcaMonthlyFetch();
   if (result.ok) {
-    _ev.ipca = {};
-    Object.entries(result.data).forEach(([k,v])=>{const y=parseInt(k);if(y>=2000&&v>0&&v<1)_ev.ipca[y]=v;});
-    await ff.evolucaoIpcaSave(_ev.ipca);
-    const years=Object.keys(_ev.ipca).sort();
-    toast(`✅ IPCA: ${years[0]}–${years[years.length-1]} (${years.length} anos)`);
+    _ev.ipca = Object.fromEntries(Object.entries(result.data).filter(([k,v])=>v>0&&v<1));
+    await ff.patIpcaMonthlySave(_ev.ipca);
+    const months=Object.keys(_ev.ipca).sort();
+    toast(`✅ IPCA: ${months[0]} a ${months[months.length-1]} (${months.length} meses)`);
     refreshEvolucao();
   } else {
     toast(`❌ Erro IPCA: ${result.error}`);
@@ -16235,9 +16950,6 @@ function patTxRenderTable() {
 
     return `<div style="display:grid;grid-template-columns:110px 1fr 150px 120px 120px 36px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);gap:4px">
       <input class="inp" style="font-size:11px;padding:3px 4px" type="date" value="${dateVal}" onchange="patTxUpdateRow(${i},'date',this.value)">
-      <select class="inp" style="font-size:11px;padding:3px 4px" onchange="patTxUpdateRow(${i},'type',this.value)">
-        ${Object.entries(PAT_TX_CASH).map(([v,d]) => `<option value="${v}" ${row.tx_type===v?'selected':''}>${d.label}</option>`).join('')}
-      </select>
       <div style="display:flex;align-items:center;gap:3px;overflow:hidden">
         <select class="inp" style="font-size:11px;padding:3px 4px;min-width:0" title="Conta bancária para sincronização automática" onchange="patTxUpdateRow(${i},'account',this.value)">
           <option value="">— Sem conta —</option>
@@ -16247,6 +16959,9 @@ function patTxRenderTable() {
       </div>
       <input class="inp pat-tx-currency" data-row="${i}" data-field="hist" style="font-size:12px;padding:3px 4px;text-align:right" type="text" placeholder="Auto (IPCA)" title="Valor do ativo neste mês (deixe vazio para cálculo automático)">
       <input class="inp pat-tx-currency" data-row="${i}" data-field="val" style="font-size:12px;padding:3px 4px;text-align:right" type="text" placeholder="Movim.">
+      <select class="inp" style="font-size:11px;padding:3px 4px" onchange="patTxUpdateRow(${i},'type',this.value)">
+        ${Object.entries(PAT_TX_CASH).map(([v,d]) => `<option value="${v}" ${row.tx_type===v?'selected':''}>${d.label}</option>`).join('')}
+      </select>
       <button class="btn-icon" style="color:#dc2626;font-size:15px;padding:0 4px" onclick="patTxDeleteRow(${i})">×</button>
     </div>`;
   }).join('') || `<div style="padding:14px;text-align:center;color:var(--text3);font-size:12px">Nenhuma movimentação registrada. Use "+ Adicionar linha" para começar.</div>`;
@@ -20061,7 +20776,7 @@ function renderAposCharts(rows, metaPatrimonio) {
       { label:'Meta', data:metaLine, borderColor:'#dc2626', borderDash:[6,3],
         borderWidth:2, pointRadius:0, fill:false },
     ]},
-    options: { responsive:true,
+    options: { responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{position:'top'}, title:{display:true,text:'Patrimônio real e projetado vs meta'} },
       scales:{ y:{ ticks:{ callback:fmtY } } } }
   });
@@ -20078,7 +20793,7 @@ function renderAposCharts(rows, metaPatrimonio) {
         borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.15)',
         tension:0.3, pointRadius:3, fill:false, borderWidth:2, spanGaps:false },
     ]},
-    options: { responsive:true,
+    options: { responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{position:'top'}, title:{display:true,text:'Poupança necessária (futura) e realizada (histórica)'} },
       scales:{ x:{ stacked:true }, y:{ stacked:false, ticks:{ callback:v=>'R$'+(Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v) } } } }
   });
@@ -20102,11 +20817,10 @@ async function computeEvMA12LucroData() {
     const allMonths = [...new Set(Object.keys(byCatFull))].filter(m => m <= curM2).sort();
     if (!allMonths.length) return;
 
-    // Determine IPCA ref year (same logic as refreshEvolucao)
-    const ipcaYears = Object.keys(_ev.ipca||{}).map(Number).filter(y => y < now2.getFullYear()).sort((a,b)=>a-b);
-    const refYear   = ipcaYears.length ? ipcaYears[ipcaYears.length-1] : null;
+    // Mesmo referencial de mês usado em refreshEvolucao
+    const refMonth  = getIpcaRefMonth();
     const useIPCA   = G('ev-ipca')?.checked !== false;
-    const corr = (v, m) => useIPCA && refYear ? inflateMonth(v, m, refYear) : (v || 0);
+    const corr = (v, m) => useIPCA && refMonth ? inflateMonth(v, m, refMonth) : (v || 0);
 
     const allSummary = computeSummaryFromByCat(allMonths, byCatFull);
     const allInc = allMonths.map(m => corr(allSummary[m]?.income   || 0, m));

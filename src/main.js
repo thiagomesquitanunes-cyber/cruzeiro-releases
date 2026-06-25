@@ -963,7 +963,7 @@ ipcMain.handle('report:summary', (_, { fromDate, toDate, accountIds, excludeTran
   if (fromDate) { where += ' AND t.date>=?'; p.push(fromDate); }
   if (toDate)   { where += ' AND t.date<=?'; p.push(toDate); }
   if (accountIds?.length) { where += ` AND t.account_id IN (${accountIds.map(()=>'?').join(',')})`; p.push(...accountIds); }
-  if (excludeTransfers) { where += ` AND t.category NOT IN ('Transferência','Transferências') AND t.transfer_id IS NULL`; }
+  if (excludeTransfers) { where += ` AND t.category NOT IN ('Transferência','Transferências','Transferencia','Transferencias') AND t.transfer_id IS NULL`; }
   return all(`SELECT t.category,
     SUM(CASE WHEN t.amount<0 THEN ABS(t.amount) ELSE 0 END) as expenses,
     SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END) as income,
@@ -975,7 +975,7 @@ ipcMain.handle('report:monthly', (_, { fromDate, toDate, accountIds, excludeTran
   if (fromDate) { where += ' AND date>=?'; p.push(fromDate); }
   if (toDate)   { where += ' AND date<=?'; p.push(toDate); }
   if (accountIds?.length) { where += ` AND account_id IN (${accountIds.map(()=>'?').join(',')})`; p.push(...accountIds); }
-  if (excludeTransfers) { where += ` AND category NOT IN ('Transferência','Transferências') AND transfer_id IS NULL`; }
+  if (excludeTransfers) { where += ` AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias') AND transfer_id IS NULL`; }
   return all(`SELECT substr(date,1,7) as month,
     SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expenses,
     SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) as income
@@ -987,7 +987,7 @@ ipcMain.handle('report:monthly-by-category', (_, { fromDate, excludeTransfers })
   let where = 'WHERE amount < 0';
   const p = [];
   if (fromDate) { where += ' AND date>=?'; p.push(fromDate); }
-  if (excludeTransfers) { where += ` AND category NOT IN ('Transferência','Transferências') AND transfer_id IS NULL`; }
+  if (excludeTransfers) { where += ` AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias') AND transfer_id IS NULL`; }
   return all(`SELECT substr(date,1,7) as month, category,
     SUM(ABS(amount)) as total
     FROM transactions ${where}
@@ -1000,7 +1000,7 @@ ipcMain.handle('report:future-pending', () => {
   return all(`SELECT t.*, a.name as account_name FROM transactions t
     JOIN accounts a ON a.id = t.account_id
     WHERE t.date > ? AND t.cleared = 0
-    AND t.category NOT IN ('Transferência','Transferências')
+    AND t.category NOT IN ('Transferência','Transferências','Transferencia','Transferencias')
     AND t.transfer_id IS NULL
     ORDER BY t.date ASC, (CASE WHEN t.amount < 0 THEN 1 ELSE 0 END) ASC`, [today]);
 });
@@ -1219,7 +1219,7 @@ ipcMain.handle('report:budget', (_, { fromDate, toDate, excludeTransfers }) => {
   let where = 'WHERE 1=1'; const p = [];
   if (fromDate) { where += ' AND date>=?'; p.push(fromDate); }
   if (toDate)   { where += ' AND date<=?'; p.push(toDate); }
-  if (excludeTransfers) { where += ` AND category NOT IN ('Transferência','Transferências') AND transfer_id IS NULL`; }
+  if (excludeTransfers) { where += ` AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias') AND transfer_id IS NULL`; }
   // Monthly actuals by category
   const rows = all(`SELECT substr(date,1,7) as month, category,
     SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expenses,
@@ -2670,7 +2670,7 @@ ipcMain.handle('report:summary-hierarchical', (_, { fromDate, toDate, accountIds
   if (fromDate) { where += ' AND t.date>=?'; p.push(fromDate); }
   if (toDate)   { where += ' AND t.date<=?'; p.push(toDate); }
   if (accountIds?.length) { where += ` AND t.account_id IN (${accountIds.map(()=>'?').join(',')})`; p.push(...accountIds); }
-  if (excludeTransfers) { where += ` AND t.category NOT IN ('Transferência','Transferências') AND t.transfer_id IS NULL`; }
+  if (excludeTransfers) { where += ` AND t.category NOT IN ('Transferência','Transferências','Transferencia','Transferencias') AND t.transfer_id IS NULL`; }
   const rows = all(`SELECT t.category,
     SUM(CASE WHEN t.amount<0 THEN ABS(t.amount) ELSE 0 END) as expenses,
     SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END) as income,
@@ -5073,7 +5073,7 @@ ipcMain.handle('apos:yearly-data', () => {
        SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expenses
      FROM transactions
      WHERE transfer_id IS NULL
-       AND category NOT IN ('Transferência','Transferências')
+       AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias')
      GROUP BY month ORDER BY month`
   );
 
@@ -5619,7 +5619,7 @@ function computeLicenseStatus() {
        SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expense
      FROM transactions
      WHERE date>=? AND date<=?
-       AND category NOT IN ('Transferência','Transferências')
+       AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias')
        AND transfer_id IS NULL
      GROUP BY month ORDER BY month DESC LIMIT 3`,
     [from3, toDay]

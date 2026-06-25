@@ -36,6 +36,93 @@
   --radius:    6px;
   --radius-lg: 10px;
   --font-base: 15px;
+  /* ── Painel (dashboard) — paleta mais viva, inspirada nas referências ── */
+  --chart-income:     #43a047;
+  --chart-income-bg:  rgba(67,160,71,.16);
+  --chart-income-lt:  rgba(67,160,71,.06);
+  --chart-expense:    #ef5350;
+  --chart-expense-bg: rgba(239,83,80,.16);
+  --chart-expense-lt: rgba(239,83,80,.06);
+}
+/* ── Tooltip bonito reutilizável p/ todos os gráficos do Painel ── */
+.chart-tooltip{position:absolute;pointer-events:none;background:#fff;border-radius:12px;
+  box-shadow:0 10px 28px rgba(20,30,50,.16),0 2px 6px rgba(20,30,50,.08);padding:10px 14px;
+  font-size:12.5px;z-index:80;transition:opacity .1s ease,transform .1s ease;opacity:0;
+  transform:translate(-50%,-100%) translateY(-10px);min-width:148px;border:1px solid var(--border);}
+.chart-tooltip.show{opacity:1;}
+.chart-tooltip .ct-title{font-weight:700;font-size:12px;color:var(--text);margin:-10px -14px 8px;
+  padding:7px 14px;border-radius:11px 11px 0 0;background:var(--bg3);text-align:center;}
+.chart-tooltip .ct-row{display:flex;align-items:center;gap:8px;padding:3px 0;white-space:nowrap;}
+.chart-tooltip .ct-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+.chart-tooltip .ct-label{color:var(--text2);flex:1;}
+.chart-tooltip .ct-value{font-weight:700;color:var(--text);font-family:'DM Mono',monospace;margin-left:10px;}
+/* ── Cartões/grade do Painel ── */
+.dash-card{background:var(--bg2);border:1px solid var(--border);border-radius:18px;padding:20px 22px;
+  box-shadow:0 1px 3px rgba(20,30,50,.04);min-width:0;overflow:hidden;}
+.dash-card h3{font-size:14px;font-weight:700;margin-bottom:2px;display:flex;align-items:center;gap:8px;color:var(--text);}
+.dash-card .dash-sub{font-size:11.5px;color:var(--text3);margin-bottom:14px;}
+.dash-row{display:grid;gap:16px;margin-bottom:16px;min-width:0;}
+.dash-row-budget{grid-template-columns:1.6fr 1fr;}
+.dash-row-cat{grid-template-columns:1.3fr 1fr;}
+@media (max-width: 980px){
+  .dash-row-budget,.dash-row-cat{grid-template-columns:1fr;}
+}
+.dash-toggle{display:inline-flex;background:var(--bg3);border-radius:10px;padding:3px;gap:2px;}
+.dash-toggle button{border:none;background:transparent;padding:6px 14px;border-radius:8px;font-size:12px;
+  font-weight:600;color:var(--text3);cursor:pointer;transition:all .15s;}
+.dash-toggle button.active{background:#fff;color:var(--text);box-shadow:0 1px 4px rgba(20,30,50,.12);}
+.dash-toggle button.active.exp{color:var(--chart-expense);}
+.dash-toggle button.active.inc{color:var(--chart-income);}
+.dash-nav-btn{display:flex;align-items:center;gap:7px;padding:9px 16px;border-radius:12px;border:none;
+  cursor:pointer;font-size:12.5px;font-weight:700;color:#fff;transition:all .15s;box-shadow:0 2px 8px rgba(20,30,50,.12);}
+.dash-nav-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(20,30,50,.18);filter:brightness(1.05);}
+.dash-nav-btn.active{outline:3px solid rgba(255,255,255,.5);outline-offset:-3px;}
+.budget-bar-row{display:grid;grid-template-columns:120px 1fr 56px 86px;gap:10px;align-items:center;padding:6px 0;font-size:12.5px;}
+.budget-bar-track{height:9px;border-radius:5px;background:var(--bg3);overflow:hidden;}
+.budget-bar-fill{height:100%;border-radius:5px;transition:width .5s cubic-bezier(.4,0,.2,1);}
+.card-bar-row{display:grid;grid-template-columns:130px 1fr 60px 96px;gap:10px;align-items:center;padding:7px 0;font-size:12.5px;}
+.dash-period-select{appearance:none;-webkit-appearance:none;border:none;border-radius:11px;padding:8px 32px 8px 14px;
+  font-size:12.5px;font-weight:700;color:#fff;cursor:pointer;background-color:#43a047;
+  background-image:linear-gradient(135deg,#43a047,#2e7d32),url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='white'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;background-size:14px;
+  box-shadow:0 2px 8px rgba(67,160,71,.28);transition:all .15s;}
+.dash-period-select:hover{box-shadow:0 4px 12px rgba(67,160,71,.38);transform:translateY(-1px);}
+.dash-period-select:focus{outline:none;box-shadow:0 0 0 3px rgba(67,160,71,.25);}
+.dash-period-select option{color:var(--text);background:#fff;}
+/* ── Painel de filtros lateral (Evolução) — pills dinâmicas e coloridas,
+   no lugar do modal cinza centralizado de antes. ── */
+.ev-filter-panel{width:200px;flex-shrink:0;background:var(--bg2);border:1px solid var(--border);border-radius:16px;padding:16px;position:sticky;top:16px;max-height:calc(100vh - 32px);overflow-y:auto;}
+.ev-filter-section{margin-bottom:20px;}
+.ev-filter-section:last-child{margin-bottom:0;}
+.ev-filter-section-hdr{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--text3);margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;}
+.ev-year-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+.ev-pill{border:1.5px solid #c8e6c9;background:#fff;color:#2e7d32;font-size:11px;font-weight:700;padding:7px 4px;border-radius:9px;cursor:pointer;transition:all .15s;white-space:nowrap;text-align:center;}
+.ev-pill:hover{border-color:#43a047;background:#f1f8e9;}
+.ev-pill.active{background:linear-gradient(135deg,#2e7d32,#66bb6a);border-color:#388e3c;color:#fff;box-shadow:0 2px 6px rgba(56,142,60,.3);}
+.ev-pill.ev-pill-all{grid-column:span 4;}
+.ev-cat-list{display:flex;flex-direction:column;gap:5px;max-height:340px;overflow-y:auto;padding-right:2px;}
+.ev-pill-row{display:flex;align-items:center;gap:4px;}
+.ev-pill-row-sub{padding-left:14px;}
+.ev-cat-pill{flex:1;border:1.5px solid #c8e6c9;background:#fff;color:#2e7d32;font-size:12px;font-weight:600;padding:7px 12px;border-radius:10px;cursor:pointer;transition:all .15s;text-align:left;}
+.ev-cat-pill-sub{font-size:11.5px;font-weight:500;}
+.ev-cat-pill:hover{border-color:#43a047;background:#f1f8e9;}
+.ev-cat-pill.excluded{opacity:.4;text-decoration:line-through;background:var(--bg3);border-color:var(--border);color:var(--text3);}
+.ev-pill-mode-btn{flex-shrink:0;width:26px;height:26px;border-radius:8px;border:1.5px solid #c8e6c9;background:#fff;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
+.ev-pill-mode-btn:hover{border-color:#43a047;background:#f1f8e9;}
+.ev-toggle-group{display:inline-flex;background:var(--bg3);border-radius:10px;padding:3px;gap:2px;}
+.ev-toggle-group .btn{border:none!important;background:transparent;box-shadow:none;padding:6px 14px;border-radius:8px!important;font-size:12px;font-weight:600;color:var(--text3);}
+.ev-toggle-group .btn.primary{background:#fff;color:#2e7d32;box-shadow:0 1px 4px rgba(20,30,50,.12);}
+.ev-action-btn{padding:7px 14px;border-radius:10px;border:1.5px solid #c8e6c9;background:#fff;color:#2e7d32;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;}
+.ev-action-btn:hover{border-color:#43a047;background:#f1f8e9;}
+.ev-toggle-pill{padding:7px 14px;border-radius:10px;border:1.5px solid #c8e6c9;background:#fff;color:#2e7d32;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;}
+.ev-toggle-pill:hover{border-color:#43a047;background:#f1f8e9;}
+.ev-toggle-pill.active{background:linear-gradient(135deg,#2e7d32,#43a047);border-color:#388e3c;color:#fff;box-shadow:0 2px 6px rgba(56,142,60,.3);}
+.file-dropzone{border:2px dashed var(--border);border-radius:12px;padding:14px 16px;transition:all .15s;max-width:560px;}
+.file-dropzone.dragover{border-color:#43a047;background:#f1f8e9;}
+@media (max-width: 1100px){
+  #page-evolucao > div { flex-direction: column; }
+  .ev-filter-panel{ width:100%; }
+  .ev-cat-list{ max-height:160px; }
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:'Segoe UI',system-ui,sans-serif;font-size:var(--font-base);color:var(--text);background:var(--bg);height:100vh;display:flex;overflow:hidden;}
@@ -359,11 +446,11 @@ select.inp option{background:var(--bg2);}
       <span class="search-icon">🔍</span>
       <input type="text" id="search-input" placeholder="Pesquisar nesta conta…" oninput="onSearch(this.value)">
     </div>
-    <button class="btn sm" id="undo-btn" onclick="doUndo()" title="Desfazer (Ctrl+Z)" style="display:none">↩ Desfazer</button>
-    <button class="btn sm" onclick="openAiEntry()" title="Lançar por linguagem natural" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;border:none">✨ Lançar com IA</button>
-    <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
-    <button class="btn sm" onclick="openTransferModal()">⇄ Transferência</button>
-    <button class="btn sm primary" onclick="goPage('import')">📥 Importar</button>
+    <button class="btn sm" id="undo-btn" onclick="doUndo()" title="Desfazer (Ctrl+Z)" style="display:none;border-radius:10px">↩ Desfazer</button>
+    <button class="btn sm" onclick="openAiEntry()" title="Lançar por linguagem natural" style="background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(124,58,237,.3)">✨ Lançar com IA</button>
+    <button class="btn sm" onclick="openTxModal()" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3)">+ Lançamento</button>
+    <button class="btn sm" onclick="openTransferModal()" style="background:linear-gradient(135deg,#1d4ed8,#3b82f6);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(59,130,246,.3)">⇄ Transferência</button>
+    <button class="btn sm" onclick="goPage('import')" style="background:linear-gradient(135deg,#0e7490,#0891b2);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(8,145,178,.3)">📥 Importar</button>
   </div>
 
   <!-- Global search results dropdown -->
@@ -446,28 +533,84 @@ select.inp option{background:var(--bg2);}
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="font-size:12px;font-weight:600;color:var(--text2)">Excluir categorias dos gráficos:</span>
         <div id="cat-filter-chips" style="display:flex;flex-wrap:wrap;gap:6px;flex:1"></div>
-        <button class="btn xs" onclick="openCatTypesConfig()" title="Definir se cada categoria é Receita ou Despesa">⚙ Tipos</button>
-        <button class="btn xs" onclick="openCatFilterModal()">⚙ Configurar</button>
+        <button class="ev-action-btn" style="padding:5px 10px;font-size:11px" onclick="openCatTypesConfig()" title="Definir se cada categoria é Receita ou Despesa">⚙ Tipos</button>
+        <button class="ev-action-btn" style="padding:5px 10px;font-size:11px" onclick="openCatFilterModal()">⚙ Configurar</button>
       </div>
     </div>
 
-    <!-- Pie charts -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
-      <div class="tbl-card" style="padding:18px">
-        <div style="font-size:13px;font-weight:600;margin-bottom:14px">Despesas por categoria</div>
-        <div style="display:flex;align-items:center;gap:16px">
-          <canvas id="pie-expenses" width="180" height="180" style="flex-shrink:0"></canvas>
-          <div id="pie-expenses-legend" style="font-size:12px;line-height:2;overflow:hidden;flex:1"></div>
+    <!-- ═══ PAINEL FINANCEIRO — novo conjunto de gráficos ═══ -->
+    <!-- (i) Receitas e despesas integradas — clique num mês pra atualizar os widgets abaixo -->
+    <div class="dash-card" style="margin-bottom:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:2px">
+        <h3 style="margin-bottom:0">📈 Receitas e Despesas</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <button id="dash-flow-ipca-pill" class="ev-toggle-pill active" onclick="dashToggleFlowIpca()">📈 IPCA</button>
+          <button id="dash-flow-ma-pill" class="ev-toggle-pill active" onclick="dashToggleFlowMa()">〜 MM 12m</button>
+          <select id="dash-flow-period" class="dash-period-select" onchange="dashSetPeriod(this.value)">
+            <option value="6">Últimos 6 meses</option>
+            <option value="12" selected>Últimos 12 meses</option>
+            <option value="24">Últimos 24 meses</option>
+            <option value="36">Últimos 36 meses</option>
+            <option value="all">Desde o início</option>
+          </select>
         </div>
       </div>
-      <div class="tbl-card" style="padding:18px">
-        <div style="font-size:13px;font-weight:600;margin-bottom:14px">Receitas por categoria</div>
-        <div style="display:flex;align-items:center;gap:16px">
-          <canvas id="pie-income" width="180" height="180" style="flex-shrink:0"></canvas>
-          <div id="pie-income-legend" style="font-size:12px;line-height:2;overflow:hidden;flex:1"></div>
-        </div>
+      <div class="dash-sub">Clique em um mês do gráfico para ver os detalhes dele nos painéis abaixo</div>
+      <div style="position:relative;height:260px">
+        <canvas id="dash-flow-chart"></canvas>
       </div>
     </div>
+
+    <!-- (ii) Orçado vs realizado — barras por categoria + rosca agregada -->
+    <div class="dash-row dash-row-budget">
+      <div class="dash-card">
+        <h3>🎯 Orçado vs. Realizado <span id="dash-budget-month" style="font-size:11px;font-weight:400;color:var(--text3)"></span></h3>
+        <div class="dash-sub">Acompanhamento por categoria no mês selecionado</div>
+        <div id="dash-budget-bars"></div>
+      </div>
+      <div class="dash-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center">
+        <h3 style="align-self:flex-start;margin-bottom:8px">🍩 Geral do orçamento</h3>
+        <div style="position:relative;width:168px;height:168px">
+          <canvas id="dash-budget-donut"></canvas>
+          <div id="dash-budget-donut-label" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:800;color:var(--text)"></div>
+        </div>
+        <div id="dash-budget-donut-sub" style="font-size:12px;color:var(--text3);margin-top:10px;text-align:center"></div>
+      </div>
+    </div>
+
+    <!-- (iii) Participação por categoria + (iv) gauge despesa/receita -->
+    <div class="dash-row dash-row-cat">
+      <div class="dash-card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;flex-wrap:wrap;gap:8px">
+          <h3 style="margin-bottom:0">📊 Participação por categoria</h3>
+          <div class="dash-toggle" id="dash-cat-toggle">
+            <button class="active exp" data-v="exp" onclick="dashSetCatMode('exp')">Despesas</button>
+            <button class="inc" data-v="inc" onclick="dashSetCatMode('inc')">Receitas</button>
+          </div>
+        </div>
+        <div class="dash-sub">Mês selecionado</div>
+        <div style="position:relative;height:248px">
+          <canvas id="dash-cat-bar-chart"></canvas>
+          <div id="dash-cat-bar-empty" class="info-box" style="display:none;text-align:center;padding:24px;font-size:13px;margin-top:30px"></div>
+        </div>
+      </div>
+      <div class="dash-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center">
+        <h3 style="align-self:flex-start;margin-bottom:8px">⛽ Despesas / Receita</h3>
+        <div style="position:relative;width:168px;height:168px">
+          <canvas id="dash-gauge-chart"></canvas>
+          <div id="dash-gauge-label" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center"></div>
+        </div>
+        <div id="dash-gauge-sub" style="font-size:12px;color:var(--text3);margin-top:10px;text-align:center"></div>
+      </div>
+    </div>
+
+    <!-- (v) Cartões de crédito: gasto do mês vs limite -->
+    <div class="dash-card" style="margin-bottom:16px" id="dash-cards-card">
+      <h3>💳 Cartões de crédito</h3>
+      <div class="dash-sub">Fatura do mês selecionado, em relação ao limite</div>
+      <div id="dash-cards-bars"></div>
+    </div>
+
 
     <!-- Future pending -->
     <div class="tbl-card" style="margin-bottom:14px">
@@ -491,32 +634,21 @@ select.inp option{background:var(--bg2);}
       </div>
     </div>
 
-    <!-- Trend charts — one per category -->
-    <div class="tbl-card" style="padding:18px">
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
-        <span style="font-size:13px;font-weight:600">Evolução mensal por categoria</span>
-        <span style="font-size:12px;color:var(--text3)">Um gráfico por categoria</span>
-        <button class="btn sm" onclick="openTrendCatSelector()" style="margin-left:auto">⚙ Selecionar categorias</button>
-      </div>
-      <div id="trend-charts-grid"></div>
-    </div>
   </div>
 
   <!-- PROJEÇÃO DE FLUXO DE CAIXA -->
   <div id="page-projecao" class="page">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">
       <label class="lbl" style="margin:0">Horizonte:</label>
-      <select class="inp" id="proj-horizon" onchange="refreshProjecao()" style="width:auto">
+      <select class="dash-period-select" id="proj-horizon" onchange="refreshProjecao()" style="width:auto">
         <option value="3">3 meses</option>
         <option value="6" selected>6 meses</option>
         <option value="12">12 meses</option>
       </select>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="proj-include-credit" onchange="refreshProjecao()"> Incluir cartões de crédito
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="proj-include-investment" onchange="refreshProjecao()"> Incluir contas de investimento
-      </label>
+      <button id="proj-credit-pill" class="ev-toggle-pill" onclick="projToggleCreditPill()">💳 Cartões de crédito</button>
+      <button id="proj-investment-pill" class="ev-toggle-pill" onclick="projToggleInvestmentPill()">📈 Contas de investimento</button>
+      <input type="checkbox" id="proj-include-credit" style="display:none">
+      <input type="checkbox" id="proj-include-investment" style="display:none">
       <span style="flex:1"></span>
       <span id="proj-updated" style="font-size:11px;color:var(--text3)"></span>
     </div>
@@ -526,7 +658,7 @@ select.inp option{background:var(--bg2);}
 
     <div class="tbl-card" style="margin-bottom:16px">
       <div style="padding:14px 16px 4px"><strong style="font-size:14px">Saldo projetado</strong></div>
-      <div style="padding:8px 16px 16px"><canvas id="proj-chart" height="90"></canvas></div>
+      <div style="padding:8px 16px 16px"><div style="position:relative;height:300px"><canvas id="proj-chart"></canvas></div></div>
     </div>
 
     <div id="proj-monthly"></div>
@@ -562,8 +694,8 @@ select.inp option{background:var(--bg2);}
             <option value="category">Por categoria</option>
             <option value="amount">Por valor</option>
           </select>
-          <button class="btn sm" onclick="openAiEntry()" title="Lançar por linguagem natural" style="background:linear-gradient(135deg,#7c3aed,#2563eb);color:#fff;border:none">✨ Lançar com IA</button>
-    <button class="btn sm" onclick="openTxModal()">+ Lançamento</button>
+          <button class="btn sm" onclick="openAiEntry()" title="Lançar por linguagem natural" style="background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(124,58,237,.3)">✨ Lançar com IA</button>
+    <button class="btn sm" onclick="openTxModal()" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3)">+ Lançamento</button>
         </div>
       </div>
       <!-- Table view -->
@@ -623,7 +755,7 @@ select.inp option{background:var(--bg2);}
       </div>
       <div class="field" style="margin:0" id="rep-period-wrap">
         <label class="lbl">Período</label>
-        <select class="inp" id="rep-period-preset" onchange="applyPeriodPreset(this.value)" style="width:auto;min-width:160px">
+        <select class="dash-period-select" id="rep-period-preset" onchange="applyPeriodPreset(this.value)" style="width:auto;min-width:160px">
           <option value="this-month">Este mês</option>
           <option value="last-month">Último mês</option>
           <option value="this-year">Este ano</option>
@@ -641,12 +773,12 @@ select.inp option{background:var(--bg2);}
         <label class="lbl">Até</label>
         <input type="date" class="inp" id="rep-to" style="width:140px" onchange="onCustomDates()">
       </div>
-      <button class="btn sm primary" onclick="runReport()">Atualizar</button>
-      <button class="btn sm" onclick="exportReportCSV()" title="Exportar CSV (formato Moneyspire)">📋 CSV</button>
-      <button class="btn sm" onclick="exportReportExcel()" title="Exportar Excel">📊 Excel</button>
-      <button class="btn sm" onclick="exportReportPDF()" title="Exportar PDF">📄 PDF</button>
-      <button class="btn sm" onclick="openSaveReportModal()">💾 Salvar</button>
-      <button class="btn sm" id="btn-manage-saved" onclick="openManageSavedReports()" style="display:none">🗂 Salvos</button>
+      <button onclick="runReport()" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:7px 14px;cursor:pointer;font-size:14px">Atualizar</button>
+      <button class="ev-action-btn" onclick="exportReportCSV()" title="Exportar CSV (formato Moneyspire)">📋 CSV</button>
+      <button class="ev-action-btn" onclick="exportReportExcel()" title="Exportar Excel">📊 Excel</button>
+      <button class="ev-action-btn" onclick="exportReportPDF()" title="Exportar PDF">📄 PDF</button>
+      <button class="ev-action-btn" onclick="openSaveReportModal()">💾 Salvar</button>
+      <button class="ev-action-btn" id="btn-manage-saved" onclick="openManageSavedReports()" style="display:none">🗂 Salvos</button>
     </div>
 
     <!-- Advanced filters (accounts + categories) -->
@@ -671,10 +803,8 @@ select.inp option{background:var(--bg2);}
         </div>
       </div>
       <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
-        <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-          <input type="checkbox" id="rep-exclude-transfers" checked onchange="runReport()">
-          Excluir transferências entre contas
-        </label>
+        <button id="rep-exclude-transfers-pill" class="ev-toggle-pill active" onclick="repToggleExcludeTransfersPill()">↔️ Excluir transferências entre contas</button>
+        <input type="checkbox" id="rep-exclude-transfers" style="display:none" checked>
       </div>
     </div>
 
@@ -778,10 +908,16 @@ select.inp option{background:var(--bg2);}
       <!-- Status line -->
       <div id="bank-selected-label" style="font-size:13px;color:var(--text2);margin-bottom:10px;min-height:20px"></div>
 
-      <!-- File trigger (shown after picking a bank) -->
-      <div id="bank-file-trigger" style="display:none;gap:8px;align-items:center">
-        <button class="btn primary" onclick="triggerBankFile()">📂 Selecionar arquivo</button>
-        <span id="bank-file-name" style="font-size:12px;color:var(--text3)"></span>
+      <!-- File trigger (shown after picking a bank) — também é zona de arrastar e soltar -->
+      <div id="bank-file-trigger" class="file-dropzone" style="display:none"
+           ondragover="event.preventDefault();this.classList.add('dragover')"
+           ondragleave="this.classList.remove('dragover')"
+           ondrop="onBankFileDropped(event)">
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn primary" onclick="triggerBankFile()">📂 Selecionar arquivo</button>
+          <span id="bank-file-name" style="font-size:12px;color:var(--text3)"></span>
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:6px">ou arraste e solte o arquivo aqui</div>
       </div>
       <input type="file" id="bank-file-input" style="display:none" onchange="onBankFileSelected(event)">
 
@@ -1126,10 +1262,10 @@ select.inp option{background:var(--bg2);}
 
     <div id="apos-chart-view" style="display:none">
       <div class="tbl-card" style="padding:16px">
-        <canvas id="apos-chart" style="max-height:380px"></canvas>
+        <div style="position:relative;height:380px"><canvas id="apos-chart"></canvas></div>
       </div>
       <div class="tbl-card" style="padding:16px;margin-top:12px">
-        <canvas id="apos-chart2" style="max-height:260px"></canvas>
+        <div style="position:relative;height:300px"><canvas id="apos-chart2"></canvas></div>
       </div>
     </div>
 
@@ -2287,9 +2423,10 @@ select.inp option{background:var(--bg2);}
         <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Coluna de movimentação aceita valores negativos (saída de caixa) e positivos (entrada). Tipos que afetam o valor do ativo atualizam automaticamente a posição.</div>
         <div style="background:var(--bg3);border-radius:8px;border:1px solid var(--border);overflow:hidden;margin-bottom:8px">
           <div style="display:grid;grid-template-columns:110px 1fr 150px 120px 120px 36px;font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg4)">
-            <span>Data</span><span>Tipo</span><span>Conta</span>
+            <span>Data</span><span>Conta</span>
             <span style="text-align:right;padding-right:4px">Valor ativo (R$)</span>
             <span style="text-align:right;padding-right:4px">Movimentação</span>
+            <span>Tipo</span>
             <span></span>
           </div>
           <div id="pat-tx-table" style="max-height:320px;overflow-y:auto"></div>
@@ -2645,62 +2782,61 @@ select.inp option{background:var(--bg2);}
 
   <!-- EVOLUÇÃO -->
   <div id="page-evolucao" class="page">
-    <!-- Toolbar -->
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
-      <div class="field" style="margin:0">
-        <label class="lbl">Visualização</label>
-        <div style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
-          <button id="ev-view-summary" class="btn sm primary" onclick="evSetView('summary')" style="border-radius:0;border:none;padding:5px 12px;font-size:12px">Resumo</button>
-          <button id="ev-view-categories" class="btn sm" onclick="evSetView('categories')" style="border-radius:0;border:none;border-left:1px solid var(--border);padding:5px 12px;font-size:12px">Por categoria</button>
+    <div style="display:flex;gap:16px;align-items:flex-start">
+      <div style="flex:1;min-width:0">
+        <!-- Toolbar -->
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap">
+          <div class="ev-toggle-group">
+            <button id="ev-view-summary" class="btn sm primary" onclick="evSetView('summary')">Resumo</button>
+            <button id="ev-view-categories" class="btn sm" onclick="evSetView('categories')">Por categoria</button>
+          </div>
+          <div class="ev-toggle-group">
+            <button id="ev-display-table" class="btn sm primary" onclick="evSetDisplay('table')">📋 Tabela</button>
+            <button id="ev-display-charts" class="btn sm" onclick="evSetDisplay('charts')">📈 Gráficos</button>
+          </div>
+          <button id="ev-ipca-pill" class="ev-toggle-pill active" onclick="evToggleIpcaPill()">📈 Corrigir por IPCA</button>
+          <button id="ev-ma-pill" class="ev-toggle-pill active" onclick="evToggleMaPill()">〜 Média móvel 12m</button>
+          <input type="checkbox" id="ev-ipca" style="display:none" checked>
+          <input type="checkbox" id="ev-ma" style="display:none" checked>
+          <button class="ev-action-btn" onclick="fetchIPCA()" title="Buscar IPCA mensal do Banco Central" style="margin-left:auto">📡 Atualizar IPCA</button>
         </div>
-      </div>
-      <div class="field" style="margin:0">
-        <label class="lbl">Mostrar</label>
-        <div style="display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden">
-          <button id="ev-display-table" class="btn sm primary" onclick="evSetDisplay('table')" style="border-radius:0;border:none;padding:5px 12px;font-size:12px">📋 Tabela</button>
-          <button id="ev-display-charts" class="btn sm" onclick="evSetDisplay('charts')" style="border-radius:0;border:none;border-left:1px solid var(--border);padding:5px 12px;font-size:12px">📈 Gráficos</button>
-        </div>
-      </div>
-      <div class="field" style="margin:0">
-        <label class="lbl">Ano</label>
-        <select class="inp" id="ev-year" onchange="refreshEvolucao()" style="width:auto">
-          <option value="all">Todos os anos</option>
-        </select>
-      </div>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="ev-ipca" onchange="refreshEvolucao()" checked>
-        Corrigir pelo IPCA
-      </label>
-      <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
-        <input type="checkbox" id="ev-ma" onchange="refreshEvolucao()" checked>
-        Média móvel 12m
-      </label>
-      <button class="btn sm" onclick="openEvCatSelector('summary')">🏷 Cat. Resumo</button>
-      <button class="btn sm" onclick="openEvCatSelector('categories')">🏷 Cat. Categorias</button>
-      <button class="btn sm" onclick="fetchIPCA()" title="Buscar IPCA mensal do Banco Central">📡 Atualizar IPCA</button>
-    </div>
-    <div id="ev-ipca-status" style="display:none;font-size:12px;color:var(--text3);margin-bottom:8px;padding:6px 12px;background:var(--bg3);border-radius:6px"></div>
+        <div id="ev-ipca-status" style="display:none;font-size:12px;color:var(--text3);margin-bottom:8px;padding:6px 12px;background:var(--bg3);border-radius:6px"></div>
 
-    <!-- TABLE VIEW -->
-    <div id="ev-table-view">
-      <div class="tbl-card">
-        <div class="tbl-header">
-          <h3 id="ev-table-title">Dados mensais</h3>
-          <span id="ev-ipca-note" style="font-size:11px;color:var(--text3)"></span>
+        <!-- TABLE VIEW -->
+        <div id="ev-table-view">
+          <div class="tbl-card">
+            <div class="tbl-header">
+              <h3 id="ev-table-title">Dados mensais</h3>
+              <span id="ev-ipca-note" style="font-size:11px;color:var(--text3)"></span>
+            </div>
+            <div style="overflow-x:auto;overflow-y:auto;max-height:600px">
+              <table id="ev-table" style="border-collapse:collapse;font-size:13px;table-layout:auto;white-space:nowrap">
+                <thead id="ev-thead"></thead>
+                <tbody id="ev-tbody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
-        <div style="overflow-x:auto;overflow-y:auto;max-height:600px">
-          <table id="ev-table" style="border-collapse:collapse;font-size:13px;table-layout:auto;white-space:nowrap">
-            <thead id="ev-thead"></thead>
-            <tbody id="ev-tbody"></tbody>
-          </table>
+
+        <!-- CHART VIEW -->
+        <div id="ev-chart-view" style="display:none">
+          <div id="ev-charts-container"></div>
+        </div>
+      </div>
+
+      <!-- Painel de filtros lateral, dinâmico e colorido -->
+      <div class="ev-filter-panel">
+        <div class="ev-filter-section">
+          <div class="ev-filter-section-hdr">Anos</div>
+          <div class="ev-year-grid" id="ev-year-pills"></div>
+        </div>
+        <div class="ev-filter-section">
+          <div class="ev-filter-section-hdr">Categorias</div>
+          <div class="ev-cat-list" id="ev-cat-pills"></div>
         </div>
       </div>
     </div>
-
-    <!-- CHART VIEW -->
-    <div id="ev-chart-view" style="display:none">
-      <div id="ev-charts-container"></div>
-    </div>
+    <select class="inp" id="ev-year" style="display:none" onchange="refreshEvolucao()"><option value="all">Todos os anos</option></select>
   </div>
 
   <!-- RECURRING -->
