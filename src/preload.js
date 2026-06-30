@@ -141,6 +141,7 @@ const api = {
   patFinancingInstallmentSet: (d) => ipcRenderer.invoke('pat:financing-installment-set', d),
   financingFetchIndexes:    ()  => ipcRenderer.invoke('financing:fetch-indexes'),
   debtList:            ()    => ipcRenderer.invoke('debt:list'),
+  debtSyncCreditCards: ()    => ipcRenderer.invoke('debt:sync-credit-cards'),
   debtSave:            (d)   => ipcRenderer.invoke('debt:save', d),
   debtDelete:          (d)   => ipcRenderer.invoke('debt:delete', d),
   debtInstallmentsGet: (d)   => ipcRenderer.invoke('debt:installments-get', d),

@@ -1,12 +1,13 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 const crypto = require('crypto');
 
 // ── SYNC MOBILE (Supabase) ──
-const sb       = require('./sync/supabase-client');
-const syncPush = require('./sync/sync-push');
-const syncPull = require('./sync/sync-pull');
+const sb          = require('./sync/supabase-client');
+const syncPush    = require('./sync/sync-push');
+const syncPull    = require('./sync/sync-pull');
+const cryptoUtils = require('./sync/crypto-utils');
 
 // Estado do sync (em memória)
 let _syncRunning = false;
@@ -534,6 +535,9 @@ function ensureLateColumns() {
     'ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0',
     'ALTER TABLE budgets ADD COLUMN rollover INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE budgets ADD COLUMN rollover_months INTEGER NOT NULL DEFAULT 3',
+    "ALTER TABLE budgets ADD COLUMN type TEXT NOT NULL DEFAULT 'expense'",
+    'ALTER TABLE budgets ADD COLUMN consolidate_subs INTEGER NOT NULL DEFAULT 1',
+    'ALTER TABLE personal_debts ADD COLUMN linked_account_id INTEGER',
     'ALTER TABLE pat_assets ADD COLUMN ownership_pct REAL',
     // Colunas de financiamento — também precisam existir mesmo se o banco
     // estava criptografado no startup (ver comentário em ensureLateColumns).
@@ -970,16 +974,22 @@ ipcMain.handle('report:summary', (_, { fromDate, toDate, accountIds, excludeTran
     COUNT(*) as count
     FROM transactions t ${where} GROUP BY t.category ORDER BY expenses DESC`, p);
 });
-ipcMain.handle('report:monthly', (_, { fromDate, toDate, accountIds, excludeTransfers }) => {
-  let where = 'WHERE 1=1'; const p = [];
+ipcMain.handle('report:monthly', (_, { fromDate, toDate, accountIds, excludeTransfers, categories }) => {
+  let where = "WHERE category IS NOT NULL AND category != ''"; const p = [];
   if (fromDate) { where += ' AND date>=?'; p.push(fromDate); }
   if (toDate)   { where += ' AND date<=?'; p.push(toDate); }
   if (accountIds?.length) { where += ` AND account_id IN (${accountIds.map(()=>'?').join(',')})`; p.push(...accountIds); }
   if (excludeTransfers) { where += ` AND category NOT IN ('Transferência','Transferências','Transferencia','Transferencias') AND transfer_id IS NULL`; }
-  return all(`SELECT substr(date,1,7) as month,
+  if (categories?.length) { where += ` AND category IN (${categories.map(()=>'?').join(',')})`; p.push(...categories); }
+  // Agrupa por (mês, categoria) — não só por mês — pra permitir que o
+  // front-end classifique cada categoria pelo saldo líquido dela (igual ao
+  // relatório "Resumo"), em vez de somar bruto. Sem isso, uma categoria com
+  // receita E despesa no mesmo mês (ex.: juros com um ajuste negativo)
+  // inflava os dois totais simultaneamente, mesmo a diferença batendo.
+  return all(`SELECT substr(date,1,7) as month, category,
     SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expenses,
     SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) as income
-    FROM transactions ${where} GROUP BY month ORDER BY month`, p);
+    FROM transactions ${where} GROUP BY month, category ORDER BY month`, p);
 });
 
 // Monthly by category for trend chart
@@ -1135,16 +1145,18 @@ ipcMain.handle('goal:avg-monthly-savings', () => {
 });
 
 // Budget CRUD
-ipcMain.handle('budget:list', () => all('SELECT * FROM budgets WHERE active=1 ORDER BY category'));
-ipcMain.handle('budget:save', (_, { id, category, monthly_limit, alert_pct, rollover, rollover_months }) => {
+ipcMain.handle('budget:list', () => all('SELECT * FROM budgets WHERE active=1 ORDER BY type DESC, category'));
+ipcMain.handle('budget:save', (_, { id, category, monthly_limit, alert_pct, rollover, rollover_months, type, consolidate_subs }) => {
   const rv = rollover ? 1 : 0;
   const rm = Math.max(1, Math.min(60, parseInt(rollover_months) || 3));
+  const ty = type === 'income' ? 'income' : 'expense';
+  const cs = consolidate_subs === false ? 0 : 1;
   if (id) {
-    run('UPDATE budgets SET category=?,monthly_limit=?,alert_pct=?,rollover=?,rollover_months=? WHERE id=?',
-      [category, monthly_limit, alert_pct||80, rv, rm, id]);
+    run('UPDATE budgets SET category=?,monthly_limit=?,alert_pct=?,rollover=?,rollover_months=?,type=?,consolidate_subs=? WHERE id=?',
+      [category, monthly_limit, alert_pct||80, rv, rm, ty, cs, id]);
   } else {
-    run('INSERT OR REPLACE INTO budgets (category,monthly_limit,alert_pct,rollover,rollover_months,active) VALUES (?,?,?,?,?,1)',
-      [category, monthly_limit, alert_pct||80, rv, rm]);
+    run('INSERT OR REPLACE INTO budgets (category,monthly_limit,alert_pct,rollover,rollover_months,type,consolidate_subs,active) VALUES (?,?,?,?,?,?,?,1)',
+      [category, monthly_limit, alert_pct||80, rv, rm, ty, cs]);
   }
   save();
   return { ok: true };
@@ -2355,18 +2367,54 @@ async function mainStartupFlow() {
   let sessionRestored = false;
   if (!_dbPendingDecrypt && settings.supabaseRefreshToken) {
     try {
-      await sb.refreshSession(settings.supabaseRefreshToken);
+      const refreshed = await sb.refreshSession(settings.supabaseRefreshToken);
       console.log('[sync] sessão restaurada para', settings.supabaseEmail);
       sessionRestored = true;
+
+      // Persiste o NOVO refresh token — o Supabase usa tokens rotativos:
+      // cada uso invalida o anterior e gera um novo. Sem persistir aqui,
+      // a próxima abertura do app tentaria usar um token já expirado.
+      if (refreshed?.refresh_token) {
+        const s2 = loadSettings();
+        s2.supabaseRefreshToken = refreshed.refresh_token;
+        saveSettings(s2);
+      }
+
       if (sb.getUserId()) await _ensureFirstRun(sb.getUserId()).catch(() => {});
+
+      // Restaura chave de criptografia usando senha guardada pelo safeStorage
+      if (safeStorage.isEncryptionAvailable() && settings.supabaseEncryptedPassword) {
+        try {
+          const password = safeStorage.decryptString(
+            Buffer.from(settings.supabaseEncryptedPassword, 'base64')
+          );
+          await initEncryptionKey(sb.getUserId(), password);
+        } catch (e) {
+          console.warn('[crypto] não foi possível restaurar chave de dados:', e.message);
+        }
+      }
+
       runMobileSync('startup').catch(() => {});
     } catch(e) {
-      console.log('[sync] sessão expirada, login necessário:', e.message);
-      const s2 = loadSettings();
-      delete s2.supabaseRefreshToken;
-      delete s2.supabaseEmail;
-      saveSettings(s2);
-      sessionRestored = false;
+      const errMsg = e.message || '';
+      const isTokenInvalid = errMsg.includes('invalid') || errMsg.includes('expired')
+        || errMsg.includes('401') || errMsg.includes('not found');
+
+      if (isTokenInvalid) {
+        // Token realmente inválido ou expirado — precisa re-login
+        console.log('[sync] token inválido, re-login necessário:', errMsg);
+        const s2 = loadSettings();
+        delete s2.supabaseRefreshToken;
+        delete s2.supabaseEmail;
+        saveSettings(s2);
+        sessionRestored = false;
+      } else {
+        // Erro transitório (rede, timeout, servidor indisponível) —
+        // mantém o token salvo para tentar novamente na próxima abertura.
+        console.warn('[sync] falha transitória ao restaurar sessão (token preservado):', errMsg);
+        // Continua sem sessão ativa nesta execução, mas não força re-login
+        sessionRestored = false;
+      }
     }
   }
 
@@ -2704,7 +2752,7 @@ ipcMain.handle('overview-config:save', (_, config) => {
 });
 
 // ── CATEGORY DETAIL REPORT ──
-ipcMain.handle('report:category-detail', (_, { category, fromDate, toDate }) => {
+ipcMain.handle('report:category-detail', (_, { category, fromDate, toDate, accountIds }) => {
   const params = [];
   let where = 'WHERE 1=1';
   if (category !== null && category !== undefined) {
@@ -2716,6 +2764,7 @@ ipcMain.handle('report:category-detail', (_, { category, fromDate, toDate }) => 
   }
   if (fromDate) { where += ' AND t.date>=?'; params.push(fromDate); }
   if (toDate)   { where += ' AND t.date<=?'; params.push(toDate); }
+  if (accountIds?.length) { where += ` AND t.account_id IN (${accountIds.map(()=>'?').join(',')})`; params.push(...accountIds); }
   const rows = all(`
     SELECT t.id, t.date, t.category, t.memo, t.amount, t.cleared,
            a.name as account_name,
@@ -4402,6 +4451,71 @@ ipcMain.handle('report:export-pdf', async (_, { html, suggestedName }) => {
   } finally {
     if (pdfWin) pdfWin.destroy();
   }
+});
+
+ipcMain.handle('debt:sync-credit-cards', () => {
+  // Inclui cartões OCULTOS também — o saldo continua contando para o
+  // patrimônio total, mas a dívida sincronizada herda o mesmo status de
+  // oculto da conta (só aparece com "Mostrar ocultos" marcado).
+  const cards = all("SELECT * FROM accounts WHERE type='credit'");
+  let syncedMonths = 0;
+  cards.forEach(acc => {
+    // Encontra ou cria a dívida pessoal vinculada a este cartão.
+    let debt = first('SELECT * FROM personal_debts WHERE linked_account_id=?', [acc.id]);
+    if (!debt) {
+      const newId = run('INSERT INTO personal_debts (name,notes,sort_order,hidden,linked_account_id) VALUES (?,?,?,?,?)',
+        [acc.name, 'Sincronizado automaticamente com o cartão de crédito', 0, acc.hidden ? 1 : 0, acc.id]);
+      debt = first('SELECT * FROM personal_debts WHERE id=?', [newId]) ||
+             first('SELECT * FROM personal_debts WHERE linked_account_id=?', [acc.id]);
+    } else {
+      // Mantém o nome e o status de oculto sincronizados com a conta.
+      if (debt.name !== acc.name || debt.hidden !== (acc.hidden ? 1 : 0)) {
+        run('UPDATE personal_debts SET name=?, hidden=? WHERE id=?', [acc.name, acc.hidden ? 1 : 0, debt.id]);
+      }
+    }
+    if (!debt) return;
+
+    // Saldo corrente, mês a mês, na ordem cronológica — mesma técnica do
+    // saldo de fim de dia das contas bancárias. Cartão de crédito funciona
+    // como conta corrente comum no banco (gasto = saída negativa, pagamento
+    // de fatura = entrada positiva); saldo negativo = dívida em aberto.
+    const txs = all('SELECT date, amount FROM transactions WHERE account_id=? ORDER BY date, id', [acc.id]);
+    const balByMonth = {};
+    let running = 0;
+    txs.forEach(t => {
+      running += t.amount;
+      balByMonth[t.date.slice(0,7)] = running; // sobrescreve a cada lançamento do mês — sobra o saldo após o ÚLTIMO
+    });
+
+    // Preenche os meses sem lançamento algum repetindo o saldo do mês
+    // anterior (senão um mês "parado" desapareceria da série).
+    const months = Object.keys(balByMonth).sort();
+    if (!months.length) return;
+    const allMonths = [];
+    { let cur = months[0];
+      const last = months[months.length-1];
+      while (cur <= last) {
+        allMonths.push(cur);
+        const d = new Date(cur + '-02'); d.setMonth(d.getMonth()+1);
+        cur = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+      }
+    }
+    let carryBal = 0;
+    allMonths.forEach(m => {
+      if (balByMonth[m] !== undefined) carryBal = balByMonth[m];
+      const debtAmount = carryBal < 0 ? -carryBal : 0;
+      const existing = first('SELECT * FROM personal_debt_installments WHERE debt_id=? AND month=?', [debt.id, m]);
+      if (existing) {
+        run('UPDATE personal_debt_installments SET balance_end=?, is_projection=0, paid=1 WHERE id=?', [debtAmount, existing.id]);
+      } else {
+        run(`INSERT INTO personal_debt_installments (debt_id,month,installment,principal,interest,correction,balance_end,is_projection,paid)
+             VALUES (?,?,0,0,0,0,?,0,1)`, [debt.id, m, debtAmount]);
+      }
+      syncedMonths++;
+    });
+  });
+  save();
+  return { ok: true, cardsCount: cards.length, syncedMonths };
 });
 
 ipcMain.handle('debt:list', () =>
@@ -6773,6 +6887,57 @@ ipcMain.handle('inv:bulk-import-history', (_, { assets }) => {
 
 // Função central de sync — pull primeiro (importa entradas do mobile),
 // depois push (publica snapshot atualizado com as novas transações)
+// ─────────────────────────────────────────────────────────────
+// Inicialização da chave de criptografia de dados
+//
+// Fluxo:
+//   1. Busca no Supabase se já existe uma chave para este user
+//   2a. Se sim: decifra com a senha fornecida → chave disponível
+//   2b. Se não: gera nova chave aleatória, cifra com a senha,
+//       salva no Supabase → primeira configuração
+//   3. Caso a chave não abra com a senha atual: a senha foi
+//      trocada. Invalida o cache de sync e aguarda re-sync.
+// ─────────────────────────────────────────────────────────────
+async function initEncryptionKey(userId, password) {
+  try {
+    const rows = await sb.select('user_encryption_keys', { user_id: userId });
+    const existing = rows?.[0];
+
+    if (existing) {
+      const ok = cryptoUtils.unlockDataKey(password, existing.encrypted_key, existing.salt);
+      if (!ok) {
+        console.log('[crypto] senha diferente da original — re-cifrando chave de dados');
+        const { encryptedKey, salt } = cryptoUtils.reencryptDataKey(password);
+        await sb.update('user_encryption_keys', { user_id: userId }, {
+          encrypted_key: encryptedKey,
+          salt,
+          updated_at: new Date().toISOString(),
+        });
+        syncPush.invalidateCacheTables(['balances','transactions','budgets','goals','scheduled','patrimonio','evolution','ml_rules']);
+        console.log('[crypto] chave re-cifrada, cache invalidado — próximo sync será completo');
+      } else {
+        console.log('[crypto] chave de dados desbloqueada com sucesso');
+      }
+    } else {
+      console.log('[crypto] primeira configuração — gerando chave de dados');
+      const { encryptedKey, salt } = cryptoUtils.generateAndEncryptDataKey(password);
+      await sb.upsert('user_encryption_keys', [{
+        user_id:       userId,
+        encrypted_key: encryptedKey,
+        salt,
+        version:       1,
+        created_at:    new Date().toISOString(),
+        updated_at:    new Date().toISOString(),
+      }], 'user_id');
+      cryptoUtils.unlockDataKey(password, encryptedKey, salt);
+      console.log('[crypto] chave de dados gerada e ativada');
+    }
+  } catch (e) {
+    console.error('[crypto] erro ao inicializar chave de dados:', e.message);
+    // Falha silenciosa — sync continua sem criptografia (RLS ainda protege)
+  }
+}
+
 async function runMobileSync(trigger = 'manual') {
   if (!sb.isLoggedIn()) {
     console.log(`[sync] pulado (trigger: ${trigger}) — sem sessão Supabase`);
@@ -6808,11 +6973,22 @@ async function runMobileSync(trigger = 'manual') {
 ipcMain.handle('sync:login', async (_, { email, password }) => {
   try {
     const result = await sb.login(email, password);
-    // Persiste email e refresh token para restaurar sessão na próxima abertura
+    const userId = result.user.id;
+
+    // Inicializa/carrega a chave de criptografia de dados do usuário
+    await initEncryptionKey(userId, password);
+
+    // Guarda a senha via safeStorage (Keychain/DPAPI do SO) para
+    // restaurar a chave de criptografia nas próximas aberturas do app
+    // sem precisar que o usuário redigite a senha.
     const s = loadSettings();
+    if (safeStorage.isEncryptionAvailable()) {
+      s.supabaseEncryptedPassword = safeStorage.encryptString(password).toString('base64');
+    }
     s.supabaseEmail        = result.user.email;
     s.supabaseRefreshToken = result.refresh_token;
     saveSettings(s);
+
     // Dispara sync imediato após login
     runMobileSync('login').catch(() => {});
     return { ok: true, email: result.user.email };
@@ -6825,9 +7001,11 @@ ipcMain.handle('sync:login', async (_, { email, password }) => {
 ipcMain.handle('sync:logout', async () => {
   try {
     await sb.logout();
+    cryptoUtils.lockDataKey(); // limpa chave de dados da memória
     const s = loadSettings();
     delete s.supabaseEmail;
     delete s.supabaseRefreshToken;
+    delete s.supabaseEncryptedPassword; // remove senha salva
     saveSettings(s);
     return { ok: true };
   } catch (e) {

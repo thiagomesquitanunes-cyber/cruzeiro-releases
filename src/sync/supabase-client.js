@@ -103,7 +103,10 @@ async function refreshSession(storedToken) {
     body: { refresh_token: token },
   });
   _session = data;
-  return data;
+  // Retorna explicitamente o novo refresh_token para que o chamador
+  // possa persistir — o Supabase usa tokens rotativos (cada uso
+  // invalida o anterior). Sem persistir, a próxima abertura falha.
+  return { ...data, refresh_token: data.refresh_token };
 }
 
 function getSession() { return _session; }

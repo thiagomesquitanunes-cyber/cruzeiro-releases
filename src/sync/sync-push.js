@@ -8,9 +8,70 @@
 //   • Falhas silenciosas — sync é best-effort, não bloqueia o app
 //   • Valores monetários em centavos (integer) para evitar float
 //   • desktop_id = PK original do SQLite (garante idempotência)
+//   • Hash por tabela: só envia dados se algo mudou desde o último sync
 // ─────────────────────────────────────────────────────────────
 
-const sb = require('./supabase-client');
+const sb     = require('./supabase-client');
+const crypto_utils = require('./crypto-utils');
+
+// Helper: cifra um valor se a chave estiver disponível, senão passa em claro.
+// Isso garante que o sync funciona mesmo antes de a criptografia ser ativada
+// (retrocompatibilidade para usuários antigos que ainda não têm chave).
+function enc(value) {
+  if (!crypto_utils.isUnlocked()) return value;
+  return crypto_utils.encrypt(value);
+}
+
+function encJSON(obj) {
+  if (!crypto_utils.isUnlocked()) return obj;
+  return crypto_utils.encryptJSON(obj);
+}
+const crypto = require('crypto');
+const path   = require('path');
+const fs     = require('fs');
+
+// ─────────────────────────────────────────────────────────────
+// Cache de hashes por tabela — persiste em arquivo local para
+// sobreviver entre sessões. Cada entrada: { hash, syncedAt }.
+// Localizado junto ao banco de dados do usuário.
+// ─────────────────────────────────────────────────────────────
+let _hashCachePath = null;
+let _hashCache     = {};
+
+function initHashCache(dbPath) {
+  _hashCachePath = dbPath.replace('.db', '_sync_hashes.json');
+  try {
+    if (fs.existsSync(_hashCachePath)) {
+      _hashCache = JSON.parse(fs.readFileSync(_hashCachePath, 'utf8'));
+    }
+  } catch (e) {
+    _hashCache = {};
+  }
+}
+
+function saveHashCache() {
+  if (!_hashCachePath) return;
+  try { fs.writeFileSync(_hashCachePath, JSON.stringify(_hashCache)); } catch (e) {}
+}
+
+// Calcula hash MD5 de um conjunto de linhas (rápido, não precisa de segurança)
+function hashRows(rows) {
+  const str = JSON.stringify(rows);
+  return crypto.createHash('md5').update(str).digest('hex');
+}
+
+// Retorna true se os dados mudaram desde o último sync desta tabela
+function hasChanged(table, rows) {
+  const h = hashRows(rows);
+  if (_hashCache[table] === h) return false; // sem mudança
+  _hashCache[table] = h;
+  return true;
+}
+
+// Invalida o cache de uma tabela (força re-sync na próxima vez)
+function invalidateCache(table) {
+  delete _hashCache[table];
+}
 
 // Converte reais (float) para centavos (integer)
 const toCents = v => Math.round((v || 0) * 100);
@@ -48,7 +109,7 @@ async function pushBalances(all, userId, syncInvestments) {
       user_id:      userId,
       account_name: acc.name,
       account_type: acc.type,
-      balance:      toCents(bal),
+      balance:      enc(toCents(bal)),
       currency:     acc.currency || 'BRL',
       is_hidden:    acc.hidden === 1,
       sort_order:   acc.sort_order || 0,
@@ -56,12 +117,17 @@ async function pushBalances(all, userId, syncInvestments) {
     };
   });
 
+  if (!hasChanged('balances', rows.map(r => ({ ...r, synced_at: undefined })))) {
+    console.log('[sync:push] balances sem mudança — pulando');
+    return;
+  }
+  const syncedAt = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAt);
+
   await sb.upsert('mobile_balances', rows, 'user_id,account_name');
 
   // Se investimentos estão desativados, o prune precisa considerar
-  // que contas de investimento NUNCA devem estar na lista atual —
-  // garante que sejam removidas mesmo que tenham sido sincronizadas
-  // antes do usuário desativar a opção.
+  // que contas de investimento NUNCA devem estar na lista atual.
   const allAccountNames = syncInvestments
     ? accounts.map(a => a.name)
     : all('SELECT name FROM accounts WHERE hidden=0 AND type != ?', ['investment']).map(a => a.name);
@@ -96,16 +162,23 @@ async function pushTransactions(all, userId, syncInvestments) {
       user_id:       userId,
       desktop_id:    String(t.id),
       date:          t.date,
-      description:   t.memo || t.category || '',
-      amount:        toCents(t.amount),
+      description:   enc(t.memo || t.category || ''),
+      amount:        enc(toCents(t.amount)),
       category:      category || null,
       subcategory:   subcategory || null,
       account_name:  t.account_name,
-      memo:          t.memo || null,
+      memo:          enc(t.memo || null),
       is_reconciled: t.cleared === 1,
       synced_at:     new Date().toISOString(),
     };
   });
+
+  if (!hasChanged('transactions', rows.map(r => ({ ...r, synced_at: undefined })))) {
+    console.log('[sync:push] transactions sem mudança — pulando');
+    return;
+  }
+  const syncedAt = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAt);
 
   // Upsert em lotes de 500 para não estourar limites HTTP
   for (let i = 0; i < rows.length; i += 500) {
@@ -113,9 +186,8 @@ async function pushTransactions(all, userId, syncInvestments) {
   }
 
   // Remove transações antigas que saíram da janela de 90 dias
-  // (qualquer desktop_id que não esteja mais no conjunto atual de 90 dias)
   await sb.pruneNotIn('mobile_transactions', userId, 'desktop_id', rows.map(r => r.desktop_id))
-    .catch(() => {}); // ignora erros de limpeza para não interromper o sync
+    .catch(() => {});
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -141,12 +213,18 @@ async function pushBudgets(all, userId) {
     user_id:       userId,
     month,
     category:      b.category,
-    monthly_limit: toCents(b.monthly_limit),
-    spent:         toCents(spentByCategory[b.category] || 0),
+    monthly_limit: enc(toCents(b.monthly_limit)),
+    spent:         enc(toCents(spentByCategory[b.category] || 0)),
     alert_pct:     b.alert_pct || 80,
     synced_at:     new Date().toISOString(),
   }));
 
+  if (!hasChanged('budgets', rows.map(r => ({ ...r, synced_at: undefined })))) {
+    console.log('[sync:push] budgets sem mudança — pulando');
+    return;
+  }
+  const syncedAtB = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAtB);
   await sb.upsert('mobile_budgets', rows, 'user_id,month,category');
   await sb.pruneNotIn('mobile_budgets', userId, 'category', budgets.map(b => b.category))
     .catch(() => {});
@@ -204,17 +282,23 @@ async function pushGoals(all, userId) {
       type:           g.type,
       icon:           g.icon || '🎯',
       color:          g.color || '#2563eb',
-      target_amount:  g.target_amount  ? toCents(g.target_amount)  : null,
-      monthly_amount: g.monthly_amount ? toCents(g.monthly_amount) : null,
+      target_amount:  g.target_amount  ? enc(toCents(g.target_amount))  : null,
+      monthly_amount: g.monthly_amount ? enc(toCents(g.monthly_amount)) : null,
       emergency_months: g.emergency_months || null,
       deadline:       g.deadline || null,
-      current_amount: toCents(currentAmount),
+      current_amount: enc(toCents(currentAmount)),
       progress_pct:   Math.round(progressPct * 100) / 100,
       active:         g.active === 1,
       synced_at:      new Date().toISOString(),
     };
   });
 
+  if (!hasChanged('goals', rows.map(r => ({ ...r, synced_at: undefined })))) {
+    console.log('[sync:push] goals sem mudança — pulando');
+    return;
+  }
+  const syncedAtG = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAtG);
   await sb.upsert('mobile_goals', rows, 'user_id,desktop_id');
   await sb.pruneNotIn('mobile_goals', userId, 'desktop_id', goals.map(g => String(g.id)));
 }
@@ -231,8 +315,8 @@ async function pushScheduled(all, userId) {
     user_id:      userId,
     desktop_id:   String(r.id),
     next_date:    r.next_date,
-    memo:         r.memo || '',
-    amount:       toCents(r.amount),
+    memo:         enc(r.memo || ''),
+    amount:       enc(toCents(r.amount)),
     category:     r.category || null,
     account_name: accMap[r.account_id] || null,
     frequency:    r.frequency,
@@ -240,6 +324,12 @@ async function pushScheduled(all, userId) {
     synced_at:    new Date().toISOString(),
   }));
 
+  if (!hasChanged('scheduled', rows.map(r => ({ ...r, synced_at: undefined })))) {
+    console.log('[sync:push] scheduled sem mudança — pulando');
+    return;
+  }
+  const syncedAtS = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAtS);
   await sb.upsert('mobile_scheduled', rows, 'user_id,desktop_id');
   await sb.pruneNotIn('mobile_scheduled', userId, 'desktop_id', recurring.map(r => String(r.id)));
 }
@@ -295,14 +385,20 @@ async function pushPatrimonio(all, userId, syncInvestments) {
     return {
       user_id:      userId,
       month,
-      total_assets: toCents(totalAssets),
-      total_debts:  toCents(totalDebts),
-      net_worth:    toCents(totalAssets - totalDebts),
-      breakdown:    breakdownCents,
+      total_assets: enc(toCents(totalAssets)),
+      total_debts:  enc(toCents(totalDebts)),
+      net_worth:    enc(toCents(totalAssets - totalDebts)),
+      breakdown:    encJSON(breakdownCents),
       synced_at:    new Date().toISOString(),
     };
   });
 
+  if (!hasChanged('patrimonio', rows.map(r => ({ ...r, synced_at: undefined })))) {
+    console.log('[sync:push] patrimonio sem mudança — pulando');
+    return;
+  }
+  const syncedAtP = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAtP);
   await sb.upsert('mobile_patrimonio', rows, 'user_id,month');
 }
 
@@ -368,15 +464,21 @@ async function pushEvolution(all, userId, getDbPath, fs) {
   const rows = monthly.map(r => ({
     user_id:     userId,
     month:       r.month,
-    income:      toCents(r.income),
-    expenses:    toCents(r.expenses),
-    balance:     toCents(r.income - r.expenses),
-    by_category: catByMonth[r.month] || {},
+    income:      enc(toCents(r.income)),
+    expenses:    enc(toCents(r.expenses)),
+    balance:     enc(toCents(r.income - r.expenses)),
+    by_category: encJSON(catByMonth[r.month] || {}),
     synced_at:   new Date().toISOString(),
   }));
 
-  // Apaga TUDO e reinsere do zero — garante que dados de versões
-  // anteriores (com filtros incorretos) não sobrevivam no Supabase.
+  if (!hasChanged('evolution', rows.map(r => ({ ...r, synced_at: undefined })))) {
+    console.log('[sync:push] evolution sem mudança — pulando');
+    return;
+  }
+  // Apaga TUDO e reinsere do zero — garante que dados com filtros
+  // incorretos de versões anteriores não sobrevivam no Supabase.
+  const syncedAtE = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAtE);
   await sb.remove('mobile_evolution', { user_id: userId });
   if (rows.length) {
     await sb.upsert('mobile_evolution', rows, 'user_id,month');
@@ -406,6 +508,12 @@ async function pushMlRules(all, userId) {
     synced_at: new Date().toISOString(),
   }));
 
+  if (!hasChanged('ml_rules', rows.map(r => ({ ...r, synced_at: undefined })))) {
+    console.log('[sync:push] ml_rules sem mudança — pulando');
+    return;
+  }
+  const syncedAtML = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAtML);
   await sb.upsert('ml_rules', rows, 'user_id,keyword');
 }
 
@@ -445,6 +553,12 @@ async function pushAiConfig(getAiConfig, userId) {
 async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPath, fs) {
   const syncInvestments = typeof getSyncInvestmentsPref === 'function' ? getSyncInvestmentsPref() : false;
 
+  // Inicializa cache de hashes (persiste entre sessões para evitar re-envio
+  // de dados que não mudaram — reduz drasticamente o Egress do Supabase).
+  if (typeof getDbPath === 'function') {
+    initHashCache(getDbPath());
+  }
+
   const steps = [
     ['balances',     () => pushBalances(all, userId, syncInvestments)],
     ['transactions', () => pushTransactions(all, userId, syncInvestments)],
@@ -471,8 +585,18 @@ async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPa
     }
   }
 
+  // Persiste hashes para a próxima sessão
+  saveHashCache();
+
   console.log('[sync:push] concluído:', results);
   return results;
 }
 
-module.exports = { pushAll };
+// Permite que main.js invalide tabelas específicas do cache
+// (ex: quando o filtro de investimentos muda)
+function invalidateCacheTables(tables) {
+  tables.forEach(t => invalidateCache(t));
+  saveHashCache();
+}
+
+module.exports = { pushAll, invalidateCacheTables };

@@ -36,12 +36,12 @@ function refreshCategories() {
 
   let html = '';
   Object.entries(groups).sort(([a],[b]) => a.localeCompare(b,'pt-BR')).forEach(([top, cats]) => {
-    html += `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;overflow:hidden">
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:var(--bg3);border-bottom:1px solid var(--border)">
-        <span style="font-weight:600;font-size:13px">${esc(top)}</span>
+    html += `<div style="background:var(--bg2);border:1px solid var(--border);border-left:4px solid #43a047;border-radius:12px;margin-bottom:10px;overflow:hidden;box-shadow:0 1px 3px rgba(20,30,50,.04)">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;background:#f1f8e9;border-bottom:1px solid var(--border)">
+        <span style="font-weight:700;font-size:13px;color:#2e7d32">${esc(top)}</span>
         <div style="display:flex;gap:6px">
-          <button class="btn xs" onclick="openAddCategory(true,'${esc2(top)}')">+ Sub</button>
-          <button class="btn xs" onclick="openRenameCategory('${esc2(top)}','${esc2(top)}')">✎</button>
+          <button class="ev-action-btn" style="padding:4px 10px;font-size:11px" onclick="openAddCategory(true,'${esc2(top)}')">+ Sub</button>
+          <button class="btn-icon" onclick="openRenameCategory('${esc2(top)}','${esc2(top)}')">✎</button>
           <button class="btn-icon" style="color:var(--red);font-size:11px" onclick="deleteCategory('${esc2(top)}')">✕</button>
         </div>
       </div>`;
@@ -804,7 +804,7 @@ async function buildInsightsSummary(targetMonth, filters) {
   // Orçamentos referentes ao mês alvo (não ao mês corrente real)
   let budgets = [];
   try {
-    const bl = await ff.budgetList();
+    const bl = (await ff.budgetList()).filter(b => b.type !== 'income');
     const actuals = await ff.budgetActuals({ month: curM });
     const actMap = {};
     actuals.forEach(a => { actMap[a.category] = a.spent || 0; });
@@ -1229,36 +1229,65 @@ async function ensureDashFlowChart(byCatFullArg) {
   const anchor = _dash.selectedMonth || overviewMonthStr();
   const byCatFull = byCatFullArg || await _dashFetchByCat();
 
-  // Todos os meses disponíveis até o mês selecionado — precisamos do
-  // histórico completo (não só a janela exibida) porque a média móvel de
-  // 12 meses precisa "olhar pra trás" além do início da janela.
-  const allAvailMonths = Object.keys(byCatFull).filter(m => m <= anchor).sort();
+  const n = _dash.periodMonths || 12;
+  const trueCurrentMonth = todayStr().slice(0,7);
+  // Lado direito da janela: fica fixo no mês ATUAL, a menos que o mês
+  // selecionado seja FUTURO (aí a janela "anda" com ele, terminando ali,
+  // como antes). Para qualquer mês selecionado hoje ou no passado, o lado
+  // direito sempre permanece no mês atual, e só o esquerdo recua o quanto
+  // for preciso pra alcançar o mês clicado — o gráfico cresce pela
+  // esquerda em vez de se mover inteiro.
+  const rightEdge = n === 'all' ? null : (anchor > trueCurrentMonth ? anchor : trueCurrentMonth);
+
+  // Todos os meses disponíveis até o lado direito da janela — precisamos
+  // do histórico completo (não só a janela exibida) porque a média móvel
+  // de 12 meses precisa "olhar pra trás" além do início da janela.
+  const allAvailMonths = Object.keys(byCatFull).filter(m => m <= (rightEdge || anchor)).sort();
   if (!allAvailMonths.length) return;
 
-  const n = _dash.periodMonths || 12;
   let months;
   if (n === 'all') {
     months = allAvailMonths;
   } else {
-    const [ay, am] = anchor.split('-').map(Number);
+    const [ly, lm] = anchor.split('-').map(Number);
+    const leftDate = new Date(ly, lm - 1 - (n - 1), 1);
+    const leftEdge = `${leftDate.getFullYear()}-${String(leftDate.getMonth()+1).padStart(2,'0')}`;
+    let [y, m] = rightEdge.split('-').map(Number);
     months = [];
-    for (let i = n - 1; i >= 0; i--) {
-      const d = new Date(ay, am - 1 - i, 1);
-      months.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+    let cur = `${y}-${String(m).padStart(2,'0')}`;
+    while (cur >= leftEdge) {
+      months.unshift(cur);
+      m--; if (m < 1) { m = 12; y--; }
+      cur = `${y}-${String(m).padStart(2,'0')}`;
     }
   }
+
+  // Mudança CIRÚRGICA: busca os dados com a MESMA chamada que a tabela da
+  // Evolução usa (sem nenhuma exclusão na consulta — só o filtro de
+  // categorias da própria Evolução, _ev.catConfig, que já é carregado na
+  // abertura do app, sem precisar visitar a aba antes) — em vez de usar
+  // os dados já filtrados pela lista manual de exclusão da Visão Geral
+  // (_excludedCats), que é um mecanismo DIFERENTE e por isso produzia
+  // valores diferentes da Evolução.
+  const evRows = await ff.evolucaoByCat({ excludedCats: [] }).catch(() => []);
+  const evByCatFull = {};
+  evRows.forEach(r => {
+    if (!evByCatFull[r.month]) evByCatFull[r.month] = {};
+    evByCatFull[r.month][r.category] = { income: r.income||0, expenses: r.expenses||0 };
+  });
+  const evAllAvailMonths = Object.keys(evByCatFull).filter(m => m <= (rightEdge || anchor)).sort();
 
   // Mesma metodologia da aba Evolução: corrigido pelo IPCA mensal (valores
   // de hoje) e suavizado por média móvel de 12 meses — agora controlável
   // pelos toggles ao lado do gráfico, em vez de sempre fixo.
-  const summary  = computeSummaryFromByCat(allAvailMonths, byCatFull);
+  const summary  = computeSummaryFromByCat(evAllAvailMonths, evByCatFull);
   const refMonth = getIpcaRefMonth();
   const corr = (v, m) => _dash.useIpca && refMonth ? inflateMonth(v, m, refMonth) : (v || 0);
-  const rawInc = allAvailMonths.map(m => corr(summary[m]?.income   || 0, m));
-  const rawExp = allAvailMonths.map(m => corr(summary[m]?.expenses || 0, m));
-  const maInc  = _dash.useMa ? allAvailMonths.map((_,i) => movAvg12(rawInc, i)) : rawInc;
-  const maExp  = _dash.useMa ? allAvailMonths.map((_,i) => movAvg12(rawExp, i)) : rawExp;
-  const idxOf = {}; allAvailMonths.forEach((m,i) => idxOf[m] = i);
+  const rawInc = evAllAvailMonths.map(m => corr(summary[m]?.income   || 0, m));
+  const rawExp = evAllAvailMonths.map(m => corr(summary[m]?.expenses || 0, m));
+  const maInc  = _dash.useMa ? evAllAvailMonths.map((_,i) => movAvg12(rawInc, i)) : rawInc;
+  const maExp  = _dash.useMa ? evAllAvailMonths.map((_,i) => movAvg12(rawExp, i)) : rawExp;
+  const idxOf = {}; evAllAvailMonths.forEach((m,i) => idxOf[m] = i);
   const incomeArr  = months.map(m => maInc[idxOf[m]] ?? 0);
   const expenseArr = months.map(m => maExp[idxOf[m]] ?? 0);
 
@@ -1376,6 +1405,22 @@ async function dashSelectMonth(monthStr) {
   await refreshOverview();
 }
 
+// ── Botões "ver mais" dos gráficos do Painel — leva para a aba e
+// visualização correspondente, com um pequeno atraso pra deixar a
+// navegação da página assentar antes de aplicar o toggle de view/modo.
+function dashGoToEvolucao(view) {
+  goPage('evolucao');
+  setTimeout(() => { evSetDisplay('charts'); evSetView(view); }, 60);
+}
+function dashGoToBudget(view) {
+  goPage('budget');
+  setTimeout(() => { budgetTglView(view); }, 60);
+}
+function dashGoToPatrimonio(view) {
+  goPage('patrimonio');
+  setTimeout(() => { patSetView(view); }, 60);
+}
+
 async function refreshDashboardWidgets({ monthStr, fromDate, toDate, rows, income, expenses }) {
   if (typeof Chart === 'undefined') {
     // Chart.js ainda carregando do CDN — tenta de novo em breve, mesmo
@@ -1398,10 +1443,11 @@ async function refreshDashboardWidgets({ monthStr, fromDate, toDate, rows, incom
     _dash.flowChart.update();
   }
 
-  await renderDashBudget(monthStr);
-  renderDashCatBars(byCatFull, monthStr);
-  renderDashGauge(monthSummary.income, monthSummary.expenses);
-  await renderDashCards(fromDate, toDate);
+  try { await renderDashBudget(monthStr); } catch(e) { console.error('renderDashBudget:', e); }
+  try { await renderDashBudgetGauges(byCatFull, monthStr); } catch(e) { console.error('renderDashBudgetGauges:', e); }
+  try { renderDashCatBars(byCatFull, monthStr); } catch(e) { console.error('renderDashCatBars:', e); }
+  try { renderDashGauge(monthSummary.income, monthSummary.expenses); } catch(e) { console.error('renderDashGauge:', e); }
+  try { await renderDashCards(fromDate, toDate); } catch(e) { console.error('renderDashCards:', e); }
 }
 
 // (ii) Orçado vs. realizado — barras horizontais por categoria + rosca
@@ -1412,7 +1458,7 @@ async function renderDashBudget(monthStr) {
   const monthLbl = G('dash-budget-month');
   if (monthLbl) monthLbl.textContent = `— ${monthNamesFull[mo-1]} ${yy}`;
 
-  const budgets = await ff.budgetList().catch(() => []);
+  const budgets = (await ff.budgetList().catch(() => [])).filter(b => b.type !== 'income');
   const actuals = await ff.budgetActuals({ month: monthStr }).catch(() => []);
   const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: monthStr }).catch(() => ({}));
   const actMap = {};
@@ -1430,9 +1476,11 @@ async function renderDashBudget(monthStr) {
     if (!enriched.length) {
       barsEl.innerHTML = `<div class="info-box" style="text-align:center;padding:24px;font-size:13px">Nenhuma meta de orçamento cadastrada ainda. <a href="#" onclick="goPage('budget');return false">Criar uma meta →</a></div>`;
     } else {
-      barsEl.innerHTML = enriched.slice(0, 8).map(b => {
+      const lastDay = new Date(yy, mo, 0).getDate();
+      const monthFrom = `${monthStr}-01`, monthTo = `${monthStr}-${String(lastDay).padStart(2,'0')}`;
+      barsEl.innerHTML = enriched.map(b => {
         const color = b.pct >= 100 ? 'var(--chart-expense)' : b.pct >= 85 ? '#f0a93a' : 'var(--chart-income)';
-        return `<div class="budget-bar-row">
+        return `<div class="budget-bar-row" style="cursor:pointer" title="Clique para ver as transações" onclick="openCatDetail('${esc2(b.category)}','${monthFrom}','${monthTo}')">
           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(b.category)}">${esc(b.category)}</span>
           <div class="budget-bar-track"><div class="budget-bar-fill" style="width:${Math.min(100,b.pct)}%;background:${color}"></div></div>
           <span style="font-weight:700;color:${color};text-align:right">${b.pct.toFixed(1)}%</span>
@@ -1441,34 +1489,51 @@ async function renderDashBudget(monthStr) {
       }).join('');
     }
   }
+}
 
-  const totalSpent  = enriched.reduce((s,b) => s + b.spent, 0);
-  const totalBudget = enriched.reduce((s,b) => s + b.effLimit, 0);
-  const pctTotal = totalBudget > 0 ? (totalSpent / totalBudget * 100) : 0;
-  const donutColor = pctTotal >= 100 ? '#ef5350' : pctTotal >= 85 ? '#f0a93a' : '#43a047';
+// (i-b) Dois gauges de totalização do orçamento — receitas e despesas
+// realizadas vs. planejadas no mês selecionado (mesmos dois gauges
+// grandes que aparecem ao lado dos cards na aba Orçamento).
+let _dashBudgetGaugeCharts = {};
+async function renderDashBudgetGauges(byCatFull, monthStr) {
+  const budgets = await ff.budgetList().catch(() => []);
+  const incomeBudgets  = budgets.filter(b => b.type === 'income');
+  const expenseBudgets = budgets.filter(b => b.type !== 'income');
+  const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: monthStr }).catch(() => ({}));
+  const effLimitOf = b => b.monthly_limit + ((b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0);
 
-  const labelEl = G('dash-budget-donut-label');
-  if (labelEl) { labelEl.textContent = `${pctTotal.toFixed(0)}%`; labelEl.style.color = donutColor; }
-  const subEl = G('dash-budget-donut-sub');
-  if (subEl) subEl.textContent = enriched.length ? `${fmtBRL(totalSpent)} de ${fmtBRL(totalBudget)} orçados` : 'Sem metas no mês';
+  const mo = byCatFull[monthStr] || {};
+  const actualFor = (category, type) => {
+    let total = 0;
+    Object.entries(mo).forEach(([rawCat, d]) => {
+      if (rawCat === category || rawCat.startsWith(category + ':')) {
+        total += type === 'income' ? (d.income||0) : (d.expenses||0);
+      }
+    });
+    return total;
+  };
 
-  const canvas = G('dash-budget-donut');
-  if (canvas) {
-    if (_dash.budgetDonut) {
-      // Atualiza a instância existente — o Chart.js anima a transição entre
-      // os valores antigo e novo suavemente, em vez de só "aparecer" do
-      // zero (que é o que destruir-e-recriar faria a cada mês clicado).
-      _dash.budgetDonut.data.datasets[0].data = [Math.min(100,pctTotal), Math.max(0,100-Math.min(100,pctTotal))];
-      _dash.budgetDonut.data.datasets[0].backgroundColor = [donutColor,'rgba(0,0,0,.06)'];
-      _dash.budgetDonut.update();
-    } else {
-      _dash.budgetDonut = new Chart(canvas.getContext('2d'), {
-        type: 'doughnut',
-        data: { datasets: [{ data: [Math.min(100,pctTotal), Math.max(0,100-Math.min(100,pctTotal))], backgroundColor: [donutColor,'rgba(0,0,0,.06)'], borderWidth: 0 }] },
-        options: { cutout:'78%', responsive:true, maintainAspectRatio:false, animation:{ animateRotate:true, duration:600 }, plugins:{ legend:{display:false}, tooltip:{enabled:false} } }
-      });
-    }
-  }
+  const totalIncomePlanned  = incomeBudgets.reduce((s,b) => s + b.monthly_limit, 0);
+  const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + effLimitOf(b), 0);
+  const totalIncomeActual   = incomeBudgets.reduce((s,b) => s + actualFor(b.category, 'income'), 0);
+  const totalExpenseActual  = expenseBudgets.reduce((s,b) => s + actualFor(b.category, 'expense'), 0);
+
+  const pctInc = totalIncomePlanned  > 0 ? (totalIncomeActual  / totalIncomePlanned  * 100) : 0;
+  const pctExp = totalExpensePlanned > 0 ? (totalExpenseActual / totalExpensePlanned * 100) : 0;
+  const colorInc = pctInc >= 110 ? '#43a047' : pctInc >= 100 ? '#f0a93a' : '#ef5350';
+  const colorExp = pctExp > 110 ? '#ef5350' : pctExp >= 100 ? '#ef5350' : pctExp >= 80 ? '#f0a93a' : '#43a047';
+
+  renderGoalGaugeCanvas('dash-budget-gauge-income',  pctInc, colorInc, _dashBudgetGaugeCharts);
+  renderGoalGaugeCanvas('dash-budget-gauge-expense', pctExp, colorExp, _dashBudgetGaugeCharts);
+
+  const incLabel = G('dash-budget-gauge-income-label');
+  if (incLabel) incLabel.innerHTML = `<div style="font-size:22px;font-weight:800;color:${colorInc}">${pctInc.toFixed(0)}%</div>`;
+  const expLabel = G('dash-budget-gauge-expense-label');
+  if (expLabel) expLabel.innerHTML = `<div style="font-size:22px;font-weight:800;color:${colorExp}">${pctExp.toFixed(0)}%</div>`;
+  const incSub = G('dash-budget-gauge-income-sub');
+  if (incSub) incSub.textContent = totalIncomePlanned > 0 ? `${fmtBRL(totalIncomeActual)} de ${fmtBRL(totalIncomePlanned)}` : 'Sem receitas planejadas';
+  const expSub = G('dash-budget-gauge-expense-sub');
+  if (expSub) expSub.textContent = totalExpensePlanned > 0 ? `${fmtBRL(totalExpenseActual)} de ${fmtBRL(totalExpensePlanned)}` : 'Sem despesas planejadas';
 }
 
 // (iii) Participação por categoria — barras horizontais, alternando entre
@@ -1504,7 +1569,15 @@ function renderDashCatBars(byCatFull, monthStr) {
   });
 
   const total = Object.values(byCat).reduce((s,v) => s+v, 0);
-  const entries = Object.entries(byCat).sort((a,b) => b[1]-a[1]).slice(0, 8);
+  const entries = Object.entries(byCat).sort((a,b) => b[1]-a[1]);
+
+  // Ajusta a altura do wrapper interno conforme o número de categorias —
+  // o canvas (responsive + maintainAspectRatio:false) sempre preenche
+  // 100% do pai, então crescer o pai é o que "desbloqueia" mais espaço
+  // por barra, deixando o scroll vertical do wrapper externo assumir a
+  // limitação (em vez de espremer tudo nos mesmos 248px de sempre).
+  const innerEl = G('dash-cat-bar-inner');
+  if (innerEl) innerEl.style.height = Math.max(248, entries.length * 28) + 'px';
 
   const canvas = G('dash-cat-bar-chart');
   const emptyEl = G('dash-cat-bar-empty');
@@ -1607,24 +1680,30 @@ function renderDashGauge(income, expenses) {
 // (v) Cartões de crédito — fatura do mês selecionado vs. limite.
 async function renderDashCards(fromDate, toDate) {
   const cardEl = G('dash-cards-card');
-  const cards = (accounts || []).filter(a => a.type === 'credit' && !a.hidden && a.credit_limit > 0);
+  const cards = (accounts || []).filter(a => a.type === 'credit' && a.credit_limit > 0);
   if (!cardEl) return;
-  if (!cards.length) { cardEl.style.display = 'none'; return; }
+  if (!cards.length) { cardEl.style.display = 'none'; if (G('dash-cards-total')) G('dash-cards-total').textContent = ''; return; }
   cardEl.style.display = '';
 
   const results = [];
   for (const c of cards) {
     const txs = await ff.listTx({ accountId: c.id, fromDate }).catch(() => []);
     const spent = txs.filter(t => t.date <= toDate && t.amount < 0).reduce((s,t) => s - t.amount, 0);
-    results.push({ name: c.name, spent, limit: c.credit_limit, pct: c.credit_limit > 0 ? (spent / c.credit_limit * 100) : 0 });
+    results.push({ id: c.id, name: c.name, spent, limit: c.credit_limit, pct: c.credit_limit > 0 ? (spent / c.credit_limit * 100) : 0 });
   }
   results.sort((a,b) => b.pct - a.pct);
+
+  const totalEl = G('dash-cards-total');
+  if (totalEl) {
+    const totalSpent = results.reduce((s,r) => s + r.spent, 0);
+    totalEl.textContent = `Total das faturas: ${fmtBRL(totalSpent)}`;
+  }
 
   const barsEl = G('dash-cards-bars');
   if (!barsEl) return;
   barsEl.innerHTML = results.map(r => {
     const color = r.pct >= 90 ? 'var(--chart-expense)' : r.pct >= 70 ? '#f0a93a' : 'var(--chart-income)';
-    return `<div class="card-bar-row">
+    return `<div class="card-bar-row" style="cursor:pointer" title="Clique para ver as transações" onclick="openAccount(${r.id})">
       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name)}">💳 ${esc(r.name)}</span>
       <div class="budget-bar-track"><div class="budget-bar-fill" style="width:${Math.min(100,r.pct)}%;background:${color}"></div></div>
       <span style="font-weight:700;color:${color};text-align:right">${r.pct.toFixed(1)}%</span>
@@ -1644,10 +1723,11 @@ function persistOverviewSettings() {
 async function loadOverviewSettings() {
   try {
     const cfg = await ff.overviewConfigGet();
-    if (!cfg) return;
-    if (cfg.excludedCats)      _excludedCats      = new Set(cfg.excludedCats);
-    if (cfg.selectedTrendCats) _selectedTrendCats = new Set(cfg.selectedTrendCats);
-    if (cfg.chartSettings)     _chartSettings     = cfg.chartSettings;
+    if (cfg) {
+      if (cfg.excludedCats)      _excludedCats      = new Set(cfg.excludedCats);
+      if (cfg.selectedTrendCats) _selectedTrendCats = new Set(cfg.selectedTrendCats);
+      if (cfg.chartSettings)     _chartSettings     = cfg.chartSettings;
+    }
   } catch(e) {}
 }
 
@@ -1683,9 +1763,9 @@ async function refreshOverview() {
 
   G('overview-stats').innerHTML = `
 
-    <div class="stat-card"><div class="stat-lbl">Entradas no mês</div><div class="stat-val green">${fmtBRL(income)}</div></div>
-    <div class="stat-card"><div class="stat-lbl">Saídas no mês</div><div class="stat-val red">${fmtBRL(expenses)}</div></div>
-    <div class="stat-card"><div class="stat-lbl">Resultado</div><div class="stat-val ${income-expenses>=0?'green':'red'}">${fmtBRL(income-expenses)}</div></div>`;
+    <div class="stat-card"><div class="stat-lbl">Receitas no mês</div><div class="stat-val green">${fmtBRL(income)}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Despesas no mês</div><div class="stat-val red">${fmtBRL(expenses)}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Lucro/Prejuízo</div><div class="stat-val ${income-expenses>=0?'green':'red'}">${fmtBRL(income-expenses)}</div></div>`;
 
   renderCatFilterChips();
 
@@ -1743,17 +1823,17 @@ async function conciliateFuture(id, checked) {
 }
 
 // ── CATEGORY DETAIL (click on pie legend) ──
-async function openCatDetail(category, fromDate, toDate) {
+async function openCatDetail(category, fromDate, toDate, accountIds) {
   G('cat-detail-title').textContent = `${category}`;
   G('cat-detail-period').textContent = fromDate ? `${fmtDate(fromDate)} a ${fmtDate(toDate)}` : '';
   G('cat-detail-body').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">⏳ Carregando…</div>';
   openModal('modal-cat-detail');
 
   // Include subcategories of this category (e.g. "Carro" includes "Carro:Combustível")
-  const allCats = await ff.reportSummary({ fromDate, toDate, excludeTransfers: false });
+  const allCats = await ff.reportSummary({ fromDate, toDate, excludeTransfers: false, accountIds });
   const subcats = allCats.map(r=>r.category).filter(c => c === category || c.startsWith(category + ':'));
 
-  const { rows, totalInc, totalExp, net } = await ff.categoryDetail({ category: subcats, fromDate, toDate });
+  const { rows, totalInc, totalExp, net } = await ff.categoryDetail({ category: subcats, fromDate, toDate, accountIds });
 
   if (!rows.length) {
     G('cat-detail-body').innerHTML = '<div class="empty" style="padding:2rem"><p>Nenhuma transação encontrada</p></div>';
@@ -2319,6 +2399,12 @@ function renderLedgerBody(txs, startingBalance = 0) {
   let running = startingBalance;
   sorted.forEach(t => { running += t.amount; balMap[t.id] = running; });
 
+  // Saldo ao FIM de cada dia — como `sorted` está em ordem cronológica,
+  // cada atribuição sobrescreve a anterior da mesma data, sobrando o valor
+  // certo: o saldo depois do ÚLTIMO lançamento daquele dia.
+  const dayEndBalance = {};
+  sorted.forEach(t => { dayEndBalance[t.date] = balMap[t.id]; });
+
   // Group by past/future
   const past   = txs.filter(t => t.date <= today).sort(sameDateSort);
   const future = txs.filter(t => t.date >  today).sort(sameDateSort);
@@ -2386,6 +2472,23 @@ function renderLedgerBody(txs, startingBalance = 0) {
       onkeydown="rowKey(event,${t.id})"
       tabindex="0"
       style="user-select:none">${cells}</tr>`;
+
+    // Linha de saldo ao fim do dia — aparece depois do último lançamento
+    // exibido para esta data, seja a tabela ascendente ou descendente
+    // (lançamentos da mesma data sempre ficam agrupados em `ordered`).
+    const next = ordered[i+1];
+    if (!next || next.date !== t.date) {
+      const dayBal = dayEndBalance[t.date] ?? 0;
+      const dayBalCls = dayBal >= 0 ? '#2e7d32' : 'var(--red)';
+      html += `<tr class="day-balance-row" style="background:linear-gradient(135deg,#e8f5e9,#f1f8e9)">
+        <td colspan="${ncols}" style="padding:6px 14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px">
+            <span style="font-weight:600;color:#2e7d32">📅 Saldo em ${fmtDate(t.date)}</span>
+            <span style="font-family:'DM Mono',monospace;font-weight:700;color:${dayBalCls}">${fmtBRL(dayBal)}</span>
+          </div>
+        </td>
+      </tr>`;
+    }
   });
 
   tbody.innerHTML = html;
@@ -2498,9 +2601,31 @@ async function ctxDuplicate(useToday) {
     openLicenseModal();
     return;
   }
+  let dupCount = 0;
   for (const id of ids) {
     const tx = txs.find(t => t.id === id);
     if (!tx) continue;
+    if (tx.transfer_id) {
+      // Duplica como transferência de verdade — descobre a outra perna pra
+      // saber qual conta é a origem e qual é o destino, preservando a
+      // mesma direção do lançamento original (em vez de criar só uma
+      // transação solta, sem a perna correspondente na outra conta).
+      const pair = await ff.getTransferPair(tx.id).catch(() => null);
+      if (pair) {
+        const fromAccountId = tx.amount < 0 ? tx.account_id : pair.account_id;
+        const toAccountId   = tx.amount < 0 ? pair.account_id : tx.account_id;
+        await ff.transfer({
+          fromAccountId, toAccountId,
+          date: useToday ? todayStr() : tx.date,
+          amount: Math.abs(tx.amount),
+          memo: tx.memo,
+        });
+        dupCount++;
+        continue;
+      }
+      // Perna correspondente não encontrada (caso raro/órfão) — cai no
+      // fallback abaixo, igual a uma transação comum.
+    }
     await ff.createTx({
       account_id: currentAccountId,
       date:       useToday ? todayStr() : tx.date,
@@ -2508,8 +2633,9 @@ async function ctxDuplicate(useToday) {
       memo:       tx.memo,
       category:   tx.category || '',
     });
+    dupCount++;
   }
-  toast(`${ids.length} lançamento(s) duplicado(s)`);
+  toast(`${dupCount} lançamento(s) duplicado(s)`);
   await loadAccounts();
   if (currentPage === 'account') refreshAccount();
 }
@@ -2696,9 +2822,12 @@ function openTxModal(tx=null) {
 }
 
 function onImportPatAssetChange(sel, i) {
-  // Auto-suggest type based on memo of this row
-  const memoInp = G('bank-preview-body')?.querySelectorAll('.import-memo-inp')[i];
-  const typeInp = G('bank-preview-body')?.querySelectorAll('.import-pat-type-inp')[i];
+  // Auto-suggest type based on memo of this row — busca por data-idx, não
+  // por posição em querySelectorAll: o campo de tipo não é renderizado em
+  // linhas já processadas como transferência ou removidas, então a posição
+  // desalinha tão logo qualquer linha anterior seja pulada.
+  const memoInp = G('bank-preview-body')?.querySelector(`.import-memo-inp[data-idx="${i}"]`);
+  const typeInp = G('bank-preview-body')?.querySelector(`.import-pat-type-inp[data-idx="${i}"]`);
   if (!memoInp || !typeInp || !sel.value) return;
   const memo = memoInp.value.toLowerCase();
   const asset = _pat.assets.find(a => a.id === parseInt(sel.value));
@@ -2944,11 +3073,14 @@ async function toggleCleared(id, val) {
 }
 
 // ══ TRANSFER ══
-function openTransferModal() {
+function openTransferModal(fromAccountId) {
   G('tr-date').value=''; G('tr-memo').value='';
   G('tr-date').value = todayStr();
   setupCurrencyInput(G('tr-amount'));
   G('tr-amount').setValue(null);
+  // Pré-seleciona a conta de origem quando aberto a partir da própria
+  // página da conta (botão "⇄ Transferência" no topo da tabela).
+  if (fromAccountId && G('tr-from')) G('tr-from').value = fromAccountId;
   // Set hidden field for origin tx deletion after transfer
   let hidField = G('tr-origin-tx-id');
   if (!hidField) {
@@ -2968,7 +3100,9 @@ function openTransferModal() {
   }
   openModal('modal-transfer');
 }
+let _savingTransfer = false;
 async function saveTransfer() {
+  if (_savingTransfer) return; // evita disparar várias transferências com cliques repetidos enquanto a anterior ainda está salvando
   const fromAccountId = parseInt(G('tr-from').value);
   const toAccountId   = parseInt(G('tr-to').value);
   const date   = G('tr-date').value;
@@ -2978,6 +3112,10 @@ async function saveTransfer() {
   const originTxId = G('tr-origin-tx-id')?.value ? parseInt(G('tr-origin-tx-id').value) : null;
   if (!date||isNaN(amount)||amount<=0) { toast('Preencha data e valor'); return; }
   if (fromAccountId===toAccountId) { toast('Contas iguais'); return; }
+  _savingTransfer = true;
+  const btn = document.querySelector('#modal-transfer button.primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Registrando…'; }
+  try {
   await ff.transfer({ fromAccountId, toAccountId, date, amount, memo });
   // Delete the original transaction if this was triggered from an inline edit
   if (originTxId) {
@@ -3015,6 +3153,10 @@ async function saveTransfer() {
   await loadAccounts();
   if (currentPage==='account') refreshAccount();
   if (currentPage==='overview') refreshOverview();
+  } finally {
+    _savingTransfer = false;
+    if (btn) { btn.disabled = false; btn.textContent = 'Registrar'; }
+  }
 }
 
 // ══ ACCOUNTS CRUD ══
@@ -3179,14 +3321,13 @@ async function initReportFilters() {
   const accEl = G('rep-account-checks');
   if (!accEl) return;
   accEl.innerHTML = accounts.filter(a=>!a.hidden).map(a =>
-    `<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;padding:2px 0">
-      <input type="checkbox" class="rep-acc-chk" value="${a.id}"> ${esc(a.name)}
-    </label>`
+    `<button type="button" class="ev-cat-pill rep-acc-chk" data-value="${a.id}" onclick="this.classList.toggle('active')">${esc(a.name)}</button>`
   ).join('');
 
   // Category checkboxes
   const allRows = await ff.reportSummary({ excludeTransfers: false });
-  _repAllCats = [...new Set(allRows.map(r=>r.category).filter(Boolean))].sort();
+  const accountNames = new Set((accounts||[]).map(a=>a.name));
+  _repAllCats = [...new Set(allRows.map(r=>r.category).filter(c => c && !accountNames.has(c)))].sort();
   renderRepCatChecks('');
 
   // Apply last-used report config, or default to last-month
@@ -3204,8 +3345,8 @@ async function initReportFilters() {
     } else {
       applyPeriodPreset(preset);
     }
-    if (cfg.rep_accounts) document.querySelectorAll('.rep-acc-chk').forEach(e => { e.checked = cfg.rep_accounts.includes(parseInt(e.value)); });
-    if (cfg.rep_cats)     document.querySelectorAll('.rep-cat-chk').forEach(e => { e.checked = cfg.rep_cats.includes(e.value); });
+    if (cfg.rep_accounts) document.querySelectorAll('.rep-acc-chk').forEach(e => { e.classList.toggle('active', cfg.rep_accounts.includes(parseInt(e.dataset.value))); });
+    if (cfg.rep_cats)     document.querySelectorAll('.rep-cat-chk').forEach(e => { e.classList.toggle('active', cfg.rep_cats.includes(e.dataset.value)); });
     if (cfg.rep_excludeTransfers !== undefined) { const chk = G('rep-exclude-transfers'); if (chk) chk.checked = cfg.rep_excludeTransfers; G('rep-exclude-transfers-pill')?.classList.toggle('active', cfg.rep_excludeTransfers); }
   } else {
     G('rep-period-preset').value = 'last-month';
@@ -3231,7 +3372,7 @@ function onReportTypeChange() {
   G('rep-period-wrap').style.display = noDate ? 'none' : '';
   G('rep-from-wrap').style.display   = (noDate || !isCustom) ? 'none' : '';
   G('rep-to-wrap').style.display     = (noDate || !isCustom) ? 'none' : '';
-  G('rep-adv-filters').style.display = noDate ? 'none' : 'block';
+  G('rep-filter-panel').style.display = noDate ? 'none' : 'block';
   // Re-apply preset to ensure dates are set correctly
   if (!noDate && !isCustom) applyPeriodPreset(preset);
   else runReport();
@@ -3240,18 +3381,17 @@ function onReportTypeChange() {
 function renderRepCatChecks(filter) {
   const el = G('rep-cat-checks'); if (!el) return;
   const cats = filter ? _repAllCats.filter(c => norm(c).includes(norm(filter))) : _repAllCats;
+  const prevActive = new Set([...el.querySelectorAll('.rep-cat-chk.active')].map(e => e.dataset.value));
   el.innerHTML = cats.map(c =>
-    `<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;padding:2px 0">
-      <input type="checkbox" class="rep-cat-chk" value="${esc(c)}"> ${esc(c)}
-    </label>`
+    `<button type="button" class="ev-cat-pill rep-cat-chk ${prevActive.has(c)?'active':''}" data-value="${esc(c)}" onclick="this.classList.toggle('active')">${esc(c)}</button>`
   ).join('');
 }
 function filterRepCats(v) { _repCatFilter = v; renderRepCatChecks(v); }
-function repCatNone() { document.querySelectorAll('.rep-cat-chk').forEach(e => e.checked=false); }
+function repCatNone() { document.querySelectorAll('.rep-cat-chk').forEach(e => e.classList.remove('active')); }
 
 function getRepFilters() {
-  const accountIds = [...document.querySelectorAll('.rep-acc-chk:checked')].map(e=>parseInt(e.value));
-  const categories = [...document.querySelectorAll('.rep-cat-chk:checked')].map(e=>e.value);
+  const accountIds = [...document.querySelectorAll('.rep-acc-chk.active')].map(e=>parseInt(e.dataset.value));
+  const categories = [...document.querySelectorAll('.rep-cat-chk.active')].map(e=>e.dataset.value);
   const excludeTransfers = G('rep-exclude-transfers')?.checked !== false;
   return { accountIds: accountIds.length ? accountIds : null, categories: categories.length ? categories : null, excludeTransfers };
 }
@@ -3259,6 +3399,11 @@ function getRepFilters() {
 async function loadSavedReport(id) {
   const r = _savedReports.find(x => x.id === id);
   if (!r) return;
+  const REMOVED_TYPES = { detail:'Detalhe das receitas e despesas', 'net-worth':'Balanço patrimonial', 'net-worth-history':'Evolução patrimonial', budget:'Budget — orçado vs realizado' };
+  if (REMOVED_TYPES[r.type]) {
+    toast(`⚠️ O tipo de relatório "${REMOVED_TYPES[r.type]}" foi descontinuado — os dados equivalentes estão nas abas Patrimônio/Orçamento/Evolução.`);
+    return;
+  }
   const sel = G('report-type');
   if (sel && r.type) sel.value = r.type;
   if (r.preset && r.preset !== 'custom') {
@@ -3271,8 +3416,8 @@ async function loadSavedReport(id) {
     if (r.from) G('rep-from').value = r.from;
     if (r.to)   G('rep-to').value   = r.to;
   }
-  if (r.accounts) document.querySelectorAll('.rep-acc-chk').forEach(e => { e.checked = r.accounts.includes(parseInt(e.value)); });
-  if (r.cats)     document.querySelectorAll('.rep-cat-chk').forEach(e => { e.checked = r.cats.includes(e.value); });
+  if (r.accounts) document.querySelectorAll('.rep-acc-chk').forEach(e => { e.classList.toggle('active', r.accounts.includes(parseInt(e.dataset.value))); });
+  if (r.cats)     document.querySelectorAll('.rep-cat-chk').forEach(e => { e.classList.toggle('active', r.cats.includes(e.dataset.value)); });
   const chk = G('rep-exclude-transfers');
   if (chk && r.excludeTransfers !== undefined) { chk.checked = r.excludeTransfers; G('rep-exclude-transfers-pill')?.classList.toggle('active', r.excludeTransfers); }
   runReport();
@@ -3303,7 +3448,40 @@ async function deleteSavedReport(id, btn) {
   toast('Relatório removido');
 }
 
-// Build hierarchical tree from flat category rows
+// Classificação por SALDO LÍQUIDO — usada de forma IDÊNTICA pelos três
+// lugares que mostram receitas/despesas totais (Resumo, Comparação
+// mensal, Evolução): cada categoria conta como receita OU despesa pelo
+// seu próprio saldo líquido, nunca nos dois ao mesmo tempo. Ter uma única
+// função usada nos três garante que o total bate exatamente, sempre.
+function netClassify(income, expenses) {
+  const net = (income||0) - (expenses||0);
+  return net >= 0 ? { income: net, expenses: 0 } : { income: 0, expenses: -net };
+}
+
+// Agrupa linhas (mês, categoria) pela categoria-MÃE, somando os valores
+// BRUTOS de todas as subcategorias (e da própria mãe) dentro do MESMO mês
+// — e só então classifica esse grupo pelo saldo líquido. Uma subcategoria
+// positiva dentro de uma categoria-mãe negativa funciona como "redutora
+// de despesa" da mãe, em vez de contar como receita separada. Usada de
+// forma IDÊNTICA pelos três lugares que mostram totais de receitas e
+// despesas (Resumo, Comparação mensal, Evolução), garantindo que os três
+// cheguem exatamente ao mesmo valor.
+function groupAndClassifyByParent(rows) {
+  const byMonthParent = {};
+  rows.forEach(r => {
+    const parent = (r.category || '').split(':')[0];
+    const key = r.month + '\u0001' + parent;
+    if (!byMonthParent[key]) byMonthParent[key] = { month: r.month, parent, income: 0, expenses: 0 };
+    byMonthParent[key].income   += r.income||0;
+    byMonthParent[key].expenses += r.expenses||0;
+  });
+  return Object.values(byMonthParent).map(g => {
+    const cls = netClassify(g.income, g.expenses);
+    return { month: g.month, parent: g.parent, income: cls.income, expenses: cls.expenses };
+  });
+}
+
+// Build hierarchical tree from flat (month, category) rows.
 function buildTree(rows, categories) {
   let filtered = rows;
   if (categories) {
@@ -3312,15 +3490,38 @@ function buildTree(rows, categories) {
       categories.some(c => r.category.startsWith(c + ':') || c.startsWith(r.category + ':'))
     );
   }
-  const tree = {};
+  // Total e subtotal por categoria-mãe — mesma metodologia (agrupar por
+  // mãe, depois classificar) usada por Comparação mensal e Evolução.
+  const grouped = groupAndClassifyByParent(filtered);
+  const byParent = {};
+  grouped.forEach(g => {
+    if (!byParent[g.parent]) byParent[g.parent] = { income: 0, expenses: 0 };
+    byParent[g.parent].income   += g.income;
+    byParent[g.parent].expenses += g.expenses;
+  });
+
+  // Para exibir cada subcategoria individualmente, soma o valor BRUTO dela
+  // (sem misturar com as irmãs) ao longo do período — só pra mostrar a
+  // composição; o total já vem do agrupamento por mãe acima.
+  const bySubcat = {};
   filtered.forEach(r => {
-    const parts  = (r.category || '').split(':');
+    if (!bySubcat[r.category]) bySubcat[r.category] = { income: 0, expenses: 0 };
+    bySubcat[r.category].income   += r.income||0;
+    bySubcat[r.category].expenses += r.expenses||0;
+  });
+
+  const tree = {};
+  Object.entries(bySubcat).forEach(([cat, d]) => {
+    const parts  = cat.split(':');
     const parent = parts[0];
     if (!tree[parent]) tree[parent] = { category: parent, expenses: 0, income: 0, children: [] };
-    tree[parent].expenses += r.expenses;
-    tree[parent].income   += r.income;
-    if (parts.length > 1) tree[parent].children.push({ ...r, subName: parts.slice(1).join(':') });
+    if (parts.length > 1) tree[parent].children.push({ category: cat, subName: parts.slice(1).join(':'), income: d.income, expenses: d.expenses });
   });
+  Object.keys(tree).forEach(parent => {
+    tree[parent].income   = byParent[parent]?.income   || 0;
+    tree[parent].expenses = byParent[parent]?.expenses || 0;
+  });
+
   const parents = Object.values(tree).sort((a,b) => a.category.localeCompare(b.category,'pt-BR'));
   const totalExp = parents.reduce((s,p) => s+p.expenses, 0);
   const totalInc = parents.reduce((s,p) => s+p.income, 0);
@@ -3357,7 +3558,11 @@ async function runReport() {
   el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">⏳ Carregando…</div>';
 
   if (type === 'summary' || type === 'detail') {
-    const flatRows = await ff.reportSummary({ fromDate:from, toDate:to, accountIds, excludeTransfers });
+    // Usa o MESMO endpoint da Comparação mensal (agrupado por mês+categoria),
+    // não report:summary (agrupado só por categoria) — garante SQL idêntico
+    // entre os dois relatórios. buildTree classifica cada linha mês-a-mês
+    // antes de somar por categoria, pelo mesmo motivo.
+    const flatRows = await ff.reportMonthly({ fromDate:from, toDate:to, accountIds, excludeTransfers, categories });
     const { parents, totalExp, totalInc } = buildTree(flatRows, categories);
     if (!parents.length) { el.innerHTML='<div class="empty"><div class="ei">📊</div><p>Sem dados</p></div>'; return; }
 
@@ -3452,18 +3657,31 @@ async function runReport() {
     el.querySelectorAll('.rep-cat-row').forEach(row => {
       row.addEventListener('mouseenter', () => row.style.background = 'var(--accent-lt)');
       row.addEventListener('mouseleave', () => row.style.background = '');
-      row.addEventListener('click', () => openCatDetail(row.dataset.cat, row.dataset.from, row.dataset.to));
+      row.addEventListener('click', () => openCatDetail(row.dataset.cat, row.dataset.from, row.dataset.to, accountIds));
     });
 
   } else if (type === 'monthly') {
-    let rows = await ff.reportMonthly({ fromDate:from, toDate:to, accountIds, excludeTransfers });
-    if (!rows.length) { el.innerHTML='<div class="empty"><div class="ei">📅</div><p>Sem dados</p></div>'; return; }
+    let catRows = await ff.reportMonthly({ fromDate:from, toDate:to, accountIds, excludeTransfers, categories });
+    if (!catRows.length) { el.innerHTML='<div class="empty"><div class="ei">📅</div><p>Sem dados</p></div>'; return; }
+    // Mesma metodologia do Resumo e da Evolução: agrupa subcategorias na
+    // categoria-mãe (uma subcategoria positiva reduz a despesa da mãe, em
+    // vez de contar como receita separada) e SÓ DEPOIS classifica pelo
+    // saldo líquido, mês a mês.
+    const grouped = groupAndClassifyByParent(catRows);
+    const byMonth = {};
+    grouped.forEach(g => {
+      if (!byMonth[g.month]) byMonth[g.month] = { income: 0, expenses: 0 };
+      byMonth[g.month].income   += g.income;
+      byMonth[g.month].expenses += g.expenses;
+    });
+    const months = Object.keys(byMonth).sort();
+    const rows = months.map(month => ({ month, income: byMonth[month].income, expenses: byMonth[month].expenses }));
     const maxV=Math.max(...rows.map(r=>Math.max(r.expenses,r.income)));
-    let html='<div class="tbl-card" style="padding:18px"><h3 style="margin-bottom:14px;font-size:14px">Evolução mensal</h3>';
+    let html='<div class="tbl-card" style="padding:18px"><h3 style="margin-bottom:14px;font-size:14px">Comparação mensal — Receitas e despesas</h3>';
     rows.forEach(r=>{
       html+=`<div style="margin-bottom:10px"><div style="font-size:12px;color:var(--text3);margin-bottom:3px">${r.month}</div>
-        <div class="bar-row" style="margin-bottom:2px"><div class="bar-lbl" style="font-size:11px;color:var(--green)">Entradas</div><div class="bar-track"><div class="bar-fill inc" style="width:${maxV>0?r.income/maxV*100:0}%"></div></div><div class="bar-val">${fmtBRL(r.income)}</div></div>
-        <div class="bar-row"><div class="bar-lbl" style="font-size:11px;color:var(--red)">Saídas</div><div class="bar-track"><div class="bar-fill exp" style="width:${maxV>0?r.expenses/maxV*100:0}%"></div></div><div class="bar-val">${fmtBRL(r.expenses)}</div></div></div>`;
+        <div class="bar-row" style="margin-bottom:2px"><div class="bar-lbl" style="font-size:11px;color:var(--green)">Receitas</div><div class="bar-track"><div class="bar-fill inc" style="width:${maxV>0?r.income/maxV*100:0}%"></div></div><div class="bar-val">${fmtBRL(r.income)}</div></div>
+        <div class="bar-row"><div class="bar-lbl" style="font-size:11px;color:var(--red)">Despesas</div><div class="bar-track"><div class="bar-fill exp" style="width:${maxV>0?r.expenses/maxV*100:0}%"></div></div><div class="bar-val">${fmtBRL(r.expenses)}</div></div></div>`;
     });
     el.innerHTML=html+'</div>';
 
@@ -4035,14 +4253,21 @@ function toggleImportDropdown(type) {
   const isOpen = dd.style.display !== 'none';
 
   // Close all dropdowns first
-  ['bank','card'].forEach(t => {
+  ['bank','card','broker'].forEach(t => {
     const d = G(`import-dd-${t}`);
     if (d) d.style.display = 'none';
     const a = G(`import-dd-${t}-arrow`);
     if (a) a.textContent = '▾';
   });
+  // Restaura os campos de banco/cartão e esconde a seção de corretora — o
+  // clique aqui já deixa claro que o usuário voltou pro fluxo de extrato/fatura.
+  if (type !== '__close__') {
+    const bs = G('broker-section'); if (bs) bs.style.display = 'none';
+    const bankFieldRow = G('bank-account-row');
+    if (bankFieldRow) bankFieldRow.style.display = '';
+  }
 
-  if (!isOpen) {
+  if (!isOpen && type !== '__close__') {
     // Position below the trigger button using fixed coords
     const btn = G(`import-dd-${type}-wrap`)?.querySelector('button');
     if (btn) {
@@ -4071,7 +4296,7 @@ function pickImport(bankId, type) {
   // Hide broker section when using bank/card import
   const bs = G('broker-section'); if (bs) bs.style.display = 'none';
   // Restore bank fields
-  const bankFields2 = G('bank-account')?.closest('.field-row');
+  const bankFields2 = G('bank-account-row');
   if (bankFields2) bankFields2.style.display = '';
   // Close dropdown
   toggleImportDropdown('__close__');
@@ -4407,6 +4632,10 @@ function shiftMonths(isoDate, months) {
 }
 
 let _pendingImport = null; // {rows, parcelInstallments, accountId, checkDailySaldo}
+// Quando o usuário cria um ativo novo a partir de uma movimentação não
+// identificada na importação de corretora — guarda qual movimentação deve
+// ser vinculada automaticamente assim que o ativo for salvo.
+let _pendingBrokerAssetLink = null;
 
 async function confirmBankImport() {
   if (_licStatus?.status === 'payment_required') {
@@ -4848,21 +5077,27 @@ async function doImportFromTable() {
   const patDebtByIdx  = byDataIdx(G('bank-preview-body')?.querySelectorAll('.import-debt-inp'));
   const patDebtToggleByIdx = byDataIdx(G('bank-preview-body')?.querySelectorAll('.import-debt-toggle'));
 
-  const patLinks = finalRows.map((r, i) => ({
-    assetId:  parseInt(patAssetByIdx[i]?.value || '0'),
-    txType:   patTypeByIdx[i]?.value || 'aluguel',
-    month:    (r.dateISO || '').slice(0, 7),
-    amount:   Math.abs(r.amount),
-    memo:     r.memo || '',
-    txDate:   r.dateISO || null,
-  })).filter(p => p.assetId && p.month);
+  const patLinks = finalRows.map((r) => {
+    const origIdx = rows.indexOf(r);
+    return {
+      assetId:  parseInt(patAssetByIdx[origIdx]?.value || '0'),
+      txType:   patTypeByIdx[origIdx]?.value || 'aluguel',
+      month:    (r.dateISO || '').slice(0, 7),
+      amount:   Math.abs(r.amount),
+      memo:     r.memo || '',
+      txDate:   r.dateISO || null,
+    };
+  }).filter(p => p.assetId && p.month);
 
-  const debtLinks = finalRows.map((r, i) => ({
-    debtId: patDebtToggleByIdx[i]?.checked ? parseInt(patDebtByIdx[i]?.value || '0') : 0,
-    month:  (r.dateISO || '').slice(0, 7),
-    amount: Math.abs(r.amount),
-    rowIdx: i,
-  })).filter(p => p.debtId && p.month);
+  const debtLinks = finalRows.map((r) => {
+    const origIdx = rows.indexOf(r);
+    return {
+      debtId: patDebtToggleByIdx[origIdx]?.checked ? parseInt(patDebtByIdx[origIdx]?.value || '0') : 0,
+      month:  (r.dateISO || '').slice(0, 7),
+      amount: Math.abs(r.amount),
+      rowIdx: origIdx,
+    };
+  }).filter(p => p.debtId && p.month);
 
   // ── Round 2: memo+category duplicates (recurring placeholders with variable amount) ──
   try {
@@ -5680,6 +5915,11 @@ function toggleBrokerDropdown() {
     const d = G(`import-dd-${t}`); if (d) d.style.display = 'none';
     const a = G(`import-dd-${t}-arrow`); if (a) a.textContent = '▾';
   });
+  // Já esconde os campos de banco/cartão ao simplesmente abrir o menu de
+  // corretora — não precisa esperar uma corretora específica ser escolhida
+  // pra deixar claro que esse fluxo agora é o de investimentos.
+  const bankFieldRow = G('bank-account-row');
+  if (bankFieldRow) bankFieldRow.style.display = 'none';
   if (!isOpen) {
     const btn = G('import-dd-broker-wrap')?.querySelector('button');
     if (btn) {
@@ -5727,12 +5967,17 @@ async function pickBroker(brokerId) {
     const bs = G('broker-section');
     if (bs) bs.style.display = '';
 
+    // cancelBankImport() chama hideCardHolderAccountSelectors(), que
+    // restaura a visibilidade de bank-account-row — por isso precisa
+    // rodar ANTES de escondê-la, não depois (senão a restauração
+    // desfazia o esconder, deixando o campo voltar a aparecer).
+    cancelBankImport();
+
     // Hide bank/card fields
-    const bankFieldRow = G('bank-account')?.closest('.field-row');
+    const bankFieldRow = G('bank-account-row');
     if (bankFieldRow) bankFieldRow.style.display = 'none';
     if (G('bank-file-trigger')) G('bank-file-trigger').style.display = 'none';
     if (G('bank-selected-label')) G('bank-selected-label').innerHTML = '';
-    cancelBankImport();
 
     // Update broker label
     const lbl = G('broker-selected-label');
@@ -5773,6 +6018,22 @@ function triggerBrokerFile() {
 
 async function onBrokerFileSelected(event) {
   const file = event.target.files[0];
+  await processBrokerFile(file);
+  event.target.value = '';
+}
+
+// Aceita o arquivo arrastado pra zona de drop da corretora, processando
+// exatamente igual a quando é escolhido pelo seletor.
+async function onBrokerFileDropped(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.classList.remove('dragover');
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  await processBrokerFile(file);
+}
+
+async function processBrokerFile(file) {
   if (!file) return;
   G('broker-file-name').textContent = file.name;
 
@@ -5789,7 +6050,7 @@ async function onBrokerFileSelected(event) {
   // Broker statements (e.g. BTG) can also be password-protected XLSX files.
   if (/\.xlsx?$/i.test(file.name)) {
     const decrypted = await decryptOfficeBufferIfNeeded(_brokerBuffer, 'extrato');
-    if (decrypted === null) { G('broker-file-name').textContent = ''; event.target.value = ''; return; }
+    if (decrypted === null) { G('broker-file-name').textContent = ''; return; }
     _brokerBuffer = decrypted;
   }
 
@@ -5823,7 +6084,6 @@ async function onBrokerFileSelected(event) {
     G('broker-result').innerHTML = `<div class="warn-box">❌ Erro ao ler o extrato: ${esc(e.message)}</div>`;
     console.error(e);
   }
-  event.target.value = '';
 }
 
 function parseBTGBroker(buffer) {
@@ -7411,7 +7671,9 @@ async function _bwTestFile(event) {
     const rows = parsed.assets.slice(0,10).map(a =>
       `<tr><td>${esc(a.name)}</td><td>${esc(INV_CATEGORIES[a.category]?.label||a.category)}</td><td>${esc(a.inv_type)}</td><td class="right">${fmtBRL(a.valor)}</td></tr>`).join('');
     result.innerHTML = `
-      <div class="info-box" style="margin-bottom:8px">✅ ${parsed.assets.length} ativo(s) encontrado(s)${parsed.unresolvedMovements.length ? ` · ⚠️ ${parsed.unresolvedMovements.length} movimentação(ões) não vinculada(s) a um ativo` : ''}:</div>
+      <div class="info-box" style="margin-bottom:8px">
+        ✅ ${parsed.assets.length} ativo(s) encontrado(s)${parsed.unresolvedMovements.length ? ` · ⚠️ ${parsed.unresolvedMovements.length} movimentação(ões) não vinculada(s) a um ativo` : ''}:
+      </div>
       <div class="tbl-outer" style="max-height:220px">
         <table class="ledger"><thead><tr><th>Nome</th><th>Categoria</th><th>Tipo</th><th class="right">Valor</th></tr></thead>
         <tbody>${rows}</tbody></table>
@@ -7734,6 +7996,21 @@ function renderBrokerPreview(parsed) {
     p.unresolvedMovements.splice(i, 1);
     renderBrokerPreview(p);
   };
+  // Movimentação sem ativo correspondente nem no extrato nem já cadastrado —
+  // abre o MESMO modal de criação de ativo da aba Patrimônio. Ao salvar, o
+  // ativo recém-criado (já persistido no banco) recebe automaticamente essa
+  // movimentação (valor, data e tipo sugerido), sem o usuário precisar
+  // procurá-la de novo depois.
+  window._unresolvedCreateNewAsset = (i) => {
+    const p = G('broker-preview')._parsed;
+    const m = p.unresolvedMovements[i];
+    if (!m) return;
+    _pendingBrokerAssetLink = { kind: 'unresolved', movementIdx: i };
+    openInvAssetModal(null);
+    // Sugestão de nome a partir da descrição (ex.: "XPCA11 — Dividendo" → "XPCA11")
+    const suggested = (m.desc || '').split('—')[0].trim();
+    if (suggested && G('inv-name')) G('inv-name').value = suggested;
+  };
   window._unresolvedToggleSplit = (i) => {
     const p = G('broker-preview')._parsed;
     const m = p.unresolvedMovements[i];
@@ -7780,6 +8057,47 @@ function renderBrokerPreview(parsed) {
     p.unresolvedMovements.splice(i, 1);
     p._ignoredUnresolvedCount = (p._ignoredUnresolvedCount || 0) + 1;
     renderBrokerPreview(p);
+  };
+
+  // ── Inserção manual de dados (posição/movimentação) pra ativo novo ou já
+  // existente, quando a importação automática não capturou algo do extrato ──
+  window._toggleManualEntryForm = async () => {
+    const form = G('broker-manual-entry-form');
+    if (!form) return;
+    const showing = form.style.display === 'none';
+    form.style.display = showing ? 'block' : 'none';
+    if (showing) {
+      const sel = G('bme-asset-select');
+      const invAssets = await ff.invAssetsList().catch(() => []);
+      sel.innerHTML = '<option value="new">🆕 Novo ativo…</option>' +
+        invAssets.filter(a => !a.closed_month).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'))
+          .map(a => `<option value="${a.id}">${esc(a.name)}${a.broker?` (${esc(a.broker)})`:''}</option>`).join('');
+    }
+  };
+
+  window._bmeConfirm = async () => {
+    const p = G('broker-preview')?._parsed;
+    if (!p) return;
+    const assetSel = G('bme-asset-select').value;
+    const posValue = window._brokerParseBRL(G('bme-position-value').value);
+    const movType  = G('bme-mov-type').value;
+    const movValue = window._brokerParseBRL(G('bme-mov-value').value);
+    if (!posValue && !(movType && movValue)) { toast('Informe ao menos a posição ou uma movimentação'); return; }
+
+    if (assetSel === 'new') {
+      // Abre o modal de criação — ao salvar, savePatAsset/saveInvAsset
+      // completa o vínculo automaticamente (vide completeBrokerAssetLink).
+      _pendingBrokerAssetLink = { kind: 'manual', month: p.month, positionValue: posValue||null, movType: movType||null, movValue: movValue||null };
+      openInvAssetModal(null);
+      return;
+    }
+
+    const assetId = parseInt(assetSel);
+    if (!assetId) { toast('Selecione um ativo'); return; }
+    await applyManualEntryToAsset(assetId, p.month, posValue, movType, movValue);
+    G('bme-position-value').value = '';
+    G('bme-mov-value').value = '';
+    G('bme-mov-type').value = '';
   };
 
   function buildUnresolvedHtml() {
@@ -7829,6 +8147,7 @@ function renderBrokerPreview(parsed) {
               <option value="">— selecionar ativo —</option>
               ${assetOptions(null)}
             </select>
+            <button class="btn xs" type="button" style="border-color:var(--green);color:var(--green)" onclick="window._unresolvedCreateNewAsset(${i})">🆕 Ativo novo</button>
             <button class="btn xs" type="button" onclick="window._unresolvedToggleSplit(${i})">↔ Dividir entre vários ativos</button>
             <button class="btn xs" type="button" style="border-color:var(--red);color:var(--red)" onclick="window._unresolvedIgnore(${i})">🚫 Ignorar</button>
           </div>` : `
@@ -7850,6 +8169,43 @@ function renderBrokerPreview(parsed) {
       </div>`;
   }
   const unresolvedHtml = buildUnresolvedHtml();
+
+  const manualEntryHtml = `
+    <div class="tbl-card" style="margin-top:14px;border-color:var(--green)">
+      <div class="tbl-header"><h3>🔧 O Cruzeiro não encontrou algum ativo no extrato?</h3></div>
+      <p style="font-size:12px;color:var(--text3);margin:0 0 10px">
+        Insira manualmente a posição (e, se houver, a movimentação) de um ativo que não foi capturado automaticamente
+        — seja um ativo novo ou um já cadastrado.
+      </p>
+      <button class="btn xs" type="button" style="border-color:var(--green);color:var(--green)" onclick="window._toggleManualEntryForm()">+ Inserir dados manualmente</button>
+      <div id="broker-manual-entry-form" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+          <div class="field" style="margin:0;min-width:200px">
+            <label class="lbl">Ativo</label>
+            <select class="inp" id="bme-asset-select"><option value="">— carregando… —</option></select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Posição no mês (opcional)</label>
+            <input class="inp" id="bme-position-value" placeholder="0,00" style="width:130px">
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Movimentação (opcional)</label>
+            <select class="inp" id="bme-mov-type" style="width:170px">
+              <option value="">— nenhuma —</option>
+              <option value="compra">🟢 Compra/Aporte</option>
+              <option value="venda">🔴 Venda/Resgate</option>
+              <option value="dividendo">💰 Dividendo/Rendimento</option>
+              <option value="taxa">📋 Taxa/Custo</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0">
+            <label class="lbl">Valor da movimentação</label>
+            <input class="inp" id="bme-mov-value" placeholder="0,00" style="width:130px">
+          </div>
+          <button class="btn primary xs" type="button" onclick="window._bmeConfirm()">✓ Adicionar</button>
+        </div>
+      </div>
+    </div>`;
 
   preview.innerHTML = `
     <div class="tbl-card">
@@ -7879,8 +8235,9 @@ function renderBrokerPreview(parsed) {
       </div>
     </div>
     ${unresolvedHtml}
+    ${manualEntryHtml}
     <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
-      <button class="btn primary" onclick="confirmBrokerImport()">✓ Importar para Patrimônio</button>
+      <button class="btn primary" onclick="confirmBrokerImport()" style="background:linear-gradient(135deg,#2e7d32,#43a047);border:none;box-shadow:0 2px 6px rgba(56,142,60,.3)">✓ Importar para Patrimônio</button>
       <button class="btn" onclick="cancelBrokerImport()">🗑️ Descartar importação</button>
       <span style="font-size:12px;color:var(--text3)">Os dados serão salvos em Patrimônio → Investimentos Financeiros</span>
     </div>`;  preview.style.display = 'block';
@@ -9734,11 +10091,11 @@ async function refreshML() {
   const rules=await ff.mlList();
   const count=rules.length, uses=rules.reduce((s,r)=>s+r.count,0), hi=rules.filter(r=>r.count>=5).length;
   G('ml-stats').innerHTML=`
-    <div class="stat-card"><div class="stat-lbl">Regras</div><div class="stat-val accent">${count}</div></div>
-    <div class="stat-card"><div class="stat-lbl">Usos totais</div><div class="stat-val accent">${uses}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Regras</div><div class="stat-val green">${count}</div></div>
+    <div class="stat-card"><div class="stat-lbl">Usos totais</div><div class="stat-val green">${uses}</div></div>
     <div class="stat-card"><div class="stat-lbl">Alta confiança</div><div class="stat-val green">${hi}</div></div>`;
   const groups={hi:rules.filter(r=>r.count>=5),mid:rules.filter(r=>r.count>=2&&r.count<5),low:rules.filter(r=>r.count<2)};
-  const labels={hi:['Alta confiança','#16a34a'],mid:['Média','#d97706'],low:['Baixa — revisar','#dc2626']};
+  const labels={hi:['Alta confiança','#43a047'],mid:['Média','#d97706'],low:['Baixa — revisar','#ef5350']};
   let html='';
   Object.entries(groups).forEach(([k,[lbl,color]])=>{
     if (!groups[k].length) return;
@@ -9753,7 +10110,7 @@ async function refreshML() {
         <td style="font-size:13px;cursor:pointer" title="Clique para editar" onclick="mlEditCategory(this,'${kw}','${esc(r.category||'').replace(/'/g,"\\'")}')">${esc(r.category||'—')}</td>
         <td class="center">${r.count}</td>
         <td class="right" style="font-family:'DM Mono',monospace">${mean}</td>
-        <td class="center"><button class="btn-icon" style="color:#dc2626;font-size:14px" title="Excluir esta regra" onclick="mlDeleteRule('${kw}')">×</button></td>
+        <td class="center"><button class="btn-icon" style="color:var(--red);font-size:14px" title="Excluir esta regra" onclick="mlDeleteRule('${kw}')">×</button></td>
       </tr>`;
     }).join('')}
     </tbody></table></div></div></div>`;
@@ -10040,25 +10397,28 @@ async function refreshRecurring(){
   function thSort(col, label) {
     const active = _recSortCol === col;
     const arrow = active ? (_recSortDir==='asc'?' ↑':' ↓') : '';
-    return `<th style="cursor:pointer;user-select:none${active?';color:var(--accent)':''}" onclick="sortRecurring('${col}')">${label}${arrow}</th>`;
+    return `<th class="adv-sort-th" style="cursor:pointer;user-select:none${active?';color:#2e7d32':''}" onclick="sortRecurring('${col}')">${label}${arrow}</th>`;
   }
 
   let html = `<div class="tbl-card"><div class="tbl-outer"><table class="ledger"><thead><tr>
     ${thSort('conta','Conta')}${thSort('memo','Memorando')}${thSort('category','Categoria')}${thSort('frequency','Frequência')}${thSort('next_date','Próxima')}${thSort('end_date','Término')}
-    <th class="right" style="cursor:pointer;user-select:none${_recSortCol==='amount'?';color:var(--accent)':''}" onclick="sortRecurring('amount')">Despesa${_recSortCol==='amount'?(_recSortDir==='asc'?' ↑':' ↓'):''}  </th>
+    <th class="right adv-sort-th" style="cursor:pointer;user-select:none${_recSortCol==='amount'?';color:#2e7d32':''}" onclick="sortRecurring('amount')">Despesa${_recSortCol==='amount'?(_recSortDir==='asc'?' ↑':' ↓'):''}  </th>
     <th class="right">Receita</th><th></th></tr></thead><tbody>`;
 
+  const todayS = todayStr();
   sorted.forEach(r => {
     const acc = accounts.find(a=>a.id===r.account_id);
     const exp = r.amount<0?fmtBRL(Math.abs(r.amount)):'';
     const inc = r.amount>=0?fmtBRL(r.amount):'';
     const recJson = esc2(JSON.stringify(r));
+    const daysUntil = r.next_date ? Math.ceil((new Date(r.next_date) - new Date(todayS)) / 86400000) : null;
+    const nextColor = daysUntil == null ? 'var(--text2)' : daysUntil < 0 ? 'var(--red)' : daysUntil <= 7 ? '#d97706' : 'var(--text2)';
     html += `<tr>
       <td style="font-size:13px">${esc(acc?.name||'?')}</td>
       <td>${esc(r.memo)}</td>
       <td style="font-size:12px">${esc(r.category)}</td>
       <td style="font-size:12px;color:var(--text2)">${freqLbl[r.frequency]||r.frequency}</td>
-      <td style="font-size:12px;color:var(--text2)">${fmtDate(r.next_date)}</td>
+      <td style="font-size:12px;color:${nextColor};font-weight:${daysUntil!=null&&daysUntil<=7?'600':'400'}">${fmtDate(r.next_date)}</td>
       <td style="font-size:12px;color:var(--text3)">${r.end_date?fmtDate(r.end_date):'Indefinida'}</td>
       <td class="amt-exp">${exp}</td><td class="amt-inc">${inc}</td>
       <td class="center" style="white-space:nowrap">
@@ -11804,9 +12164,15 @@ function renderReturnsChart(months, portInvested, portRet, cdiRet, ibovRet) {
 
 // ══ METAS FINANCEIRAS (Etapa 5) ══
 let _goals = [];
-let _goalColor = '#2563eb';
+let _goalColor = '#43a047';
 
 async function refreshGoals() {
+  // Os canvases serão recriados do zero a seguir — descarta as instâncias
+  // de Chart.js antigas (presas aos canvases anteriores, agora removidos),
+  // senão elas ficam "órfãs" e os gauges novos nunca recebem um gráfico.
+  Object.values(_goalCharts).forEach(c => { try { c.destroy(); } catch(e) {} });
+  _goalCharts = {};
+
   _goals = await ff.goalList().catch(() => []);
 
   // Fetch context data for calculations
@@ -11822,6 +12188,17 @@ async function refreshGoals() {
     balMap[aid] = await ff.goalAccountBalance({ accountId: aid }).catch(() => 0);
   }
 
+  // Dados "executados" da meta automática de Aposentadoria — só busca se
+  // ela existir, pra não pagar esse custo pra quem não usa Aposentadoria.
+  let retirementLive = null;
+  if (_goals.some(g => g.type === 'retirement')) {
+    const [currentPat, currentMA12] = await Promise.all([
+      getCurrentPatrimonioTotalLive(),
+      getCurrentMA12LucroLive(),
+    ]);
+    retirementLive = { currentPat, currentMA12 };
+  }
+
   const listEl = G('goals-list');
   if (!listEl) return;
 
@@ -11830,24 +12207,133 @@ async function refreshGoals() {
       <div style="font-size:40px;margin-bottom:10px">🎯</div>
       <div style="font-weight:600;font-size:15px;margin-bottom:6px">Nenhuma meta definida ainda</div>
       <div style="font-size:13px;color:var(--text3);margin-bottom:16px">Crie sua primeira meta e acompanhe o progresso</div>
-      <button class="btn primary" onclick="openGoalModal()">+ Criar primeira meta</button>
+      <button onclick="openGoalModal()" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:7px 14px;cursor:pointer;font-size:14px">+ Criar primeira meta</button>
     </div>`;
     return;
   }
 
   listEl.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px">` +
-    _goals.map(g => renderGoalCard(g, balMap, avgExp, avgSav)).join('') +
+    _goals.map(g => g.type === 'retirement' ? renderRetirementGoalCard(g, retirementLive) : renderGoalCard(g, balMap, avgExp, avgSav)).join('') +
     `</div>`;
 }
 
+// Escurece (percent negativo) ou clareia (positivo) uma cor hex — usada
+// pro anel interno de "excedente" quando uma meta passa de 100%.
+function shadeColor(hex, percent) {
+  const num = parseInt(hex.replace('#',''), 16);
+  let r = (num >> 16) + Math.round(2.55 * percent);
+  let g = ((num >> 8) & 0x00FF) + Math.round(2.55 * percent);
+  let b = (num & 0x0000FF) + Math.round(2.55 * percent);
+  r = Math.max(0, Math.min(255, r));
+  g = Math.max(0, Math.min(255, g));
+  b = Math.max(0, Math.min(255, b));
+  return '#' + r.toString(16).padStart(2,'0') + g.toString(16).padStart(2,'0') + b.toString(16).padStart(2,'0');
+}
+
+let _goalCharts = {}; // id -> Chart.js instance, pra atualizar em vez de recriar
+// Gauge com efeito de "overlap": acima de 100%, um segundo anel
+// (concêntrico, mais interno, em tom mais escuro da mesma cor) mostra o
+// excedente — em vez de simplesmente travar no teto de 100%.
+function renderGoalGaugeCanvas(canvasId, pct, color, chartsMap) {
+  chartsMap = chartsMap || _goalCharts;
+  const canvas = G(canvasId);
+  if (!canvas || typeof Chart === 'undefined') return;
+  const clamped = Math.max(0, pct);
+  const lap1 = Math.min(clamped, 100);
+  const lap2 = clamped > 100 ? Math.min(clamped - 100, 100) : 0;
+  const innerColor = shadeColor(color, -25);
+
+  const data0 = [lap1, 100 - lap1];
+  const bg0   = [color, 'rgba(0,0,0,.06)'];
+  const data1 = [lap2, 100 - lap2];
+  const bg1   = [lap2 > 0 ? innerColor : 'rgba(0,0,0,0)', 'rgba(0,0,0,0)'];
+
+  if (chartsMap[canvasId]) {
+    const c = chartsMap[canvasId];
+    c.data.datasets[0].data = data0; c.data.datasets[0].backgroundColor = bg0;
+    c.data.datasets[1].data = data1; c.data.datasets[1].backgroundColor = bg1;
+    c.update();
+  } else {
+    chartsMap[canvasId] = new Chart(canvas.getContext('2d'), {
+      type: 'doughnut',
+      data: { datasets: [
+        { data: data0, backgroundColor: bg0, borderWidth: 0, weight: 1 },
+        { data: data1, backgroundColor: bg1, borderWidth: 0, weight: 0.55 },
+      ] },
+      options: { cutout:'58%', responsive:true, maintainAspectRatio:false, animation:{ animateRotate:true, duration:700 }, plugins:{ legend:{display:false}, tooltip:{enabled:false} } }
+    });
+  }
+}
+
+function renderRetirementGoalCard(g, live) {
+  const color = g.color || '#43a047';
+  const currentPat = live?.currentPat || 0;
+  const currentMA12 = live?.currentMA12 || 0;
+  const targetPat = g.target_amount || 0;
+  const targetMonthly = g.monthly_amount || 0;
+  const retYear = g.deadline ? g.deadline.slice(0,4) : '—';
+
+  const pctLong  = targetPat > 0 ? Math.max(0, (currentPat / targetPat) * 100) : 0;
+  // Se a meta de poupança mensal é zero ou negativa, não há nada a mais a
+  // poupar (a trajetória atual já é suficiente) — trata como 100%
+  // cumprido, em vez do 0% (que sugeriria erroneamente "muito atrás").
+  const pctShort = targetMonthly <= 0 ? 100 : Math.max(0, (currentMA12 / targetMonthly) * 100);
+  const colorLong  = pctLong  >= 100 ? '#43a047' : color;
+  // Mesma lógica dos gráficos de orçamento, só que invertida (aqui, mais é
+  // melhor): verde acima de 10% da meta, amarelo entre a meta e 10% acima,
+  // vermelho abaixo da meta.
+  const ratioShort = targetMonthly <= 0 ? 1.10 : (currentMA12 / targetMonthly);
+  const colorShort = ratioShort >= 1.10 ? '#43a047' : ratioShort >= 1.00 ? '#f0a93a' : '#ef5350';
+
+  setTimeout(() => {
+    renderGoalGaugeCanvas(`goal-gauge-${g.id}-long`,  pctLong,  colorLong);
+    renderGoalGaugeCanvas(`goal-gauge-${g.id}-short`, pctShort, colorShort);
+  }, 0);
+
+  return `<div style="grid-column:1/-1;background:var(--bg2);border:1px solid var(--border);border-radius:16px;overflow:hidden;box-shadow:0 1px 3px rgba(20,30,50,.04)">
+    <div style="background:linear-gradient(135deg,${color},${color}cc);padding:14px 16px;display:flex;align-items:center;gap:10px">
+      <span style="font-size:28px;line-height:1">${g.icon||'🏖️'}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:15px;font-weight:700;color:#fff">${esc(g.name)}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);margin-top:1px">Meta automática, sincronizada com a aba Aposentadoria</div>
+      </div>
+      <button class="btn-icon" style="color:#fff;opacity:.85" onclick="goPage('aposentadoria')" title="Ver na Aposentadoria">📊</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0">
+      <div style="padding:18px 16px;display:flex;flex-direction:column;align-items:center;gap:10px;border-right:1px solid var(--border)">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.03em">📈 Longo prazo — Patrimônio</div>
+        <div style="position:relative;width:130px;height:130px">
+          <canvas id="goal-gauge-${g.id}-long"></canvas>
+          <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+            <div style="font-size:24px;font-weight:800;color:${colorLong}">${pctLong.toFixed(0)}%</div>
+          </div>
+        </div>
+        <div style="text-align:center;font-size:12px;color:var(--text2)">${fmtBRL(currentPat)} de ${fmtBRL(targetPat)}</div>
+        <div style="font-size:11px;color:var(--text3)">🎯 Meta até ${retYear}</div>
+      </div>
+      <div style="padding:18px 16px;display:flex;flex-direction:column;align-items:center;gap:10px">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.03em">📅 Curto prazo — Poupança mensal</div>
+        <div style="position:relative;width:130px;height:130px">
+          <canvas id="goal-gauge-${g.id}-short"></canvas>
+          <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+            <div style="font-size:24px;font-weight:800;color:${colorShort}">${pctShort.toFixed(0)}%</div>
+          </div>
+        </div>
+        <div style="text-align:center;font-size:12px;color:var(--text2)">${fmtBRL(currentMA12)} de ${fmtBRL(targetMonthly)}/mês</div>
+        <div style="font-size:11px;color:var(--text3)">Média móvel 12m do lucro</div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderGoalCard(g, balMap, avgExp, avgSav) {
-  const color = g.color || '#2563eb';
+  const color = g.color || '#43a047';
   let progress = 0, progressLabel = '', statusLine = '', targetLabel = '';
 
   if (g.type === 'target') {
     const target = g.target_amount || 0;
     const current = g.account_id ? (balMap[g.account_id] || 0) : 0;
-    progress = target > 0 ? Math.min((current / target) * 100, 100) : 0;
+    progress = target > 0 ? Math.max(0, (current / target) * 100) : 0;
     targetLabel = `Meta: ${fmtBRL(target)}`;
     progressLabel = `${fmtBRL(current)} de ${fmtBRL(target)}`;
     const rem = target - current;
@@ -11873,7 +12359,7 @@ function renderGoalCard(g, balMap, avgExp, avgSav) {
 
   } else if (g.type === 'monthly') {
     const target = g.monthly_amount || 0;
-    progress = target > 0 && avgSav > 0 ? Math.min((avgSav / target) * 100, 100) : 0;
+    progress = target > 0 && avgSav > 0 ? Math.max(0, (avgSav / target) * 100) : 0;
     targetLabel = `Meta mensal: ${fmtBRL(target)}`;
     progressLabel = avgSav > 0 ? `Média atual: ${fmtBRL(avgSav)}/mês` : 'Calculando média…';
     if (avgSav <= 0) {
@@ -11889,7 +12375,7 @@ function renderGoalCard(g, balMap, avgExp, avgSav) {
     const months = g.emergency_months || 6;
     const target = avgExp * months;
     const current = g.account_id ? (balMap[g.account_id] || 0) : 0;
-    progress = target > 0 ? Math.min((current / target) * 100, 100) : 0;
+    progress = target > 0 ? Math.max(0, (current / target) * 100) : 0;
     targetLabel = `${months} meses de gastos · Meta: ${fmtBRL(target)}`;
     progressLabel = `${fmtBRL(current)} de ${fmtBRL(target)}`;
     const rem = target - current;
@@ -11904,35 +12390,39 @@ function renderGoalCard(g, balMap, avgExp, avgSav) {
   }
 
   const pct = progress.toFixed(0);
-  const barW = progress.toFixed(1);
-  const barColor = progress >= 100 ? '#16a34a' : progress >= 80 ? color : color;
+  const gaugeColor = progress >= 100 ? '#43a047' : color;
+  const canvasId = `goal-gauge-${g.id}`;
 
-  return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column">
+  setTimeout(() => renderGoalGaugeCanvas(canvasId, progress, gaugeColor), 0);
+
+  return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:16px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 1px 3px rgba(20,30,50,.04)">
     <!-- Header strip -->
-    <div style="background:${color};padding:14px 16px;display:flex;align-items:center;gap:10px">
+    <div style="background:linear-gradient(135deg,${color},${color}cc);padding:14px 16px;display:flex;align-items:center;gap:10px">
       <span style="font-size:28px;line-height:1">${g.icon||'🎯'}</span>
       <div style="flex:1;min-width:0">
         <div style="font-size:15px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.name)}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,.75);margin-top:1px">${targetLabel}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.8);margin-top:1px">${targetLabel}</div>
       </div>
       <div style="display:flex;gap:4px;flex-shrink:0">
-        <button class="btn-icon" style="color:#fff;opacity:.8" onclick="openGoalModal(${g.id})" title="Editar">✎</button>
-        <button class="btn-icon" style="color:#fff;opacity:.8" onclick="deleteGoal(${g.id})" title="Excluir">✕</button>
+        <button class="btn-icon" style="color:#fff;opacity:.85" onclick="openGoalModal(${g.id})" title="Editar">✎</button>
+        <button class="btn-icon" style="color:#fff;opacity:.85" onclick="deleteGoal(${g.id})" title="Excluir">✕</button>
       </div>
     </div>
     <!-- Progress area -->
-    <div style="padding:14px 16px;flex:1">
-      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
-        <span style="font-size:13px;color:var(--text2)">${progressLabel}</span>
-        <span style="font-size:18px;font-weight:700;color:${color}">${pct}%</span>
+    <div style="padding:18px 16px;flex:1;display:flex;flex-direction:column;align-items:center;gap:12px">
+      <div style="position:relative;width:140px;height:140px">
+        <canvas id="${canvasId}"></canvas>
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none">
+          <div style="font-size:26px;font-weight:800;color:${gaugeColor}">${pct}%</div>
+        </div>
       </div>
-      <div style="background:var(--bg4);border-radius:99px;height:10px;overflow:hidden;margin-bottom:10px">
-        <div style="height:100%;width:${barW}%;background:${barColor};border-radius:99px;transition:width .6s ease"></div>
+      <div style="text-align:center">
+        <div style="font-size:13px;color:var(--text2)">${progressLabel}</div>
+        <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-top:6px">${statusLine}</div>
+        ${g.account_id ? `<div style="font-size:11px;color:var(--text3);margin-top:6px">
+          📊 Vinculada a: <strong>${esc(accounts.find(a=>a.id===g.account_id)?.name||'Conta')}</strong>
+        </div>` : ''}
       </div>
-      <div style="font-size:12px;color:var(--text2);line-height:1.6">${statusLine}</div>
-      ${g.account_id ? `<div style="font-size:11px;color:var(--text3);margin-top:6px">
-        📊 Vinculada a: <strong>${esc(accounts.find(a=>a.id===g.account_id)?.name||'Conta')}</strong>
-      </div>` : ''}
     </div>
   </div>`;
 }
@@ -11940,7 +12430,7 @@ function renderGoalCard(g, balMap, avgExp, avgSav) {
 async function openGoalModal(id) {
   G('goal-edit-id').value = id || '';
   G('goal-modal-title').textContent = id ? 'Editar meta' : 'Nova meta financeira';
-  _goalColor = '#2563eb';
+  _goalColor = '#43a047';
 
   // Populate account select
   const accSel = G('goal-account');
@@ -11965,7 +12455,7 @@ async function openGoalModal(id) {
       if (g.monthly_amount)   G('goal-monthly').setValue?.(g.monthly_amount);
       if (g.emergency_months) G('goal-emergency-months').value = g.emergency_months;
       if (g.deadline)         G('goal-deadline').value = g.deadline;
-      _goalColor = g.color || '#2563eb';
+      _goalColor = g.color || '#43a047';
     }
   } else {
     G('goal-icon').value  = '🎯';
@@ -12415,214 +12905,623 @@ async function refreshProjecao() {
 
 let _budgetMonth = '';
 
+let _budgetView = 'table';
+let _budgetCharts = {};
+
 async function refreshBudget() {
-  const el = G('budget-month');
-  if (!el) return;
-  const now = new Date();
-  const curM = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-  if (!el.value) el.value = curM;
-  _budgetMonth = el.value || curM;
+  const curMonthStr = todayStr().slice(0,7);
 
   _budgets = await ff.budgetList().catch(() => []);
-  const actuals  = await ff.budgetActuals({ month: _budgetMonth }).catch(() => []);
-  const avg3mArr = await ff.budgetAvg3m({ beforeMonth: _budgetMonth }).catch(() => []);
-  const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: _budgetMonth }).catch(() => ({}));
+  const incomeBudgets  = _budgets.filter(b => b.type === 'income');
+  const expenseBudgets = _budgets.filter(b => b.type !== 'income');
 
-  const actMap  = {};
-  actuals.forEach(a => { actMap[a.category] = { spent: a.spent||0, received: a.received||0 }; });
-  const avg3mMap = {};
-  avg3mArr.forEach(a => { avg3mMap[a.category] = a.avg_spent || 0; });
+  // Dados brutos por (mês, categoria) — sem nenhuma exclusão, pra refletir
+  // o realizado de verdade, igual ao resto do app.
+  const catRows = await ff.evolucaoByCat({ excludedCats: [] }).catch(() => []);
+  const byMonth = {};
+  catRows.forEach(r => {
+    if (!byMonth[r.month]) byMonth[r.month] = {};
+    byMonth[r.month][r.category] = { income: r.income||0, expenses: r.expenses||0 };
+  });
 
-  // Summary cards (com limite efetivo p/ rollover)
-  const effLimitOf = b => b.monthly_limit + ((b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0);
-  const totalBudgeted = _budgets.reduce((s,b) => s + effLimitOf(b), 0);
-  const totalSpent    = _budgets.reduce((s,b) => s + (actMap[b.category]?.spent||0), 0);
-  const remaining     = totalBudgeted - totalSpent;
-  const overBudget    = _budgets.filter(b => (actMap[b.category]?.spent||0) > effLimitOf(b)).length;
-
-  const summaryEl = G('budget-summary-cards');
-  if (summaryEl) {
-    summaryEl.innerHTML = [
-      { label:'Total orçado', val: fmtBRL(totalBudgeted), cls:'' },
-      { label:'Total gasto', val: fmtBRL(totalSpent), cls: totalSpent > totalBudgeted ? 'red' : '' },
-      { label:'Saldo disponível', val: fmtBRL(remaining), cls: remaining < 0 ? 'red' : 'green' },
-      { label:'Categorias acima do limite', val: overBudget, cls: overBudget > 0 ? 'red' : 'green' },
-    ].map(c => `
-      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px 18px;min-width:160px;flex:1">
-        <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px">${c.label}</div>
-        <div style="font-size:20px;font-weight:700;margin-top:4px;color:${c.cls==='red'?'var(--red)':c.cls==='green'?'var(--green)':'var(--text)'}">${c.val}</div>
-      </div>`).join('');
-  }
-
-  const listEl = G('budget-list');
-  if (!listEl) return;
-
-  if (!_budgets.length) {
-    listEl.innerHTML = `<div class="info-box" style="text-align:center;padding:32px">
-      <div style="font-size:32px;margin-bottom:8px">💰</div>
-      <div style="font-weight:600;margin-bottom:6px">Nenhuma meta definida</div>
-      <div style="font-size:13px;color:var(--text3)">Clique em "+ Nova meta" para começar</div>
-    </div>`;
-  } else {
-    // Sort state persisted in localStorage; default: progress desc
-    if (!window._budgetSort) {
-      try { window._budgetSort = JSON.parse(localStorage.getItem('crz-budget-sort') || 'null'); } catch(e) {}
-      if (!window._budgetSort) window._budgetSort = { col: 'pct', dir: 'desc' };
+  // Todo o histórico disponível, do primeiro mês com dados até 3 meses no
+  // futuro (pra dar visibilidade do planejamento à frente) — sem seletor
+  // de ano: tudo num único scroll horizontal contínuo.
+  const dataMonths = Object.keys(byMonth).sort();
+  const firstMonth = dataMonths.length ? dataMonths[0] : curMonthStr;
+  const lastDate = new Date(curMonthStr + '-02'); lastDate.setMonth(lastDate.getMonth() + 12);
+  const lastMonth = `${lastDate.getFullYear()}-${String(lastDate.getMonth()+1).padStart(2,'0')}`;
+  const months = [];
+  { let cur = firstMonth;
+    while (cur <= lastMonth) {
+      months.push(cur);
+      const d = new Date(cur + '-02'); d.setMonth(d.getMonth()+1);
+      cur = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
     }
-    const { col, dir } = window._budgetSort;
+  }
+  const curMonthIdx = months.indexOf(curMonthStr);
 
-    const enriched = _budgets.map(b => {
-      const actual = actMap[b.category]?.spent || 0;
-      const rollAcc = (b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0;
-      const effLimit = b.monthly_limit + rollAcc; // limite efetivo c/ saldo acumulado
-      return {
-        ...b,
-        actual,
-        rollAcc,
-        effLimit,
-        pct: effLimit > 0 ? (actual / effLimit) * 100 : 0,
-        avg3m: avg3mMap[b.category] || 0,
-      };
+  // Soma bruta (não líquida) da categoria e de suas subcategorias — pra
+  // orçamento, cada lado (receita/despesa) é olhado separadamente, sem
+  // misturar com a classificação "redutora de despesa" usada nos relatórios.
+  const actualFor = (category, month, type, consolidate = true) => {
+    const mo = byMonth[month] || {};
+    let total = 0;
+    Object.entries(mo).forEach(([rawCat, d]) => {
+      if (rawCat === category || (consolidate && rawCat.startsWith(category + ':'))) {
+        total += type === 'income' ? (d.income||0) : (d.expenses||0);
+      }
     });
+    return total;
+  };
 
-    const sorted = [...enriched].sort((a, b) => {
-      let va, vb;
-      if      (col === 'category') { va = a.category.toLowerCase(); vb = b.category.toLowerCase(); }
-      else if (col === 'spent')    { va = a.actual;           vb = b.actual; }
-      else if (col === 'avg3m')    { va = a.avg3m;            vb = b.avg3m; }
-      else if (col === 'limit')    { va = a.effLimit;        vb = b.effLimit; }
-      else if (col === 'rem')      { va = a.effLimit-a.actual; vb = b.effLimit-b.actual; }
-      else                         { va = a.pct;              vb = b.pct; }
-      if (va < vb) return dir === 'asc' ? -1 : 1;
-      if (va > vb) return dir === 'asc' ?  1 : -1;
-      return 0;
+  const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: curMonthStr }).catch(() => ({}));
+  const effLimitOf = b => b.monthly_limit + ((b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0);
+
+  // ── Resumo: disponível, orçado, poupança planejada vs necessária ──
+  const totalIncomePlanned  = incomeBudgets.reduce((s,b) => s + b.monthly_limit, 0);
+  const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + effLimitOf(b), 0);
+  const plannedSavings = totalIncomePlanned - totalExpensePlanned;
+  const totalIncomeActual  = incomeBudgets.reduce((s,b) => s + actualFor(b.category, curMonthStr, 'income', b.consolidate_subs !== 0), 0);
+  const totalExpenseActual = expenseBudgets.reduce((s,b) => s + actualFor(b.category, curMonthStr, 'expense', b.consolidate_subs !== 0), 0);
+
+  let neededSavings = null;
+  try {
+    const goals = await ff.goalList().catch(() => []);
+    const ret = goals.find(g => g.type === 'retirement');
+    if (ret) neededSavings = ret.monthly_amount || 0;
+  } catch(e) {}
+
+  renderBudgetSummary({ totalIncomePlanned, totalExpensePlanned, plannedSavings, neededSavings,
+    totalIncomeActual, totalExpenseActual });
+
+  const ctx = { incomeBudgets, expenseBudgets, months, curMonthStr, curMonthIdx, actualFor, effLimitOf, byMonth };
+  if (_budgetView === 'table') {
+    renderBudgetTable(ctx);
+    renderBudgetUncategorized(ctx);
+  } else {
+    renderBudgetCharts(ctx);
+  }
+}
+
+let _budgetSummaryGaugeCharts = {};
+function renderBudgetSummary({ totalIncomePlanned, totalExpensePlanned, plannedSavings, neededSavings, totalIncomeActual, totalExpenseActual }) {
+  const cards = [
+    { icon:'📈', label:'Total disponível (receitas)', value: fmtBRL(totalIncomePlanned), color:'#2e7d32' },
+    { icon:'📉', label:'Total orçado (despesas)', value: fmtBRL(totalExpensePlanned), color:'#d97706' },
+    { icon:'💰', label:'Poupança planejada', value: fmtBRL(plannedSavings), color: plannedSavings>=0 ? '#43a047' : '#ef5350' },
+  ];
+  if (neededSavings != null) {
+    const diff = plannedSavings - neededSavings;
+    cards.push({
+      icon: diff >= 0 ? '✅' : '⚠️',
+      label: 'Poupança necessária (Aposentadoria)',
+      value: fmtBRL(neededSavings),
+      color: diff >= 0 ? '#43a047' : '#ef5350',
+      sub: diff >= 0 ? `Planejamento supera em ${fmtBRL(diff)}` : `Faltam ${fmtBRL(-diff)} para cobrir a meta`,
     });
+  }
+  const el = G('budget-summary-cards');
+  if (el) el.innerHTML = cards.map(c => `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-left:4px solid ${c.color};border-radius:12px;padding:14px 16px;box-shadow:0 1px 3px rgba(20,30,50,.04)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:18px">${c.icon}</span>
+        <span style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.02em">${c.label}</span>
+      </div>
+      <div style="font-size:18px;font-weight:800;color:${c.color}">${c.value}</div>
+      ${c.sub?`<div style="font-size:11px;color:var(--text3);margin-top:3px">${c.sub}</div>`:''}
+    </div>`).join('');
 
-    const thR = (label, key) => {
-      const active = col === key;
-      const arrow  = active ? (dir === 'asc' ? ' ▼' : ' ▲') : '';
-      return `<th style="text-align:right;cursor:pointer;user-select:none${active?';color:var(--accent)':''}" onclick="budgetSortBy('${key}')">${label}${arrow}</th>`;
-    };
-    const thL = (label, key) => {
-      const active = col === key;
-      const arrow  = active ? (dir === 'asc' ? ' ▼' : ' ▲') : '';
-      return `<th style="cursor:pointer;user-select:none${active?';color:var(--accent)':''}" onclick="budgetSortBy('${key}')">${label}${arrow}</th>`;
-    };
+  // Dois gauges grandes: % executado do total de receitas e de despesas
+  // no mês atual — para ver de relance se um estouro num lado é
+  // compensado por sobra no outro.
+  const gaugesEl = G('budget-summary-gauges');
+  if (gaugesEl) {
+    // Os canvases vão ser recriados do zero a seguir — descarta as
+    // instâncias antigas (presas aos canvases anteriores, agora
+    // removidos), senão elas ficam "órfãs" e os gauges novos nunca
+    // recebem um gráfico (ficam em branco).
+    Object.values(_budgetSummaryGaugeCharts).forEach(c => { try { c.destroy(); } catch(e) {} });
+    _budgetSummaryGaugeCharts = {};
 
-    listEl.innerHTML = `<div class="tbl-card"><div class="tbl-outer">
-      <table class="ledger"><thead><tr>
-        ${thL('Categoria','category')}
-        ${thR('Gasto','spent')}
-        ${thR('Média 3m','avg3m')}
-        ${thR('Limite','limit')}
-        ${thR('Saldo','rem')}
-        ${thL('Progresso','pct')}
-        <th class="center">Alerta</th>
-        <th></th>
-      </tr></thead><tbody>` +
-      sorted.map((b, i) => {
-        const effLimit = b.effLimit;
-        const pct     = Math.min(b.pct, 100);
-        const over    = b.actual > effLimit;
-        const warn    = b.pct >= (b.alert_pct || 80) && !over;
-        const rem     = effLimit - b.actual;
-        const barClr  = over ? 'var(--red)' : warn ? 'var(--warn)' : 'var(--green)';
-        const remClr  = over ? 'var(--red)' : rem < effLimit * 0.2 ? 'var(--warn)' : 'var(--green)';
-        const avg3mClr = b.avg3m > effLimit ? 'var(--red)' : b.avg3m > effLimit * 0.8 ? 'var(--warn)' : 'var(--text3)';
-        const stripe  = i % 2 === 1 ? 'background:var(--bg3)' : '';
-        // Limite efetivo c/ rollover: mostra base + acumulado
-        const rollTag = (b.rollover && Math.abs(b.rollAcc) >= 0.01)
-          ? `<div style="font-size:10px;color:${b.rollAcc>=0?'var(--green)':'var(--red)'};margin-top:2px">${b.rollAcc>=0?'+':'−'}${fmtBRL(Math.abs(b.rollAcc))} acum.</div>`
-          : '';
-        const catTag = b.rollover ? ' <span title="Rollover ativo" style="font-size:10px">🔄</span>' : '';
-        return `<tr style="${stripe}">
-          <td style="font-size:13px;padding:10px 14px;font-weight:500">${esc(b.category)}${catTag}</td>
-          <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:${over?'var(--red)':'var(--text)'}">${fmtBRL(b.actual)}</td>
-          <td class="right" style="font-family:'DM Mono',monospace;font-size:12px;padding:10px 14px;color:${avg3mClr}" title="Média dos últimos 3 meses">${b.avg3m > 0 ? fmtBRL(b.avg3m) : '—'}</td>
-          <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:var(--text3)">${fmtBRL(effLimit)}${rollTag}</td>
-          <td class="right" style="font-family:'DM Mono',monospace;font-size:13px;padding:10px 14px;color:${remClr}">${rem >= 0 ? fmtBRL(rem) : '−'+fmtBRL(-rem)}</td>
-          <td style="padding:10px 14px;min-width:140px">
-            <div style="background:var(--bg4);border-radius:99px;height:8px;overflow:hidden">
-              <div style="height:100%;width:${pct.toFixed(1)}%;background:${barClr};border-radius:99px;transition:width .4s"></div>
-            </div>
-            <div style="font-size:10px;color:var(--text3);margin-top:3px">${b.pct.toFixed(0)}%${over?' ⚠️ Acima do limite':''}</div>
-          </td>
-          <td class="center" style="font-size:12px;color:var(--text3);padding:10px 8px">${b.alert_pct||80}%</td>
-          <td class="center" style="padding:10px 8px;white-space:nowrap">
-            <button class="btn-icon" title="Editar" onclick="openBudgetModal(${b.id})">✎</button>
-            <button class="btn-icon" title="Excluir" style="color:var(--red)" onclick="deleteBudget(${b.id})">✕</button>
-          </td>
-        </tr>`;
-      }).join('') +
-      '</tbody></table></div></div>';
+    const pctInc = totalIncomePlanned  > 0 ? (totalIncomeActual  / totalIncomePlanned  * 100) : 0;
+    const pctExp = totalExpensePlanned > 0 ? (totalExpenseActual / totalExpensePlanned * 100) : 0;
+    const colorInc = pctInc >= 110 ? '#43a047' : pctInc >= 100 ? '#f0a93a' : '#ef5350';
+    const colorExp = pctExp > 110 ? '#ef5350' : pctExp >= 100 ? '#ef5350' : pctExp >= 80 ? '#f0a93a' : '#43a047';
+    gaugesEl.innerHTML = `
+      <div style="flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px">
+        <div style="font-size:11px;font-weight:700;color:#2e7d32;text-transform:uppercase">📈 Receitas</div>
+        <div style="position:relative;width:104px;height:104px">
+          <canvas id="budget-gauge-total-income"></canvas>
+          <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+            <div style="font-size:18px;font-weight:800;color:${colorInc}">${pctInc.toFixed(0)}%</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text2)">${fmtBRL(totalIncomeActual)} / ${fmtBRL(totalIncomePlanned)}</div>
+      </div>
+      <div style="flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px">
+        <div style="font-size:11px;font-weight:700;color:#d97706;text-transform:uppercase">📉 Despesas</div>
+        <div style="position:relative;width:104px;height:104px">
+          <canvas id="budget-gauge-total-expense"></canvas>
+          <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+            <div style="font-size:18px;font-weight:800;color:${colorExp}">${pctExp.toFixed(0)}%</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--text2)">${fmtBRL(totalExpenseActual)} / ${fmtBRL(totalExpensePlanned)}</div>
+      </div>`;
+    setTimeout(() => {
+      renderGoalGaugeCanvas('budget-gauge-total-income',  pctInc, colorInc, _budgetSummaryGaugeCharts);
+      renderGoalGaugeCanvas('budget-gauge-total-expense', pctExp, colorExp, _budgetSummaryGaugeCharts);
+    }, 0);
+  }
+}
+
+function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr, curMonthIdx, actualFor, effLimitOf }) {
+  const table = G('budget-table');
+  const scroll = G('budget-table-scroll');
+  if (!table) return;
+
+  if (!incomeBudgets.length && !expenseBudgets.length) {
+    table.innerHTML = '';
+    if (scroll) scroll.innerHTML = `<div class="info-box" style="text-align:center;padding:40px">
+      <div style="font-size:36px;margin-bottom:8px">💰</div>
+      <div style="font-weight:600;margin-bottom:6px">Nenhuma categoria de planejamento ainda</div>
+      <div style="font-size:13px;color:var(--text3)">Clique em "+ Nova categoria" para começar pelas suas receitas previstas</div>
+    </div>`;
+    return;
+  } else if (scroll && !scroll.querySelector('table')) {
+    scroll.innerHTML = '<table class="ledger" id="budget-table" style="border-collapse:separate;border-spacing:0"></table>';
+  }
+  const liveTable = G('budget-table');
+
+  // table-layout:fixed + colgroup com largura explícita por coluna — sem
+  // isso, o navegador usa auto-layout e colapsa colunas vazias/com pouco
+  // conteúdo para quase 0px quando há muitas colunas (era exatamente o
+  // bug visto: meses viravam barras finíssimas, ilegíveis).
+  const STICKY_W = [170, 120, 80];
+  const MONTH_W  = [120, 60]; // realizado, %
+  const totalWidth = STICKY_W.reduce((a,b)=>a+b,0) + months.length * MONTH_W.reduce((a,b)=>a+b,0);
+  liveTable.style.tableLayout = 'fixed';
+  liveTable.style.width = totalWidth + 'px';
+  let colgroup = '<colgroup>' + STICKY_W.map(w => `<col style="width:${w}px">`).join('');
+  months.forEach(() => { colgroup += `<col style="width:${MONTH_W[0]}px"><col style="width:${MONTH_W[1]}px">`; });
+  colgroup += '</colgroup>';
+
+  const monthHeaderBg = m => m === curMonthStr ? 'background:#f1f8e9' : '';
+
+  let html = colgroup + `<thead>
+    <tr>
+      <th class="budget-sticky budget-sticky-1" rowspan="2">Categorias</th>
+      <th class="budget-sticky budget-sticky-2 right" rowspan="2">Planejamento</th>
+      <th class="budget-sticky budget-sticky-3 center" rowspan="2">% atual</th>
+      ${months.map(m => `<th colspan="2" style="${monthHeaderBg(m)};padding:0"><div style="display:flex;align-items:center;justify-content:center;padding:8px 12px">${monthLabelShort(m)}</div></th>`).join('')}
+    </tr>
+    <tr>
+      ${months.map(m => `<th class="right budget-month-col" style="font-weight:500;${monthHeaderBg(m)}">Realizado</th><th class="center budget-pct-col" style="font-weight:500;${monthHeaderBg(m)}">%</th>`).join('')}
+    </tr>
+  </thead><tbody>`;
+
+  function groupRow(label, bg, planned, monthTotals, type) {
+    const curActual = monthTotals[curMonthStr] || 0;
+    const curPct = planned > 0 ? (curActual / planned * 100) : 0;
+    let row = `<tr>
+      <td class="budget-sticky budget-sticky-1" style="background:${bg};color:#fff;font-weight:700">${label}</td>
+      <td class="budget-sticky budget-sticky-2 right" style="background:${bg};color:#fff;font-weight:700;font-family:'DM Mono',monospace">${fmtBRL(planned)}</td>
+      <td class="budget-sticky budget-sticky-3 center" style="background:${bg};color:#fff;font-weight:700">${curPct.toFixed(0)}%</td>`;
+    months.forEach(m => {
+      const actual = monthTotals[m]||0;
+      const pct = planned > 0 ? (actual / planned * 100) : 0;
+      row += `<td class="right" style="background:${bg};color:#fff;font-weight:700;font-family:'DM Mono',monospace">${fmtBRL(actual)}</td>`;
+      row += `<td class="center" style="background:${bg};color:#fff;font-weight:700">${actual !== 0 ? pct.toFixed(0)+'%' : ''}</td>`;
+    });
+    return row + '</tr>';
   }
 
-  // Show categories with spending but no budget
-  const budgetedCats = new Set(_budgets.map(b => b.category));
-  const unbudgeted = actuals
-    .filter(a => !budgetedCats.has(a.category) && a.spent > 0 && a.category &&
-      a.category !== 'Transferência' && a.category !== 'Transferências')
-    .sort((a,b) => b.spent - a.spent)
-    .slice(0, 8);
+  function catRow(b, type, i) {
+    const planned = type === 'income' ? b.monthly_limit : effLimitOf(b);
+    const curActual = actualFor(b.category, curMonthStr, type, b.consolidate_subs !== 0);
+    const curPct = planned > 0 ? (curActual / planned * 100) : 0;
+    const curPctColor = type === 'income'
+      ? (curPct >= 100 ? 'var(--green)' : curPct >= 80 ? '#d97706' : 'var(--red)')
+      : (curPct > 100 ? 'var(--red)' : curPct >= 80 ? '#d97706' : 'var(--green)');
+    const stripe = i % 2 === 1 ? 'var(--bg3)' : 'var(--bg2)';
+    const rollTag = (type !== 'income' && b.rollover) ? ' <span title="Rollover ativo" style="font-size:10px">🔄</span>' : '';
 
-  const uncatEl = G('budget-uncategorized');
-  if (uncatEl) {
-    if (unbudgeted.length) {
-      uncatEl.innerHTML = `<div style="margin-bottom:8px;font-size:13px;font-weight:600;color:var(--text2)">
-        Categorias sem meta este mês — clique para adicionar:</div>` +
-        `<div style="display:flex;flex-wrap:wrap;gap:8px">` +
-        unbudgeted.map(a => `
-          <button class="btn" onclick="openBudgetModal(null,'${esc2(a.category)}')"
-            style="font-size:12px;display:flex;align-items:center;gap:6px">
-            ${esc(a.category)}
-            <span style="color:var(--red);font-family:'DM Mono',monospace">${fmtBRL(a.spent)}</span>
-          </button>`).join('') +
-        `</div>`;
+    let row = `<tr>
+      <td class="budget-sticky budget-sticky-1" style="background:${stripe}">
+        <a href="#" onclick="event.preventDefault();openBudgetModal(${b.id})" style="color:inherit;text-decoration:none;cursor:pointer" title="Editar">${esc(b.category)}</a>${rollTag}
+        <button class="btn-icon" style="color:var(--red);font-size:10px;margin-left:2px;vertical-align:middle" title="Excluir" onclick="deleteBudget(${b.id})">✕</button>
+      </td>
+      <td class="budget-sticky budget-sticky-2 right" style="background:${stripe};font-family:'DM Mono',monospace">${fmtBRL(planned)}</td>
+      <td class="budget-sticky budget-sticky-3 center" style="background:${stripe};color:${curPctColor};font-weight:700">${curPct.toFixed(0)}%</td>`;
+    months.forEach(m => {
+      const actual = actualFor(b.category, m, type, b.consolidate_subs !== 0);
+      const pct = planned > 0 ? (actual / planned * 100) : 0;
+      const cellColor = actual === 0 ? 'var(--text3)' : type === 'income'
+        ? (pct >= 100 ? 'inherit' : pct >= 80 ? '#d97706' : 'var(--red)')
+        : (pct > 100 ? 'var(--red)' : pct >= 80 ? '#d97706' : 'inherit');
+      row += `<td class="right" style="background:${stripe};font-family:'DM Mono',monospace">${actual !== 0 ? fmtBRL(actual) : '—'}</td>`;
+      row += `<td class="center" style="background:${stripe};color:${cellColor}">${actual !== 0 ? pct.toFixed(0)+'%' : ''}</td>`;
+    });
+    return row + '</tr>';
+  }
+
+  if (incomeBudgets.length) {
+    const totalIncomePlanned = incomeBudgets.reduce((s,b) => s+b.monthly_limit, 0);
+    const incomeMonthTotals = {};
+    months.forEach(m => { incomeMonthTotals[m] = incomeBudgets.reduce((s,b) => s+actualFor(b.category,m,'income', b.consolidate_subs !== 0), 0); });
+    html += groupRow('Receitas', '#0d9488', totalIncomePlanned, incomeMonthTotals, 'income');
+    incomeBudgets.forEach((b,i) => html += catRow(b, 'income', i));
+  }
+  if (expenseBudgets.length) {
+    const totalExpensePlanned = expenseBudgets.reduce((s,b) => s+effLimitOf(b), 0);
+    const expenseMonthTotals = {};
+    months.forEach(m => { expenseMonthTotals[m] = expenseBudgets.reduce((s,b) => s+actualFor(b.category,m,'expense', b.consolidate_subs !== 0), 0); });
+    html += groupRow('Despesas', '#ef5350', totalExpensePlanned, expenseMonthTotals, 'expense');
+    expenseBudgets.forEach((b,i) => html += catRow(b, 'expense', i));
+  }
+  html += '</tbody>';
+  liveTable.innerHTML = html;
+
+  // Posiciona o scroll horizontal de modo que o mês atual apareça
+  // imediatamente após as colunas fixas (Categorias/Planejamento/% atual).
+  const STICKY_TOTAL = STICKY_W.reduce((a,b)=>a+b,0); // 170+120+80=370 — onde as colunas de mês de fato começam
+  const MONTH_COL_WIDTH = MONTH_W[0] + MONTH_W[1]; // realizado + %
+  if (scroll && curMonthIdx >= 0) {
+    scroll.scrollLeft = STICKY_TOTAL + curMonthIdx * MONTH_COL_WIDTH;
+  }
+
+  // "Snap" do scroll: ao parar de rolar, ajusta pro início do mês mais
+  // próximo — sem isso, o usuário precisa "mirar" pra não cortar uma
+  // coluna no meio. Os meses só começam DEPOIS das colunas fixas
+  // (STICKY_TOTAL), então o cálculo precisa descontar esse deslocamento
+  // antes de arredondar — sem isso, o ponto de ancoragem fica deslocado
+  // (370 não é múltiplo de 180), puxando pro meio de uma coluna em vez do
+  // início do mês. O listener é anexado uma única vez por elemento
+  // (re-renderizar a tabela não duplica).
+  if (scroll && !scroll._snapBound) {
+    scroll._snapBound = true;
+    let isSnapping = false;
+    const doSnap = () => {
+      if (isSnapping) return;
+      const rel = scroll.scrollLeft - STICKY_TOTAL;
+      const nearestRel = Math.max(0, Math.round(rel / MONTH_COL_WIDTH) * MONTH_COL_WIDTH);
+      const nearest = STICKY_TOTAL + nearestRel;
+      if (Math.abs(scroll.scrollLeft - nearest) > 1) {
+        isSnapping = true;
+        scroll.scrollTo({ left: nearest, behavior: 'smooth' });
+        if ('onscrollend' in window) {
+          scroll.addEventListener('scrollend', () => { isSnapping = false; }, { once: true });
+        } else {
+          setTimeout(() => { isSnapping = false; }, 500);
+        }
+      }
+    };
+    if ('onscrollend' in window) {
+      scroll.addEventListener('scrollend', doSnap);
     } else {
-      uncatEl.innerHTML = '';
+      let snapTimer = null;
+      scroll.addEventListener('scroll', () => {
+        if (isSnapping) return;
+        clearTimeout(snapTimer);
+        snapTimer = setTimeout(doSnap, 130);
+      });
     }
   }
 }
 
-function budgetSortBy(col) {
-  if (!window._budgetSort) window._budgetSort = { col: 'pct', dir: 'desc' };
-  if (window._budgetSort.col === col) {
-    window._budgetSort.dir = window._budgetSort.dir === 'asc' ? 'desc' : 'asc';
-  } else {
-    window._budgetSort = { col, dir: col === 'category' ? 'asc' : 'desc' };
-  }
-  try { localStorage.setItem('crz-budget-sort', JSON.stringify(window._budgetSort)); } catch(e) {}
+function renderBudgetUncategorized({ incomeBudgets, expenseBudgets, byMonth, curMonthStr }) {
+  const el = G('budget-uncategorized');
+  if (!el) return;
+  const budgetedCats = new Set([...incomeBudgets, ...expenseBudgets].map(b => b.category));
+  const mo = byMonth[curMonthStr] || {};
+  const unbudgeted = Object.entries(mo)
+    .filter(([cat,d]) => cat && !budgetedCats.has(cat) && !budgetedCats.has(cat.split(':')[0]) &&
+      cat !== 'Transferência' && cat !== 'Transferências' && d.expenses > 0)
+    .map(([cat,d]) => ({ category: cat, spent: d.expenses }))
+    .sort((a,b) => b.spent - a.spent)
+    .slice(0, 8);
+
+  if (!unbudgeted.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div style="margin-bottom:8px;font-size:13px;font-weight:600;color:var(--text2)">
+      Categorias com gasto este mês mas sem planejamento — clique para adicionar:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">` +
+    unbudgeted.map(a => `
+      <button class="btn" onclick="openBudgetModal(null,'${esc2(a.category)}')"
+        style="font-size:12px;display:flex;align-items:center;gap:6px">
+        ${esc(a.category)}
+        <span style="color:var(--red);font-family:'DM Mono',monospace">${fmtBRL(a.spent)}</span>
+      </button>`).join('') +
+    `</div>`;
+}
+
+function budgetTglView(view) {
+  _budgetView = view;
+  G('budget-table-view').style.display = view === 'table' ? '' : 'none';
+  G('budget-chart-view').style.display  = view === 'chart' ? '' : 'none';
+  G('budget-view-table').classList.toggle('primary', view === 'table');
+  G('budget-view-chart').classList.toggle('primary', view === 'chart');
   refreshBudget();
+}
+
+let _budgetChartMode = 'single';  // 'single' | 'series'
+let _budgetChartMonth = '';       // YYYY-MM — mês selecionado no modo rosca
+let _budgetChartPeriod = 12;      // 6 | 12 | 24 | 36 | 'all'
+let _budgetBarCharts = {};        // canvasId -> Chart.js instance para o modo barras
+
+function budgetChartMode(mode) {
+  _budgetChartMode = mode;
+  G('budget-chart-type-single').classList.toggle('primary', mode === 'single');
+  G('budget-chart-type-series').classList.toggle('primary', mode === 'series');
+  G('budget-chart-month-nav').style.display  = mode === 'single' ? 'flex' : 'none';
+  G('budget-chart-period-nav').style.display = mode === 'series' ? 'flex' : 'none';
+  refreshBudget();
+}
+
+function budgetChartLabelMonth() {
+  if (!_budgetChartMonth) _budgetChartMonth = todayStr().slice(0,7);
+  const [y,m] = _budgetChartMonth.split('-');
+  const MONTHS = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  G('budget-chart-month-label').textContent = `${MONTHS[parseInt(m)-1]} ${y}`;
+}
+function budgetChartPrevMonth() {
+  if (!_budgetChartMonth) _budgetChartMonth = todayStr().slice(0,7);
+  const d = new Date(_budgetChartMonth + '-02');
+  d.setMonth(d.getMonth() - 1);
+  _budgetChartMonth = d.toISOString().slice(0,7);
+  budgetChartLabelMonth();
+  refreshBudget();
+}
+function budgetChartNextMonth() {
+  if (!_budgetChartMonth) _budgetChartMonth = todayStr().slice(0,7);
+  const d = new Date(_budgetChartMonth + '-02');
+  d.setMonth(d.getMonth() + 1);
+  _budgetChartMonth = d.toISOString().slice(0,7);
+  budgetChartLabelMonth();
+  refreshBudget();
+}
+function budgetChartToday() {
+  _budgetChartMonth = todayStr().slice(0,7);
+  budgetChartLabelMonth();
+  refreshBudget();
+}
+function budgetChartSetPeriod(p) {
+  _budgetChartPeriod = p;
+  ['6','12','24','36','all'].forEach(k => G(`bcp-${k}`)?.classList.remove('primary'));
+  G(`bcp-${p}`)?.classList.add('primary');
+  refreshBudget();
+}
+
+function renderBudgetCharts(ctx) {
+  if (!ctx) return refreshBudget();
+  const { incomeBudgets, expenseBudgets, actualFor, effLimitOf, byMonth } = ctx;
+  const grid = G('budget-charts-grid');
+  if (!grid) return;
+
+  // Inicializa o estado de mês se ainda não foi definido
+  if (!_budgetChartMonth) _budgetChartMonth = todayStr().slice(0,7);
+  budgetChartLabelMonth();
+
+  const all = [
+    ...incomeBudgets.map(b => ({...b, _t:'income'})),
+    ...expenseBudgets.map(b => ({...b, _t:'expense'})),
+  ];
+  if (!all.length) {
+    grid.innerHTML = `<div class="info-box" style="text-align:center;padding:40px;grid-column:1/-1">
+      <div style="font-size:36px;margin-bottom:8px">🍩</div>
+      <div style="font-weight:600">Nenhuma categoria de planejamento ainda</div>
+    </div>`;
+    return;
+  }
+
+  // Destrói os gráficos de barra do modo anterior antes de recriar
+  Object.values(_budgetBarCharts).forEach(c => { try { c.destroy(); } catch(e) {} });
+  _budgetBarCharts = {};
+  Object.values(_budgetCharts).forEach(c => { try { c.destroy(); } catch(e) {} });
+  _budgetCharts = {};
+
+  if (_budgetChartMode === 'single') {
+    renderBudgetSingleMonth(all, actualFor, effLimitOf);
+  } else {
+    renderBudgetSeries(all, actualFor, effLimitOf, byMonth);
+  }
+}
+
+function renderBudgetSingleMonth(budgets, actualFor, effLimitOf) {
+  const month = _budgetChartMonth;
+  const grid  = G('budget-charts-grid');
+  grid.innerHTML = budgets.map(b => {
+    const planned = b._t === 'income' ? b.monthly_limit : effLimitOf(b);
+    const actual  = actualFor(b.category, month, b._t, b.consolidate_subs !== 0);
+    const pct     = planned > 0 ? (actual / planned * 100) : 0;
+    const color   = b._t === 'income'
+      ? (pct >= 110 ? '#43a047' : pct >= 100 ? '#f0a93a' : '#ef5350')
+      : (pct > 110 ? '#ef5350' : pct >= 100 ? '#ef5350' : pct >= 80 ? '#f0a93a' : '#43a047');
+    const id = `budget-gauge-${b._t}-${b.id}`;
+    setTimeout(() => renderGoalGaugeCanvas(id, pct, color, _budgetCharts), 0);
+    return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:16px;display:flex;flex-direction:column;align-items:center;gap:10px">
+      <div style="font-size:12px;font-weight:700;text-align:center">${b._t==='income'?'📈':'📉'} ${esc(b.category)}</div>
+      <div style="position:relative;width:120px;height:120px">
+        <canvas id="${id}"></canvas>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+          <div style="font-size:20px;font-weight:800;color:${color}">${pct.toFixed(0)}%</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--text2);text-align:center">${fmtBRL(actual)} de ${fmtBRL(planned)}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderBudgetSeries(budgets, actualFor, effLimitOf, byMonth) {
+  const grid = G('budget-charts-grid');
+  const allMonths = Object.keys(byMonth).sort();
+  // Calcula a janela de meses conforme o seletor de período
+  let months;
+  if (_budgetChartPeriod === 'all' || !allMonths.length) {
+    months = allMonths;
+  } else {
+    const n = _budgetChartPeriod;
+    const curM = todayStr().slice(0,7);
+    const [cy, cm] = curM.split('-').map(Number);
+    const arr = [];
+    for (let i = n-1; i >= 0; i--) {
+      const d = new Date(cy, cm-1-i, 1);
+      arr.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+    }
+    months = arr;
+  }
+  const labels = months.map(m => monthLabelShort(m));
+
+  // Estende o grid pra 1 coluna por gráfico de barra (cada um é mais largo)
+  grid.style.gridTemplateColumns = 'repeat(auto-fill,minmax(380px,1fr))';
+
+  grid.innerHTML = budgets.map(b => {
+    const planned = b._t === 'income' ? b.monthly_limit : effLimitOf(b);
+    const data    = months.map(m => {
+      const v = actualFor(b.category, m, b._t, b.consolidate_subs !== 0);
+      return v > 0 ? parseFloat(v.toFixed(2)) : 0;
+    });
+    const color   = b._t === 'income' ? '#43a047' : '#3b82f6';
+    const id = `budget-bar-${b._t}-${b.id}`;
+    return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:16px">
+      <div style="font-size:12px;font-weight:700;margin-bottom:10px">${b._t==='income'?'📈':'📉'} ${esc(b.category)} — meta: ${fmtBRL(planned)}/mês</div>
+      <div style="position:relative;height:180px">
+        <canvas id="${id}"></canvas>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Cria os gráficos de barra num setTimeout pra garantir que os canvases
+  // já estejam no DOM antes de inicializar o Chart.js.
+  setTimeout(() => {
+    budgets.forEach(b => {
+      const planned = b._t === 'income' ? b.monthly_limit : effLimitOf(b);
+      const data    = months.map(m => {
+        const v = actualFor(b.category, m, b._t, b.consolidate_subs !== 0);
+        return v > 0 ? parseFloat(v.toFixed(2)) : 0;
+      });
+      const barColor  = b._t === 'income' ? '#43a047' : '#3b82f6';
+      const goalColor = '#ef5350';
+      const id     = `budget-bar-${b._t}-${b.id}`;
+      const canvas = G(id);
+      if (!canvas || typeof Chart === 'undefined') return;
+      _budgetBarCharts[id] = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [
+            { label: 'Realizado', data, backgroundColor: barColor + 'b3', borderColor: barColor, borderWidth: 1, borderRadius: 5, maxBarThickness: 32 },
+            { label: 'Meta', data: months.map(() => planned), type: 'line', borderColor: goalColor, borderDash: [6,4], borderWidth: 2, pointRadius: 0, fill: false },
+          ],
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: false, external: context => dashTooltip(context, {
+              getTitle: dp => labels[dp[0].dataIndex],
+              getRows:  dp => dp.map(d => ({ color: d.dataset.borderColor, label: d.dataset.label, value: fmtBRL(d.parsed.y) })),
+            })},
+          },
+          scales: {
+            x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+            y: { grid: { color: 'rgba(0,0,0,.05)' }, ticks: { font: { size: 10 }, callback: v => v >= 1000 ? 'R$'+(v/1000).toFixed(0)+'k' : 'R$'+v } },
+          },
+          animation: { duration: 500 },
+        },
+      });
+    });
+  }, 0);
 }
 
 function openBudgetModal(id, prefillCat) {
   G('budget-edit-id').value = id || '';
   G('budget-alert').value = 80;
   setupCurrencyInput(G('budget-limit'));
+  G('budget-cat').oninput = () => { budgetUpdateAvg12Hint(); budgetUpdateConsolidateVisibility(); };
 
   if (id) {
     const b = _budgets.find(x => x.id === id);
     if (b) {
-      G('budget-modal-title').textContent = 'Editar meta';
+      G('budget-modal-title').textContent = 'Editar orçamento';
+      const typeInp = document.querySelector(`input[name="budget-type"][value="${b.type || 'expense'}"]`);
+      if (typeInp) typeInp.checked = true;
       G('budget-cat').value   = b.category;
       G('budget-limit').setValue?.(b.monthly_limit);
       G('budget-alert').value = b.alert_pct || 80;
       if (G('budget-rollover')) G('budget-rollover').checked = !!b.rollover;
       if (G('budget-rollover-months')) G('budget-rollover-months').value = b.rollover_months || 3;
+      if (G('budget-consolidate-subs')) G('budget-consolidate-subs').checked = b.consolidate_subs !== 0;
     }
   } else {
-    G('budget-modal-title').textContent = 'Nova meta de orçamento';
+    G('budget-modal-title').textContent = 'Novo orçamento';
+    G('budget-type-expense').checked = true;
     G('budget-cat').value = prefillCat || '';
     G('budget-limit').setValue?.(null);
     if (G('budget-rollover')) G('budget-rollover').checked = false;
     if (G('budget-rollover-months')) G('budget-rollover-months').value = 3;
+    if (G('budget-consolidate-subs')) G('budget-consolidate-subs').checked = true;
   }
+  budgetOnTypeChange();
   budgetRolloverToggle();
+  budgetUpdateAvg12Hint();
+  budgetUpdateConsolidateVisibility();
   openModal('modal-budget');
   setTimeout(() => {
     if (!G('budget-cat').value) G('budget-cat').focus();
     else G('budget-limit').focus();
   }, 80);
+}
+
+// Mostra, abaixo do campo de valor, a média dos últimos 12 meses
+// realizados pra essa categoria (e subcategorias) — pra ajudar a decidir
+// quanto planejar. Reage tanto à digitação da categoria quanto à troca
+// entre Receita/Despesa (que olha pro lado oposto do mesmo histórico).
+// Mostra a opção de "consolidar subcategorias" só quando a categoria
+// digitada for uma categoria-MÃE (sem ":") — uma subcategoria já é o nível
+// mais específico, não tem nada para consolidar.
+function budgetUpdateConsolidateVisibility() {
+  const field = G('budget-consolidate-field');
+  if (!field) return;
+  const category = G('budget-cat').value.trim();
+  field.style.display = (category && !category.includes(':')) ? '' : 'none';
+}
+
+async function budgetUpdateAvg12Hint() {
+  const hintEl = G('budget-avg12-hint');
+  if (!hintEl) return;
+  const category = G('budget-cat').value.trim();
+  if (!category) { hintEl.textContent = ''; return; }
+  const type = G('budget-type-income')?.checked ? 'income' : 'expense';
+  try {
+    const catRows = await ff.evolucaoByCat({ excludedCats: [] }).catch(() => []);
+    const curMonthStr = todayStr().slice(0,7);
+    const months = [];
+    { let d = new Date(curMonthStr + '-02');
+      for (let i=0;i<12;i++) { d.setMonth(d.getMonth()-1); months.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`); }
+    }
+    const byMonth = {};
+    catRows.forEach(r => { if (months.includes(r.month)) { (byMonth[r.month] = byMonth[r.month]||[]).push(r); } });
+    const monthTotals = months.map(m => (byMonth[m]||[])
+      .filter(r => r.category === category || r.category.startsWith(category + ':'))
+      .reduce((s,r) => s + (type === 'income' ? (r.income||0) : (r.expenses||0)), 0));
+    const withData = monthTotals.filter(v => v > 0);
+    if (!withData.length) { hintEl.innerHTML = `<span style="color:var(--text3)">Sem histórico para "${esc(category)}" nos últimos 12 meses</span>`; return; }
+    const avg = withData.reduce((a,b)=>a+b,0) / withData.length;
+    hintEl.innerHTML = `📊 Média dos últimos 12 meses: <a href="#" onclick="event.preventDefault();G('budget-limit').setValue(${avg.toFixed(2)})" style="font-weight:700;color:#2e7d32;text-decoration:none">${fmtBRL(avg)}</a> <span style="color:var(--text3)">(clique para usar)</span>`;
+  } catch(e) { hintEl.textContent = ''; }
+}
+
+// Receita não tem sentido de "alerta de %"/"rollover" (conceitos pensados
+// pra limite de gasto) — esconde esses campos quando o tipo é receita.
+function budgetOnTypeChange() {
+  const isIncome = G('budget-type-income')?.checked;
+  if (G('budget-limit-label')) G('budget-limit-label').textContent = isIncome ? 'Valor previsto por mês (R$)' : 'Valor planejado por mês (R$)';
+  if (G('budget-alert-field'))    G('budget-alert-field').style.display    = isIncome ? 'none' : '';
+  if (G('budget-rollover-field')) G('budget-rollover-field').style.display = isIncome ? 'none' : '';
+  if (isIncome && G('budget-rollover-opts')) G('budget-rollover-opts').style.display = 'none';
+  budgetUpdateAvg12Hint();
 }
 
 function budgetRolloverToggle() {
@@ -12633,28 +13532,30 @@ function budgetRolloverToggle() {
 
 async function saveBudget() {
   const id       = parseInt(G('budget-edit-id').value) || null;
+  const type     = G('budget-type-income')?.checked ? 'income' : 'expense';
   const category = G('budget-cat').value.trim();
   const limit    = G('budget-limit').rawValue ? G('budget-limit').rawValue()
                  : parseFloat(G('budget-limit').value) || 0;
   const alertPct = parseInt(G('budget-alert').value) || 80;
 
   if (!category) { toast('Informe a categoria'); return; }
-  if (!limit || limit <= 0) { toast('Informe um limite maior que zero'); return; }
+  if (!limit || limit <= 0) { toast('Informe um valor maior que zero'); return; }
 
-  const rollover = G('budget-rollover')?.checked || false;
+  const rollover = type === 'expense' && (G('budget-rollover')?.checked || false);
   const rollover_months = parseInt(G('budget-rollover-months')?.value) || 3;
-  await ff.budgetSave({ id, category, monthly_limit: limit, alert_pct: alertPct, rollover, rollover_months });
+  const consolidate_subs = category.includes(':') ? true : (G('budget-consolidate-subs')?.checked ?? true);
+  await ff.budgetSave({ id, category, monthly_limit: limit, alert_pct: alertPct, rollover, rollover_months, type, consolidate_subs });
   closeModal('modal-budget');
-  toast(`✅ Meta "${category}" salva`);
+  toast(`✅ "${category}" salva`);
   await refreshBudget();
 }
 
 async function deleteBudget(id) {
   const b = _budgets.find(x => x.id === id);
   if (!b) return;
-  if (!await showConfirmDialog(`Excluir meta de "${b.category}"?`, '', 'Excluir', true)) return;
+  if (!await showConfirmDialog(`Excluir "${b.category}" do planejamento?`, '', 'Excluir', true)) return;
   await ff.budgetDelete({ id });
-  toast('Meta excluída');
+  toast('Excluída');
   await refreshBudget();
 }
 
@@ -13606,7 +14507,7 @@ async function exportReportCSV() {
   const from = G('rep-from').value;
   const to   = G('rep-to').value;
   const { accountIds, categories, excludeTransfers } = getRepFilters();
-  const flatRows = await ff.reportSummary({ fromDate:from, toDate:to, accountIds, excludeTransfers });
+  const flatRows = await ff.reportMonthly({ fromDate:from, toDate:to, accountIds, excludeTransfers, categories });
   const { parents } = buildTree(flatRows, categories);
 
   const periodLabel = (from && to)
@@ -13639,7 +14540,7 @@ async function exportReportExcel() {
   const from = G('rep-from').value;
   const to   = G('rep-to').value;
   const { accountIds, categories, excludeTransfers } = getRepFilters();
-  const flatRows = await ff.reportSummary({ fromDate:from, toDate:to, accountIds, excludeTransfers });
+  const flatRows = await ff.reportMonthly({ fromDate:from, toDate:to, accountIds, excludeTransfers, categories });
   const { parents, totalExp, totalInc } = buildTree(flatRows, categories);
 
   const wb = XLSX.utils.book_new();
@@ -13670,6 +14571,7 @@ async function exportReportPDF() {
   if (!el?.innerHTML?.trim()) { toast('Gere um relatório primeiro'); return; }
   const from = G('rep-from').value;
   const to   = G('rep-to').value;
+  const reportLabel = G('report-type')?.selectedOptions?.[0]?.textContent || 'Relatório';
   const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
   <title>Cruzeiro — Relatório</title>
   <style>
@@ -13682,12 +14584,13 @@ async function exportReportPDF() {
     .right{text-align:right}
     .green{color:#15803d}.red{color:#dc2626}
   </style></head><body>
-  <h1>Resumo das receitas e despesas</h1>
+  <h1>${esc(reportLabel)}</h1>
   <div class="sub">${from ? fmtDate(from)+' para '+fmtDate(to) : 'Período completo'}</div>
   ${el.innerHTML}
   </body></html>`;
-  const saved = await ff.saveFile({ defaultPath:`relatorio_${from||'completo'}.html`, content: html });
-  if (saved) toast('Salvo como HTML — Ctrl+P no navegador para PDF');
+  const result = await ff.reportExportPdf({ html, suggestedName: `relatorio_${from||'completo'}.pdf` }).catch(e => ({ ok:false, error: e.message }));
+  if (result?.ok) toast('✅ PDF salvo');
+  else if (!result?.canceled) toast('❌ Erro ao exportar PDF: ' + (result?.error || ''));
 }
 
 // ══ EVOLUÇÃO ══
@@ -13964,19 +14867,61 @@ function buildAllowedCats(config) {
 }
 
 // ── Summary from byCategory ──
+// Mesmo formato de saída de computeSummaryFromByCat ({mês: {income,
+// expenses}}), mas SEM depender de _ev.catConfig — usa groupAndClassifyByParent
+// diretamente (a mesma metodologia neutra já usada no Resumo e na
+// Comparação mensal). computeSummaryFromByCat descarta silenciosamente
+// qualquer categoria que não esteja explicitamente listada em
+// _ev.catConfig assim que esse config não está vazio — o que faz sentido
+// pra exibição customizada da própria aba Resumo, mas produz totais
+// errados (às vezes muito inflados, às vezes zerados) em qualquer lugar
+// que precise do total de verdade, independente dessa configuração
+// específica — como os gráficos com média móvel de 12 meses (Visão Geral
+// e Evolução) e o valor compartilhado que a Aposentadoria/Metas usam.
+function computeNeutralSummaryFromByCat(months, byCatFull) {
+  const flatRows = [];
+  months.forEach(month => {
+    const mo = byCatFull[month] || {};
+    Object.entries(mo).forEach(([category, d]) => {
+      flatRows.push({ month, category, income: d.income||0, expenses: d.expenses||0 });
+    });
+  });
+  const grouped = groupAndClassifyByParent(flatRows);
+  const summary = {};
+  months.forEach(m => { summary[m] = { income: 0, expenses: 0 }; });
+  grouped.forEach(g => {
+    if (!summary[g.month]) summary[g.month] = { income: 0, expenses: 0 };
+    summary[g.month].income   += g.income;
+    summary[g.month].expenses += g.expenses;
+  });
+  return summary;
+}
+
 function computeSummaryFromByCat(months, byCatFull) {
   const modeOf = {};
   _ev.catConfig.forEach(({cat,mode}) => modeOf[cat] = mode);
   const summary = {};
   months.forEach(m => {
-    let inc = 0, exp = 0;
     const mo = byCatFull[m] || {};
+    // Agrupa por categoria-mãe (somando bruto antes de classificar) — a
+    // mesma metodologia "redutora de despesa" usada no Resumo e na
+    // Comparação mensal: uma subcategoria positiva dentro de uma
+    // categoria-mãe negativa reduz a despesa da mãe, em vez de contar
+    // como receita separada. A exclusão (manual ou por catConfig) ainda
+    // se aplica por subcategoria, ANTES do agrupamento.
+    const byParent = {};
     Object.entries(mo).forEach(([cat,d]) => {
       if (modeOf[cat] === 'excluded') return;
       if (_ev.catConfig.length && modeOf[cat] === undefined) return;
-      const net = (d.income||0)-(d.expenses||0);
-      if (net > 0) inc += net;
-      else         exp += Math.abs(net);
+      const parent = cat.split(':')[0];
+      if (!byParent[parent]) byParent[parent] = { income: 0, expenses: 0 };
+      byParent[parent].income   += d.income||0;
+      byParent[parent].expenses += d.expenses||0;
+    });
+    let inc = 0, exp = 0;
+    Object.values(byParent).forEach(d => {
+      const cls = netClassify(d.income, d.expenses);
+      inc += cls.income; exp += cls.expenses;
     });
     summary[m] = { income: inc, expenses: exp };
   });
@@ -14070,6 +15015,27 @@ async function refreshEvolucao() {
   G('ev-chart-view').style.display  = display==='charts' ? '' : 'none';
 
   const summary = computeSummaryFromByCat(months, byCatFull);
+
+  // Mudança CIRÚRGICA: guarda exatamente os valores que a TABELA (Resumo
+  // mensal) usa, indexados por mês — pra os gráficos (desta aba e o da
+  // Visão Geral) lerem DIRETO daqui, em vez de recalcular por conta
+  // própria a partir de uma fonte de dados potencialmente diferente.
+  // Usa TODOS os meses disponíveis (não só o ano filtrado na tela), pra
+  // servir qualquer janela que um gráfico precise (ex.: os últimos 12
+  // meses da Visão Geral podem cruzar a virada de ano em relação ao que
+  // está selecionado aqui na Evolução).
+  {
+    const allSummaryForSnap = computeSummaryFromByCat(allMonths, byCatFull);
+    const tInc = allMonths.map(m=>corr(allSummaryForSnap[m]?.income||0,m));
+    const tExp = allMonths.map(m=>corr(allSummaryForSnap[m]?.expenses||0,m));
+    const tLuc = tInc.map((v,i)=>v-tExp[i]);
+    const tdI  = allMonths.map((_,i)=>useMA?movAvg12(tInc,i):tInc[i]);
+    const tdE  = allMonths.map((_,i)=>useMA?movAvg12(tExp,i):tExp[i]);
+    const tdL  = allMonths.map((_,i)=>useMA?movAvg12(tLuc,i):tLuc[i]);
+    const byMonth = {};
+    allMonths.forEach((m,i) => { byMonth[m] = { inc:tInc[i], exp:tExp[i], luc:tLuc[i], dI:tdI[i], dE:tdE[i], dL:tdL[i] }; });
+    window._evTableSnapshot = { byMonth, useMA, useIPCA };
+  }
 
   // Store IPCA-corrected MA12 lucro globally for Aposentadoria tab
   // Uses ALL months (not filtered by year selector)
@@ -14378,12 +15344,18 @@ function evMakeChart(canvas, type, labels, series, opts={}) {
 }
 
 function renderEvSummaryCharts(months, summary, corr, useMA) {
-  const inc = months.map(m=>corr(summary[m]?.income||0,m));
-  const exp = months.map(m=>corr(summary[m]?.expenses||0,m));
-  const luc = inc.map((v,i)=>v-exp[i]);
-  const dI=months.map((_,i)=>useMA?movAvg12(inc,i):inc[i]);
-  const dE=months.map((_,i)=>useMA?movAvg12(exp,i):exp[i]);
-  const dL=months.map((_,i)=>useMA?movAvg12(luc,i):luc[i]);
+  // Mudança CIRÚRGICA: usa exatamente os mesmos valores que a tabela
+  // "Resumo mensal" está mostrando (via window._evTableSnapshot, indexado
+  // por mês), em vez de recalcular — garante que gráfico e tabela nunca
+  // mais divirjam.
+  const snap = window._evTableSnapshot;
+  const useSnap = snap && snap.useMA === useMA && months.every(m => snap.byMonth[m] !== undefined);
+  const inc = useSnap ? months.map(m=>snap.byMonth[m].inc) : months.map(m=>corr(summary[m]?.income||0,m));
+  const exp = useSnap ? months.map(m=>snap.byMonth[m].exp) : months.map(m=>corr(summary[m]?.expenses||0,m));
+  const luc = useSnap ? months.map(m=>snap.byMonth[m].luc) : inc.map((v,i)=>v-exp[i]);
+  const dI  = useSnap ? months.map(m=>snap.byMonth[m].dI)  : months.map((_,i)=>useMA?movAvg12(inc,i):inc[i]);
+  const dE  = useSnap ? months.map(m=>snap.byMonth[m].dE)  : months.map((_,i)=>useMA?movAvg12(exp,i):exp[i]);
+  const dL  = useSnap ? months.map(m=>snap.byMonth[m].dL)  : months.map((_,i)=>useMA?movAvg12(luc,i):luc[i]);
   const yT={};
   months.forEach((m,i)=>{const y=m.slice(0,4);if(!yT[y])yT[y]={inc:0,exp:0,luc:0};yT[y].inc+=inc[i];yT[y].exp+=exp[i];yT[y].luc+=luc[i];});
   const years=[...new Set(months.map(m=>m.slice(0,4)))].sort();
@@ -14784,34 +15756,49 @@ function patMakeChart(canvasId, datasets, labels, yLabel) {
     const [y, mo] = m.split('-');
     return ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][parseInt(mo)-1] + '/' + y.slice(2);
   });
-  return new Chart(canvas.getContext('2d'), {
+  const ctx2d = canvas.getContext('2d');
+  // Acrescenta estilo de ponto-ao-passar-o-mouse, suaviza a curva, e troca
+  // o preenchimento sólido por um gradiente (a partir da própria cor da
+  // linha) — mesmo tratamento visual usado nos gráficos de
+  // Aposentadoria/Visão Geral — sem precisar alterar cada definição de
+  // dataset individualmente em cada chamada.
+  const styledDatasets = datasets.map(d => ({
+    tension: 0.35,
+    pointHoverRadius: 6,
+    pointHoverBackgroundColor: d.borderColor,
+    pointHoverBorderColor: '#fff',
+    pointHoverBorderWidth: 2,
+    ...d,
+    backgroundColor: d.fill ? evChartGradient(ctx2d, d.borderColor, canvas.height || 220) : d.backgroundColor,
+  }));
+  return new Chart(ctx2d, {
     type: 'line',
-    data: { labels: shortLabels, datasets },
+    data: { labels: shortLabels, datasets: styledDatasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: ctx => {
-              const v = ctx.parsed.y;
-              if (v == null) return null;
-              return ` ${ctx.dataset.label}: ${yLabel === 'BRL' ? fmtBRL(v) : v.toFixed(1) + '%'}`;
-            }
-          }
-        }
+        tooltip: { enabled: false, external: (context) => dashTooltip(context, {
+          getTitle: (dp) => shortLabels[dp[0].dataIndex],
+          getRows:  (dp) => dp.filter(d=>d.parsed.y!=null).map(d => ({
+            color: d.dataset.borderColor, label: d.dataset.label,
+            value: yLabel === 'BRL' ? fmtBRL(d.parsed.y) : d.parsed.y.toFixed(1) + '%',
+          })),
+        }) },
       },
       scales: {
         x: { ticks: { font: { size: 10 }, maxTicksLimit: 18 }, grid: { display: false } },
         y: {
+          grid: { color: 'rgba(0,0,0,.05)' },
           ticks: {
             font: { size: 10 },
             callback: v => yLabel === 'BRL' ? 'R$' + (v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(0)+'k' : v.toFixed(0)) : v.toFixed(1)+'%'
           }
         }
-      }
+      },
+      animation: { duration: 600 },
     }
   });
 }
@@ -14904,47 +15891,8 @@ function refreshPatrimonioChart() {
     };
   }
 
-  // ── 1. Total patrimônio — only start when bens e direitos OR investimentos have data ──
-  const firstRealM = months.find(m => (imobByMonth[m]||0) > 0 || (invByMonth[m]||0) > 0);
-  const totalRaw = months.map(m => {
-    if (!firstRealM || m < firstRealM) return null;
-    const v = (imobByMonth[m]||0) + (accByMonth[m]||0) + (invByMonth[m]||0);
-    return v > 0 ? v : null;
-  });
-  const trimTotal = trimLeading(months, totalRaw);
-  const totalDs = [{
-    label: 'Total Patrimônio',
-    data: trimTotal.series[0],
-    borderColor: 'var(--accent)',
-    backgroundColor: 'rgba(99,102,241,.08)',
-    borderWidth: 2.5,
-    pointRadius: 2,
-    tension: 0.3,
-    fill: true,
-    spanGaps: false,
-  }];
-  _patCharts.total = patMakeChart('pat-chart-total', totalDs, trimTotal.months, 'BRL');
-
-  // ── 2. Bens e Direitos — only months with data ──
-  const imobRaw = months.map(m => imobByMonth[m] > 0 ? imobByMonth[m] : null);
-  const trimImob = trimLeading(months, imobRaw);
-  const imobDs = [{
-    label: 'Bens e Direitos',
-    data: trimImob.series[0],
-    borderColor: '#f59e0b',
-    backgroundColor: 'rgba(245,158,11,.08)',
-    borderWidth: 2.5,
-    pointRadius: 2,
-    tension: 0.3,
-    fill: true,
-    spanGaps: false,
-  }];
-  _patCharts.imob = patMakeChart('pat-chart-imob', imobDs, trimImob.months, 'BRL');
-
-  // ── 2b. Dívidas Pessoais — sum of outstanding balances across all personal debts ──
-  // Hidden entirely if there's no debt data (all months zero/empty).
-  // This chart alone extends into future months where installments are projected,
-  // so the user can see the projected payoff trajectory.
+  // ── Personal debts by month (precisa vir antes do total, pra entrar no
+  // cálculo do patrimônio líquido — saldo já vem negativo) ──
   const debtMonthSet = new Set(months);
   Object.values(_pat.debtInstallments || {}).forEach(rows => {
     (rows||[]).forEach(r => { if (r.is_projection === 1) debtMonthSet.add(r.month.slice(0,7)); });
@@ -14962,6 +15910,69 @@ function refreshPatrimonioChart() {
     });
     debtByMonth[m] = t;
   });
+
+  // ── 1. Total patrimônio — only start when bens e direitos OR investimentos have data ──
+  const firstRealM = months.find(m => (imobByMonth[m]||0) > 0 || (invByMonth[m]||0) > 0);
+  const totalRaw = months.map(m => {
+    if (!firstRealM || m < firstRealM) return null;
+    // Líquido de dívidas pessoais (inclui cartões de crédito, já que o
+    // saldo de fim de mês deles entra automaticamente aqui) — consistente
+    // com o total oficial usado em Aposentadoria/Metas/Orçamento.
+    const v = (imobByMonth[m]||0) + (accByMonth[m]||0) + (invByMonth[m]||0) - (debtByMonth[m]||0);
+    return v !== 0 ? v : null;
+  });
+  const trimTotal = trimLeading(months, totalRaw);
+  const totalDs = [{
+    label: 'Total Patrimônio',
+    data: trimTotal.series[0],
+    borderColor: '#43a047',
+    backgroundColor: 'rgba(99,102,241,.08)',
+    borderWidth: 2.5,
+    pointRadius: 0,
+    tension: 0.3,
+    fill: true,
+    spanGaps: false,
+  }];
+  _patCharts.total = patMakeChart('pat-chart-total', totalDs, trimTotal.months, 'BRL');
+
+  // ── % do patrimônio-alvo (meta de Aposentadoria) ──
+  // Mostra, ao lado do título, quanto o valor mais recente do total
+  // representa da meta de patrimônio definida na aba Aposentadoria.
+  (async () => {
+    const badge = G('pat-total-vs-goal');
+    if (!badge) return;
+    try {
+      const goals = await ff.goalList().catch(() => []);
+      const ret = goals.find(g => g.type === 'retirement');
+      const lastVal = [...trimTotal.series[0]].reverse().find(v => v != null);
+      if (!ret || !ret.target_amount || lastVal == null) { badge.textContent = ''; return; }
+      const pct = (lastVal / ret.target_amount) * 100;
+      const color = pct >= 100 ? '#43a047' : pct >= 50 ? '#f0a93a' : '#ef5350';
+      badge.innerHTML = `<span style="color:${color}">${pct.toFixed(1)}%</span> <span style="color:var(--text3);font-weight:400">da meta de patrimônio (${fmtBRL(ret.target_amount)})</span>`;
+    } catch(e) { badge.textContent = ''; }
+  })();
+
+  // ── 2. Bens e Direitos — only months with data ──
+  const imobRaw = months.map(m => imobByMonth[m] > 0 ? imobByMonth[m] : null);
+  const trimImob = trimLeading(months, imobRaw);
+  const imobDs = [{
+    label: 'Bens e Direitos',
+    data: trimImob.series[0],
+    borderColor: '#f59e0b',
+    backgroundColor: 'rgba(245,158,11,.08)',
+    borderWidth: 2.5,
+    pointRadius: 0,
+    tension: 0.3,
+    fill: true,
+    spanGaps: false,
+  }];
+  _patCharts.imob = patMakeChart('pat-chart-imob', imobDs, trimImob.months, 'BRL');
+
+  // ── 2b. Dívidas Pessoais — sum of outstanding balances across all personal debts ──
+  // Hidden entirely if there's no debt data (all months zero/empty).
+  // This chart alone extends into future months where installments are projected,
+  // so the user can see the projected payoff trajectory. (debtMonthSet/debtMonths/
+  // debtByMonth já foram computados mais acima, antes do gráfico de Total.)
   const hasAnyDebt = debtMonths.some(m => (debtByMonth[m]||0) > 0);
   const debtCard = G('pat-chart-debt-card');
   if (hasAnyDebt) {
@@ -14971,10 +15982,10 @@ function refreshPatrimonioChart() {
     const debtDs = [{
       label: 'Dívidas Pessoais',
       data: trimDebt.series[0],
-      borderColor: '#dc2626',
-      backgroundColor: 'rgba(220,38,38,.08)',
+      borderColor: '#ef5350',
+      backgroundColor: 'rgba(239,83,80,.08)',
       borderWidth: 2.5,
-      pointRadius: 2,
+      pointRadius: 0,
       tension: 0.3,
       fill: true,
       spanGaps: false,
@@ -15362,8 +16373,8 @@ function patRenderInvChart() {
   });
 
   const invDs = [
-    { label: 'Investimentos', data: invRetSeries, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)', borderWidth: 2.5, pointRadius: 2, tension: 0.3, fill: false },
-    { label: 'CDI',           data: cdiSeries,    borderColor: '#16a34a', borderWidth: 2, borderDash: [5,4], pointRadius: 0, tension: 0.1, fill: false },
+    { label: 'Investimentos', data: invRetSeries, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.08)', borderWidth: 2.5, pointRadius: 0, tension: 0.3, fill: false },
+    { label: 'CDI',           data: cdiSeries,    borderColor: '#43a047', borderWidth: 2, borderDash: [5,4], pointRadius: 0, tension: 0.1, fill: false },
     { label: 'IBOVESPA',      data: ibovSeries,   borderColor: '#f59e0b', borderWidth: 2, borderDash: [3,3], pointRadius: 0, tension: 0.1, fill: false },
   ];
   _patCharts.inv = patMakeChart('pat-chart-inv', invDs, chartMonths, 'PCT');
@@ -15504,10 +16515,10 @@ function patRenderAssetChart() {
 
   const bmkName = a.benchmark === 'ibov' ? 'IBOVESPA' : 'CDI';
   const bmkSeries = a.benchmark === 'ibov' ? ibovSeries : cdiSeries;
-  const bmkColor  = a.benchmark === 'ibov' ? '#f59e0b' : '#16a34a';
+  const bmkColor  = a.benchmark === 'ibov' ? '#f59e0b' : '#43a047';
 
   const datasets = [
-    { label: a.name, data: assetSeries, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)', borderWidth: 2.5, pointRadius: 2, tension: 0.3, fill: false },
+    { label: a.name, data: assetSeries, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.08)', borderWidth: 2.5, pointRadius: 0, tension: 0.3, fill: false },
     { label: bmkName, data: bmkSeries, borderColor: bmkColor, borderWidth: 2, borderDash: [5,4], pointRadius: 0, tension: 0.1, fill: false },
   ];
   if (a.benchmark !== 'ibov') {
@@ -15830,6 +16841,10 @@ async function refreshPatrimonio() {
       _pat.financingContracts[a.id] = await ff.patFinancingContractsList({ assetId: a.id }).catch(() => []);
     }
   }
+  // Sincroniza cartões de crédito como dívidas pessoais ANTES de carregar
+  // a lista — garante que o saldo de fim de mês de cada cartão já esteja
+  // refletido nas dívidas (e, por consequência, no patrimônio total).
+  await ff.debtSyncCreditCards().catch(e => console.error('debtSyncCreditCards:', e));
   // Load personal debts and their installment schedules
   _pat.debts = await ff.debtList().catch(() => []);
   _pat.debtInstallments = {};
@@ -16278,25 +17293,13 @@ function refreshPatrimonioTable() {
   });
 
   // ── Dívidas Pessoais ──
-  const visibleDebts = (_pat.debts || []).filter(d => showHidden || !d.hidden);
-  const debtTotalByMonth = {};
-  months.forEach(m => { debtTotalByMonth[m] = 0; });
-
-  let debtRows = '';
-  visibleDebts.forEach((d, ri) => {
-    const bg = stripe(ri);
+  // Calcula o saldo devedor por mês de UMA dívida — usado tanto pro total
+  // (que soma TODAS as dívidas, ocultas ou não) quanto pra exibição das
+  // linhas (que respeita "Mostrar ocultos").
+  function computeDebtBalByMonth(d) {
     const rows = (_pat.debtInstallments?.[d.id] || []).sort((x,y) => x.month.localeCompare(y.month));
-
-    // saldo devedor por mês (balance_end da última parcela até o mês m)
-    const balByMonth  = {};
+    const balByMonth = {};
     const balProjByMonth = {};
-    const installByMonth = {};
-    const installProjByMonth = {};
-    rows.forEach(r => {
-      const m = r.month.slice(0,7);
-      installByMonth[m]     = r.installment;
-      installProjByMonth[m] = r.is_projection === 1;
-    });
     if (rows.length) {
       const firstMonth = rows[0].month.slice(0,7);
       months.forEach(m => {
@@ -16312,7 +17315,32 @@ function refreshPatrimonioTable() {
         }
       });
     }
+    return { balByMonth, balProjByMonth };
+  }
+
+  const visibleDebts = (_pat.debts || []).filter(d => showHidden || !d.hidden);
+  const debtTotalByMonth = {};
+  months.forEach(m => { debtTotalByMonth[m] = 0; });
+  // Soma TODAS as dívidas (inclusive ocultas, como cartões de crédito
+  // ocultos no sidebar) — o total de patrimônio precisa refletir a
+  // realidade financeira completa, independente do que está sendo
+  // exibido na tabela no momento.
+  (_pat.debts || []).forEach(d => {
+    const { balByMonth } = computeDebtBalByMonth(d);
     months.forEach(m => { if (balByMonth[m] != null) debtTotalByMonth[m] += balByMonth[m]; });
+  });
+
+  let debtRows = '';
+  visibleDebts.forEach((d, ri) => {
+    const bg = stripe(ri);
+    const installByMonth = {};
+    const installProjByMonth = {};
+    (_pat.debtInstallments?.[d.id] || []).forEach(r => {
+      const m = r.month.slice(0,7);
+      installByMonth[m]     = r.installment;
+      installProjByMonth[m] = r.is_projection === 1;
+    });
+    const { balByMonth, balProjByMonth } = computeDebtBalByMonth(d);
 
     const bCells = months.map(m => {
       const v = balByMonth[m];
@@ -16341,10 +17369,11 @@ function refreshPatrimonioTable() {
       ondragover="patDragOver(event,${d.id},'debt')"
       ondragleave="patDragLeave(event)"
       ondrop="patDrop(event,${d.id},'debt')">
-      <td style="${STICKY};left:0;min-width:160px;max-width:160px;font-size:12px;font-weight:500;padding:6px 12px;overflow:hidden;background:${bg}" title="${esc(d.name)}">
+      <td style="${STICKY};left:0;min-width:160px;max-width:160px;font-size:12px;font-weight:500;padding:6px 12px;overflow:hidden;background:${bg}" title="${esc(d.name)}${d.linked_account_id?' (sincronizado automaticamente com o cartão de crédito)':''}">
         <div style="display:flex;align-items:center;gap:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
           <span style="color:var(--text3);font-size:13px">⠿</span>
           <span>${esc(d.name)}</span>
+          ${d.linked_account_id?`<span style="font-size:9px;color:#2e7d32;background:#f1f8e9;border-radius:4px;padding:1px 4px" title="Saldo sincronizado automaticamente com o cartão de crédito">💳 auto</span>`:''}
           ${d.hidden?`<span style="font-size:9px;color:var(--text3)">oculto</span>`:''}
         </div>
       </td>
@@ -16584,8 +17613,17 @@ function refreshPatrimonioTable() {
   </tr></tbody>`;
 
 
+  const STICKY_W_PAT = [200, 80, 90, 90]; // Ativo, Código, Cat., Tipo/Tend.
+  const TRAIL_W_PAT  = 60;
+  const totalWidthPat = STICKY_W_PAT.reduce((a,b)=>a+b,0) + months.length * COL_W + TRAIL_W_PAT;
+  let colgroupPat = '<colgroup>' + STICKY_W_PAT.map(w => `<col style="width:${w}px">`).join('');
+  months.forEach(() => { colgroupPat += `<col style="width:${COL_W}px">`; });
+  colgroupPat += `<col style="width:${TRAIL_W_PAT}px">`;
+  colgroupPat += '</colgroup>';
+
   container.innerHTML = `
-    <table style="border-collapse:collapse;font-size:13px;width:max-content;min-width:100%">
+    <table style="border-collapse:collapse;font-size:13px;table-layout:fixed;width:${totalWidthPat}px">
+      ${colgroupPat}
       <!-- HEADER + IPCA -->
       <thead style="position:sticky;top:0;z-index:10">
         <tr style="background:var(--bg3)">
@@ -16660,11 +17698,60 @@ function refreshPatrimonioTable() {
       <!-- 7. TOTAL PATRIMÔNIO -->
       ${grandTotalRow2}
     </table>`;
-  // Scroll to rightmost (latest month)
+  // Scroll to rightmost (latest month) by default
   setTimeout(() => {
     const sc = G('pat-scroll-container');
     if (sc) sc.scrollLeft = sc.scrollWidth;
   }, 80);
+
+  // "Snap" do scroll: ao parar de rolar manualmente, ajusta pro início do
+  // mês mais próximo — mesma "mágica" implementada no Orçamento. Aqui as
+  // colunas fixas somam 460px (Ativo+Código+Cat.+Tipo/Tend.) e cada mês
+  // tem uma única coluna de COL_W=130px (sem sub-colunas de %).
+  {
+    const sc = G('pat-scroll-container');
+    if (sc && !sc._snapBound) {
+      sc._snapBound = true;
+      const STICKY_TOTAL_PAT = 460;
+      let isSnapping = false; // true enquanto o PRÓPRIO snap está rolando suavemente
+      const doSnap = () => {
+        if (isSnapping) return; // ignora os eventos de scroll gerados pelo nosso próprio scrollTo
+        const maxLeft = sc.scrollWidth - sc.clientWidth;
+        // Perto do fim, deixa "grudar" no fim de verdade (não força
+        // recuar pro último mês inteiro se já está vendo o total).
+        if (maxLeft - sc.scrollLeft < COL_W / 2) return;
+        const rel = sc.scrollLeft - STICKY_TOTAL_PAT;
+        const nearestRel = Math.max(0, Math.round(rel / COL_W) * COL_W);
+        const nearest = Math.min(maxLeft, STICKY_TOTAL_PAT + nearestRel);
+        if (Math.abs(sc.scrollLeft - nearest) > 1) {
+          isSnapping = true;
+          sc.scrollTo({ left: nearest, behavior: 'smooth' });
+          // Solta a trava depois que a rolagem suave naturalmente
+          // termina — 'scrollend' é o sinal mais confiável (dispara uma
+          // única vez, programático ou não); como fallback (motores sem
+          // suporte), libera depois de um tempo fixo.
+          if ('onscrollend' in window) {
+            sc.addEventListener('scrollend', () => { isSnapping = false; }, { once: true });
+          } else {
+            setTimeout(() => { isSnapping = false; }, 500);
+          }
+        }
+      };
+      if ('onscrollend' in window) {
+        // Suporte nativo: roda o snap só quando o navegador confirma que
+        // a rolagem de fato parou — sem debounce manual, sem risco de
+        // interromper a própria animação no meio do caminho.
+        sc.addEventListener('scrollend', doSnap);
+      } else {
+        let snapTimer = null;
+        sc.addEventListener('scroll', () => {
+          if (isSnapping) return;
+          clearTimeout(snapTimer);
+          snapTimer = setTimeout(doSnap, 130);
+        });
+      }
+    }
+  }
   } catch(e) {
     console.error('[refreshPatrimonioTable]', e);
     const container = G('pat-all-tables');
@@ -19104,6 +20191,19 @@ function evalFormula(str) {
 }
 
 // Build a row in the history table
+// Mesmo cabeçalho estático definido no index.html — precisa ser
+// reconstruído aqui porque inicializar um ativo NOVO substitui o
+// innerHTML inteiro de #inv-history-table (perdendo o cabeçalho, que só é
+// preservado no caminho de edição via renderInvHistoryTable).
+function invHistoryHeaderHtml() {
+  return `<div style="display:grid;grid-template-columns:100px 1fr 1fr 1fr 32px;font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:6px 8px;border-bottom:1px solid var(--border);background:var(--bg4);gap:2px;position:sticky;top:0;z-index:1">
+    <span>Mês</span>
+    <span style="text-align:right">Valor do ativo (R$)</span>
+    <span style="text-align:right;color:var(--accent)">Aporte/Resgate</span>
+    <span style="text-align:right;color:var(--green)">Rendimento/Custo</span>
+    <span></span>
+  </div>`;
+}
 function invHistoryRowHtml(month, value, external, income, idx) {
   const valStr = value    != null ? value.toString()    : '';
   const extStr = external != null ? external.toString() : '';
@@ -19515,8 +20615,30 @@ async function openInvAssetModal(id) {
       renderInvHistoryTable(txs);
     }
   } else {
-    G('inv-history-table').innerHTML = invHistoryRowHtml(
-      `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`, null, null, null, 0
+    // Se vier de "Inserir dados manualmente" ou de "🆕 Ativo novo" numa
+    // movimentação não identificada, pré-preenche o primeiro mês com o que
+    // já se sabe — evita repetir a posição/movimentação no modal completo,
+    // e evita salvar a mesma coisa duas vezes (aqui E depois de novo).
+    const pending = _pendingBrokerAssetLink;
+    let prefillMonth = null, prefillValue = null, prefillExt = null, prefillInc = null;
+    if (pending?.kind === 'manual') {
+      prefillMonth = pending.month;
+      prefillValue = pending.positionValue || null;
+      prefillExt = pending.movType === 'compra' ? -(pending.movValue||0) : pending.movType === 'venda' ? (pending.movValue||0) : null;
+      prefillInc = pending.movType === 'dividendo' ? (pending.movValue||0) : pending.movType === 'taxa' ? -(pending.movValue||0) : null;
+    } else if (pending?.kind === 'unresolved') {
+      const p = G('broker-preview')?._parsed;
+      const m = p?.unresolvedMovements?.[pending.movementIdx];
+      if (m) {
+        prefillMonth = (m.date || '').slice(0,7);
+        if (m.suggestedFlowType === 'external')   prefillExt = m.amount;
+        else if (m.suggestedFlowType === 'income') prefillInc = m.amount;
+        else prefillExt = m.amount; // sem classificação sugerida — trata como fluxo externo por padrão
+      }
+    }
+    G('inv-history-table').innerHTML = invHistoryHeaderHtml() + invHistoryRowHtml(
+      prefillMonth || `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`,
+      prefillValue, prefillExt, prefillInc, 0
     );
   }
   openModal('modal-inv-asset');
@@ -19669,9 +20791,59 @@ async function saveInvAsset() {
     // 6. Full reload from DB then render
     await refreshPatrimonio();
     toast(`✅ Investimento ${id ? 'atualizado' : 'criado'} (${savedRows} registros)`);
+
+    // Se este ativo foi criado a partir da importação de corretora (botão
+    // "🆕 Ativo novo" numa movimentação não identificada, ou "criar ativo
+    // manualmente"), conclui o vínculo automaticamente com o ativo
+    // recém-criado.
+    if (_pendingBrokerAssetLink && !id) {
+      const link = _pendingBrokerAssetLink;
+      _pendingBrokerAssetLink = null;
+      await completeBrokerAssetLink(assetId, name, link);
+    }
   } catch(e) {
     toast(`❌ Erro ao salvar: ${e.message}`);
     console.error('saveInvAsset error:', e);
+  }
+}
+
+// Conclui o vínculo pendente de uma movimentação de corretora com o ativo
+// de investimento recém-criado — salva a movimentação direto no banco (o
+// ativo já existe de fato, diferente do array p.assets da pré-visualização,
+// que é só um rascunho ainda não persistido). Usa o MESMO mapeamento
+// flow_type → tx_type do backend (broker:save-parsed), pra ficar
+// consistente com o que a importação normal gera.
+async function completeBrokerAssetLink(assetId, assetName, link) {
+  // A posição/movimentação já foi salva pelo fluxo normal do modal (estava
+  // pré-preenchida na tabela de histórico) — aqui só falta, no caso de uma
+  // movimentação que estava "não identificada", removê-la da lista e
+  // atualizar a pré-visualização.
+  if (link.kind === 'unresolved') {
+    const preview = G('broker-preview');
+    const p = preview?._parsed;
+    if (!p) return;
+    if (p.unresolvedMovements[link.movementIdx]) p.unresolvedMovements.splice(link.movementIdx, 1);
+    toast(`✅ Movimentação vinculada ao novo ativo "${assetName}"`);
+    renderBrokerPreview(p);
+  }
+}
+
+// Salva posição (atualizacao) e/ou movimentação direto num ativo de
+// investimento JÁ EXISTENTE, a partir do formulário "Inserir dados
+// manualmente" — quando o ativo é novo, os mesmos dados vão pelo modal
+// completo (pré-preenchidos) em vez de passar por aqui.
+async function applyManualEntryToAsset(assetId, month, posValue, movType, movValue, assetName) {
+  try {
+    if (posValue) {
+      await ff.invTxSave({ id:null, asset_id:assetId, month, tx_type:'atualizacao', qty:null, unit_value:null, total_value: Math.abs(posValue), notes: '__manual_entry__' });
+    }
+    if (movType && movValue) {
+      await ff.invTxSave({ id:null, asset_id:assetId, month, tx_type: movType, qty:null, unit_value:null, total_value: Math.abs(movValue), notes: '__manual_entry__' });
+    }
+    toast(assetName ? `✅ Dados adicionados ao ativo "${assetName}"` : '✅ Dados adicionados manualmente');
+  } catch(e) {
+    console.error('Erro ao inserir dados manualmente:', e);
+    toast('❌ Erro ao salvar — tente novamente');
   }
 }
 
@@ -20345,22 +21517,32 @@ let _aposView = 'table';
 let _aposChart1 = null, _aposChart2 = null;
 let _aposFocusData = null;
 
-function aposSaveConfig() {
-  // Salva o valor exibido no campo (texto formatado) — aposParseInput sabe interpretar
-  const cfg = {
-    goalType:   document.querySelector('input[name="apos-goal-type"]:checked')?.value || 'patrimonio',
-    goalValue:  G('apos-goal-value')?.value || '',
-    ageNow:     G('apos-age-now')?.value || '',
-    ageRet:     G('apos-age-ret')?.value || '',
-    patAtual:   G('apos-patrimonio-atual')?.value || '',
-    rateReal:   G('apos-rate-real')?.value || '',
-    rateInfl:   G('apos-rate-infl')?.value || '',
+async function aposSaveConfig() {
+  // Salva o valor exibido no campo (texto formatado) — aposParseInput sabe interpretar.
+  // Usa o mesmo arquivo de configurações já usado por Relatórios/Evolução
+  // (por usuário, em disco) em vez de localStorage — que não é separado
+  // por usuário e não tem a mesma garantia de persistência entre sessões.
+  const aposFields = {
+    apos_goalType:   document.querySelector('input[name="apos-goal-type"]:checked')?.value || 'patrimonio',
+    apos_goalValue:  G('apos-goal-value')?.value || '',
+    apos_ageNow:     G('apos-age-now')?.value || '',
+    apos_ageRet:     G('apos-age-ret')?.value || '',
+    apos_patAtual:   G('apos-patrimonio-atual')?.value || '',
+    apos_rateReal:   G('apos-rate-real')?.value || '',
+    apos_rateInfl:   G('apos-rate-infl')?.value || '',
   };
-  try { localStorage.setItem(APOS_STORAGE_KEY, JSON.stringify(cfg)); } catch(e) {}
+  try {
+    const cfg = await ff.overviewConfigGet().catch(() => null) || {};
+    await ff.overviewConfigSave({ ...cfg, ...aposFields });
+  } catch(e) { console.error('aposSaveConfig:', e); }
 }
 
-function aposResetConfig() {
-  try { localStorage.removeItem(APOS_STORAGE_KEY); } catch(e) {}
+async function aposResetConfig() {
+  try {
+    const cfg = await ff.overviewConfigGet().catch(() => null) || {};
+    ['apos_goalType','apos_goalValue','apos_ageNow','apos_ageRet','apos_patAtual','apos_rateReal','apos_rateInfl'].forEach(k => delete cfg[k]);
+    await ff.overviewConfigSave(cfg);
+  } catch(e) {}
   // Limpa todos os campos
   ['apos-goal-value','apos-patrimonio-atual','apos-age-now','apos-age-ret','apos-rate-real'].forEach(id => {
     const el = G(id); if (el) el.value = '';
@@ -20371,32 +21553,62 @@ function aposResetConfig() {
   if (G('apos-table-body')) G('apos-table-body').innerHTML = '';
 }
 
-function aposLoadConfig() {
+async function aposLoadConfig() {
   try {
-    const raw = localStorage.getItem(APOS_STORAGE_KEY);
-    if (!raw) return;
-    const cfg = JSON.parse(raw);
+    let cfg = await ff.overviewConfigGet().catch(() => null) || {};
 
-    // Sanity-check: se patAtual parseado for suspeito (< 100), descarta config corrompido
-    if (cfg.patAtual) {
-      const testPat = parseFloat(String(cfg.patAtual).replace(/\./g,'').replace(',','.'));
+    // Migração única: se ainda não há dados no novo formato (arquivo por
+    // usuário), mas existem dados do mecanismo antigo (localStorage, que
+    // não persistia de forma confiável), migra pra não perder o que já
+    // tinha sido digitado.
+    if (!cfg.apos_ageNow && !cfg.apos_patAtual) {
+      try {
+        const legacyRaw = localStorage.getItem(APOS_STORAGE_KEY);
+        if (legacyRaw) {
+          const legacy = JSON.parse(legacyRaw);
+          const migrated = {
+            apos_goalType:  legacy.goalType  || '',
+            apos_goalValue: legacy.goalValue || '',
+            apos_ageNow:    legacy.ageNow    || '',
+            apos_ageRet:    legacy.ageRet    || '',
+            apos_patAtual:  legacy.patAtual  || '',
+            apos_rateReal:  legacy.rateReal  || '',
+            apos_rateInfl:  legacy.rateInfl  || '',
+          };
+          cfg = { ...cfg, ...migrated };
+          await ff.overviewConfigSave(cfg).catch(() => {});
+          localStorage.removeItem(APOS_STORAGE_KEY);
+        }
+      } catch(e) { console.error('Migração apos config:', e); }
+    }
+
+    if (!cfg) return;
+
+    // Sanity-check: se patAtual parseado for suspeito (< 100), descarta SÓ
+    // esse campo (ele é sobrescrito por um valor ao vivo de qualquer jeito,
+    // via aposPullPatrimonio) — sem abortar a restauração dos outros
+    // campos (tipo de meta, valor da meta, idades, taxa), que é o que
+    // estava acontecendo antes e deixava a tela com dados desencontrados.
+    if (cfg.apos_patAtual) {
+      const testPat = parseFloat(String(cfg.apos_patAtual).replace(/\./g,'').replace(',','.'));
       if (!isNaN(testPat) && testPat < 100) {
-        console.warn('[Aposentadoria] Config corrompido detectado (patAtual=' + cfg.patAtual + '), descartando.');
-        localStorage.removeItem(APOS_STORAGE_KEY);
-        return;
+        console.warn('[Aposentadoria] patAtual suspeito (' + cfg.apos_patAtual + '), descartando só esse campo.');
+        delete cfg.apos_patAtual;
+        await ff.overviewConfigSave(cfg).catch(() => {});
       }
     }
 
-    if (cfg.goalType) {
-      const r = document.querySelector(`input[name="apos-goal-type"][value="${cfg.goalType}"]`);
+    if (cfg.apos_goalType) {
+      document.querySelectorAll('input[name="apos-goal-type"]').forEach(el => el.checked = false);
+      const r = document.querySelector(`input[name="apos-goal-type"][value="${cfg.apos_goalType}"]`);
       if (r) r.checked = true;
     }
-    if (cfg.goalValue)  { const inp = G('apos-goal-value');        if (inp) inp.value = cfg.goalValue; }
-    if (cfg.ageNow)     G('apos-age-now').value  = cfg.ageNow;
-    if (cfg.ageRet)     G('apos-age-ret').value  = cfg.ageRet;
-    if (cfg.patAtual)   { const inp = G('apos-patrimonio-atual');   if (inp) inp.value = cfg.patAtual; }
-    if (cfg.rateReal)   G('apos-rate-real').value = cfg.rateReal;
-    if (cfg.rateInfl)   G('apos-rate-infl').value = cfg.rateInfl;
+    if (cfg.apos_goalValue)  { const inp = G('apos-goal-value');        if (inp) (inp.setValue ? inp.setValue(parseBRLStr(cfg.apos_goalValue)) : (inp.value = cfg.apos_goalValue)); }
+    if (cfg.apos_ageNow)     G('apos-age-now').value  = cfg.apos_ageNow;
+    if (cfg.apos_ageRet)     G('apos-age-ret').value  = cfg.apos_ageRet;
+    if (cfg.apos_patAtual)   { const inp = G('apos-patrimonio-atual');   if (inp) (inp.setValue ? inp.setValue(parseBRLStr(cfg.apos_patAtual)) : (inp.value = cfg.apos_patAtual)); }
+    if (cfg.apos_rateReal)   G('apos-rate-real').value = cfg.apos_rateReal;
+    if (cfg.apos_rateInfl)   G('apos-rate-infl').value = cfg.apos_rateInfl;
   } catch(e) {}
 }
 
@@ -20477,11 +21689,22 @@ async function aposPullPatrimonio() {
     }
     const inp = G('apos-patrimonio-atual');
     if (inp) {
-      inp.value = Math.max(0, total).toLocaleString('pt-BR',{minimumFractionDigits:2});
+      if (inp.setValue) inp.setValue(Math.max(0, total));
+      else inp.value = Math.max(0, total).toLocaleString('pt-BR',{minimumFractionDigits:2});
       inp.dataset.raw = Math.max(0, total).toString();
       aposCalc();
     }
   } catch(e) { toast('Erro ao buscar patrimônio: ' + e.message); }
+}
+
+// Converte uma string em formato brasileiro ("R$ 1.234,56" ou "1234,56" ou
+// "1234") num número — usado ao restaurar valores salvos para dentro de
+// campos com máscara de moeda (setupCurrencyInput).
+function parseBRLStr(str) {
+  let v = String(str || '').replace(/R\$[ \s]*/g, '').trim();
+  if (v.includes(',')) v = v.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(v);
+  return isNaN(n) ? 0 : n;
 }
 
 function aposParseInput(id) {
@@ -20502,17 +21725,77 @@ function aposParseInput(id) {
 async function aposGetRealizedSavings() {
   const months = {};
   try {
-    // report:monthly returns [{month, income, expenses}]
+    // report:monthly agora retorna uma linha por (mês, categoria) — soma o
+    // saldo líquido de todas as categorias de cada mês. O total líquido é
+    // o mesmo independente de como cada categoria é classificada, então
+    // isso não é afetado pela mudança feita no Resumo/Comparação mensal.
     const rows = await ff.reportMonthly({
       fromDate: '2000-01-01',
       toDate: new Date().toISOString().slice(0,10),
       excludeTransfers: true,
     });
     (rows || []).forEach(row => {
-      if (row.month) months[row.month] = (row.income || 0) - (row.expenses || 0);
+      if (row.month) months[row.month] = (months[row.month] || 0) + (row.income || 0) - (row.expenses || 0);
     });
   } catch(e) { console.error('aposGetRealizedSavings:', e); }
   return months;
+}
+
+// ── Meta automática de Aposentadoria ──
+// Busca o patrimônio total mais recente — usa o que já estiver carregado
+// (de uma visita à Patrimônio nesta sessão); se não houver nada, força um
+// refresh pra não depender do usuário ter visitado aquela aba antes.
+async function getCurrentPatrimonioTotalLive() {
+  try {
+    if (!window._patTotalByMonth || !Object.keys(window._patTotalByMonth).length) {
+      await refreshPatrimonio();
+    }
+    const months = Object.keys(window._patTotalByMonth || {}).sort();
+    if (!months.length) return 0;
+    return window._patTotalByMonth[months[months.length-1]] || 0;
+  } catch(e) { console.error('getCurrentPatrimonioTotalLive:', e); return 0; }
+}
+// Média móvel de 12 meses do lucro (receitas - despesas) — reaproveita
+// DIRETAMENTE window._evMA12LucroByMonth, o mesmo valor já calculado e
+// usado pela Aposentadoria/Evolução (computeEvMA12LucroData), em vez de
+// recalcular do zero. Recalcular por conta própria arriscava divergir da
+// metodologia de lá (exclusão de categorias e correção pelo IPCA
+// aplicadas de forma diferente), o que já causou resultados errados.
+async function getCurrentMA12LucroLive() {
+  try {
+    if (!window._evMA12LucroByMonth || !Object.keys(window._evMA12LucroByMonth).length) {
+      await computeEvMA12LucroData();
+    }
+    const months = Object.keys(window._evMA12LucroByMonth || {}).sort();
+    if (!months.length) return 0;
+    return window._evMA12LucroByMonth[months[months.length-1]] || 0;
+  } catch(e) { console.error('getCurrentMA12LucroLive:', e); return 0; }
+}
+// Cria (na primeira vez que a Aposentadoria for preenchida) ou atualiza a
+// meta "Aposentadoria" com os dados mais recentes do cálculo. Dois
+// acompanhamentos: longo prazo (patrimônio-alvo) e curto prazo (poupança
+// mensal necessária = aporte externo + rendimento do patrimônio).
+async function syncRetirementGoal({ metaPatrimonio, retYear, needPMT, patAtual, rateReal }) {
+  const yieldMonthlyCur = patAtual * rateReal / 12;
+  const monthlyTarget = needPMT + yieldMonthlyCur;
+  const deadline = `${retYear}-12-31`;
+
+  const allGoals = await ff.goalList().catch(() => []);
+  const existing = allGoals.find(g => g.type === 'retirement');
+  const isFirstTime = !existing;
+  await ff.goalSave({
+    id: existing?.id || null,
+    name: existing?.name || 'Aposentadoria',
+    type: 'retirement',
+    target_amount: metaPatrimonio,
+    monthly_amount: monthlyTarget,
+    deadline,
+    icon: existing?.icon || '🏖️',
+    color: existing?.color || '#43a047',
+  });
+  if (isFirstTime) {
+    toast('🎯 Meta "Aposentadoria" criada automaticamente — veja na aba Metas');
+  }
 }
 
 async function aposCalc() {
@@ -20599,6 +21882,10 @@ async function aposCalc() {
   const needPMT     = xAnual / 12; // aporte externo mensal fixo
   const annuityPerYear = xAnual;   // aporte externo anual fixo
 
+  // Mantém a meta "Aposentadoria" sincronizada com este cálculo — criada
+  // automaticamente na primeira vez que os campos forem preenchidos.
+  syncRetirementGoal({ metaPatrimonio, retYear, needPMT, patAtual, rateReal }).catch(e => console.error('syncRetirementGoal:', e));
+
   // ── Build table rows ─────────────────────────────────────────────────
   const patHistYears = Object.keys(patByYear).map(Number).sort();
   const firstPatYear = patHistYears.length ? patHistYears[0] : curYear;
@@ -20643,7 +21930,7 @@ async function aposCalc() {
     rows.push({
       year, age, isPast, isCur, isFuture, isRetired, isRetYear,
       patReal,
-      projPat: (isFuture || (isCur && patReal == null)) ? projPatDisplay : null,
+      projPat: (isFuture || isCur) ? projPatDisplay : null,
       savingReal, savingNeeded, yieldPat: yieldPatMonthly, savingExternal, pctMeta,
     });
 
@@ -20666,23 +21953,25 @@ function renderAposKPIs({ needPMT, metaPatrimonio, goalType, goalRaw, rateReal, 
   const reached = needPMT === 0;
   const kpis = [
     { icon:'🎯', label: goalType==='patrimonio' ? 'Meta de patrimônio' : 'Patrimônio necessário',
-      value: fmtBRL(metaPatrimonio),
+      value: fmtBRL(metaPatrimonio), color:'#2e7d32',
       sub: goalType==='renda' ? `para sustentar renda de ${fmtBRL(goalRaw)}/mês` : '' },
-    { icon:'📅', label:'Anos até a aposentadoria', value:`${yearsTotal} anos`, sub:'' },
+    { icon:'📅', label:'Anos até a aposentadoria', value:`${yearsTotal} anos`, color:'#0891b2', sub:'' },
     { icon:'💵', label:'Poupança total necessária/mês',
       value: reached ? '🎉 Meta já alcançável!' : fmtBRL(needPMT)+'/mês',
       sub: reached ? 'Patrimônio atual já cobre a meta' : `fixo todo mês · a poupança total cresce com o rendimento`,
-      accent: !reached && needPMT > 0 },
+      color: reached ? '#43a047' : '#d97706', accent: !reached && needPMT > 0 },
     { icon:'📈', label:'Retorno real esperado',
-      value: `${(rateReal*100).toFixed(1)}% a.a.`,
+      value: `${(rateReal*100).toFixed(1)}% a.a.`, color:'#7c3aed',
       sub: 'parte da poupança virá do rendimento do próprio patrimônio' },
   ];
   G('apos-kpis').innerHTML = kpis.map(k => `
-    <div style="background:${k.accent?'var(--accent-lt)':'var(--bg2)'};border:1px solid ${k.accent?'var(--accent)':'var(--border)'};border-radius:10px;padding:14px 16px">
-      <div style="font-size:22px;margin-bottom:4px">${k.icon}</div>
-      <div style="font-size:11px;color:var(--text3);margin-bottom:4px">${k.label}</div>
-      <div style="font-size:15px;font-weight:700;color:${k.accent?'var(--accent)':'var(--text1)'}">${k.value}</div>
-      ${k.sub?`<div style="font-size:11px;color:var(--text3);margin-top:2px">${k.sub}</div>`:''}
+    <div style="background:var(--bg2);border:1px solid var(--border);border-left:4px solid ${k.color};border-radius:12px;padding:14px 16px;box-shadow:0 1px 3px rgba(20,30,50,.04)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:18px">${k.icon}</span>
+        <span style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.02em">${k.label}</span>
+      </div>
+      <div style="font-size:17px;font-weight:800;color:${k.color}">${k.value}</div>
+      ${k.sub?`<div style="font-size:11px;color:var(--text3);margin-top:3px">${k.sub}</div>`:''}
     </div>`).join('');
 }
 
@@ -20705,7 +21994,7 @@ function renderAposTable(rows) {
     if (r.isRetired || r.isRetYear) rowStyle = 'background:rgba(37,99,235,0.06)';
 
     const pct      = r.pctMeta;
-    const pctColor = pct>=1?'color:var(--green)' : pct>=0.75?'color:var(--accent)' : pct>=0.5?'color:#f59e0b':'color:var(--red)';
+    const pctColor = pct>=1?'color:var(--green)' : pct>=0.75?'color:#66bb6a' : pct>=0.5?'color:#f59e0b':'color:var(--red)';
     const barW     = Math.min(80, Math.round(Math.min(pct,1)*80));
     const barClr   = pct>=1?'var(--green)':pct>=0.5?'var(--accent)':'var(--red)';
     const bar      = `<div style="display:inline-block;width:${barW}px;height:4px;background:${barClr};border-radius:2px;vertical-align:middle;margin-left:4px"></div>`;
@@ -20763,39 +22052,61 @@ function renderAposCharts(rows, metaPatrimonio) {
   if (_aposChart1) { try{_aposChart1.destroy();}catch(e){} _aposChart1=null; }
   if (_aposChart2) { try{_aposChart2.destroy();}catch(e){} _aposChart2=null; }
 
-  const fmtY = v => v==null?'':('R$'+(Math.abs(v)>=1e6?(v/1e6).toFixed(1)+'M':Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v));
+  const fmtY  = v => v==null?'':('R$'+(Math.abs(v)>=1e6?(v/1e6).toFixed(1)+'M':Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v));
+  const GREEN = '#43a047', RED = '#ef5350', BLUE = '#3b82f6', AMBER = '#f59e0b';
 
   const ctx1 = G('apos-chart')?.getContext('2d');
   if (ctx1) _aposChart1 = new Chart(ctx1, {
     type: 'line',
     data: { labels, datasets: [
-      { label:'Patrimônio real', data:patReal, borderColor:'#2563eb', backgroundColor:'rgba(37,99,235,.1)',
-        fill:true, tension:0.3, borderWidth:2.5, pointRadius:3, spanGaps:false },
-      { label:'Patrimônio projetado', data:patProj, borderColor:'#2563eb', borderDash:[5,4],
-        backgroundColor:'rgba(37,99,235,.04)', fill:true, tension:0.3, borderWidth:2, pointRadius:2, spanGaps:false },
-      { label:'Meta', data:metaLine, borderColor:'#dc2626', borderDash:[6,3],
-        borderWidth:2, pointRadius:0, fill:false },
+      { label:'Patrimônio real', data:patReal, borderColor:GREEN, backgroundColor:evChartGradient(ctx1,GREEN,380),
+        fill:true, tension:.4, borderWidth:2.5, pointRadius:0, pointHoverRadius:6, pointHoverBackgroundColor:GREEN, pointHoverBorderColor:'#fff', pointHoverBorderWidth:2, spanGaps:false },
+      { label:'Patrimônio projetado', data:patProj, borderColor:GREEN, borderDash:[6,4],
+        backgroundColor:'rgba(67,160,71,.05)', fill:true, tension:.4, borderWidth:2, pointRadius:0, pointHoverRadius:5, pointHoverBackgroundColor:GREEN, pointHoverBorderColor:'#fff', pointHoverBorderWidth:2, spanGaps:false },
+      { label:'Meta', data:metaLine, borderColor:RED, borderDash:[8,4],
+        borderWidth:2, pointRadius:0, pointHoverRadius:0, fill:false },
     ]},
     options: { responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{position:'top'}, title:{display:true,text:'Patrimônio real e projetado vs meta'} },
-      scales:{ y:{ ticks:{ callback:fmtY } } } }
+      interaction:{ mode:'index', intersect:false },
+      plugins:{
+        legend:{ position:'top', align:'end', labels:{boxWidth:10,boxHeight:10,usePointStyle:true,pointStyle:'circle',font:{size:11,weight:'600'}} },
+        title:{ display:true, text:'Patrimônio real e projetado vs meta', font:{size:13,weight:'700'}, color:'#2e7d32', padding:{bottom:12} },
+        tooltip:{ enabled:false, external:(context) => dashTooltip(context, {
+          getTitle: (dp) => labels[dp[0].dataIndex],
+          getRows:  (dp) => dp.filter(d=>d.parsed.y!=null).map(d => ({ color:d.dataset.borderColor, label:d.dataset.label, value:fmtBRL(d.parsed.y) })),
+        }) },
+      },
+      scales:{ x:{ grid:{display:false}, ticks:{font:{size:10}} }, y:{ grid:{color:'rgba(0,0,0,.05)'}, ticks:{ font:{size:10}, callback:fmtY } } },
+      animation:{ duration:600 },
+    }
   });
 
   const ctx2 = G('apos-chart2')?.getContext('2d');
   if (ctx2) _aposChart2 = new Chart(ctx2, {
     type: 'bar',
     data: { labels, datasets: [
-      { label:'Rendimento do patrimônio/mês', data:yieldData, backgroundColor:'rgba(22,163,74,.5)',
-        borderColor:'#16a34a', borderWidth:1, stack:'future' },
-      { label:'Poupança por outros meios/mês', data:extData, backgroundColor:'rgba(37,99,235,.45)',
-        borderColor:'#2563eb', borderWidth:1, stack:'future' },
+      { label:'Rendimento do patrimônio/mês', data:yieldData, backgroundColor:GREEN+'b3',
+        borderColor:GREEN, borderWidth:1, borderRadius:5, maxBarThickness:28, stack:'future' },
+      { label:'Poupança por outros meios/mês', data:extData, backgroundColor:BLUE+'b3',
+        borderColor:BLUE, borderWidth:1, borderRadius:5, maxBarThickness:28, stack:'future' },
       { label:'Poupança realizada/mês (Média 12m)', data:savReal, type:'line',
-        borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,.15)',
-        tension:0.3, pointRadius:3, fill:false, borderWidth:2, spanGaps:false },
+        borderColor:AMBER, backgroundColor:evChartGradient(ctx2,AMBER,300),
+        tension:.4, pointRadius:0, pointHoverRadius:6, pointHoverBackgroundColor:AMBER, pointHoverBorderColor:'#fff', pointHoverBorderWidth:2, fill:true, borderWidth:2.5, spanGaps:false },
     ]},
     options: { responsive:true, maintainAspectRatio:false,
-      plugins:{ legend:{position:'top'}, title:{display:true,text:'Poupança necessária (futura) e realizada (histórica)'} },
-      scales:{ x:{ stacked:true }, y:{ stacked:false, ticks:{ callback:v=>'R$'+(Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v) } } } }
+      interaction:{ mode:'index', intersect:false },
+      plugins:{
+        legend:{ position:'top', align:'end', labels:{boxWidth:10,boxHeight:10,usePointStyle:true,pointStyle:'circle',font:{size:11,weight:'600'}} },
+        title:{ display:true, text:'Poupança necessária (futura) e realizada (histórica)', font:{size:13,weight:'700'}, color:'#2e7d32', padding:{bottom:12} },
+        tooltip:{ enabled:false, external:(context) => dashTooltip(context, {
+          getTitle: (dp) => labels[dp[0].dataIndex],
+          getRows:  (dp) => dp.filter(d=>d.parsed.y!=null).map(d => ({ color:d.dataset.borderColor, label:d.dataset.label, value:fmtBRL(d.parsed.y) })),
+        }) },
+      },
+      scales:{ x:{ stacked:true, grid:{display:false}, ticks:{font:{size:10}} },
+               y:{ stacked:false, grid:{color:'rgba(0,0,0,.05)'}, ticks:{ font:{size:10}, callback:v=>'R$'+(Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v) } } },
+      animation:{ duration:600 },
+    }
   });
 }
 
@@ -20803,8 +22114,8 @@ function aposTglView(view) {
   _aposView = view;
   G('apos-table-view').style.display = view==='table' ? '' : 'none';
   G('apos-chart-view').style.display = view==='chart' ? '' : 'none';
-  G('apos-view-table').style.cssText += `;border-color:${view==='table'?'var(--accent)':'var(--border)'};color:${view==='table'?'var(--accent)':'var(--text2)'}`;
-  G('apos-view-chart').style.cssText += `;border-color:${view==='chart'?'var(--accent)':'var(--border)'};color:${view==='chart'?'var(--accent)':'var(--text2)'}`;
+  G('apos-view-table').classList.toggle('primary', view==='table');
+  G('apos-view-chart').classList.toggle('primary', view==='chart');
   aposCalc();
 }
 
@@ -20834,7 +22145,9 @@ async function computeEvMA12LucroData() {
 }
 
 async function aposInit() {
-  aposLoadConfig();
+  setupCurrencyInput(G('apos-goal-value'));
+  setupCurrencyInput(G('apos-patrimonio-atual'));
+  await aposLoadConfig();
   // Ensure patrimônio tab data is loaded so _patTotalByMonth is available
   if (!window._patTotalByMonth || Object.keys(window._patTotalByMonth).length === 0) {
     try { await refreshPatrimonio(); } catch(e) {}
