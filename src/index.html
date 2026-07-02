@@ -44,11 +44,266 @@
   --chart-expense-bg: rgba(239,83,80,.16);
   --chart-expense-lt: rgba(239,83,80,.06);
 }
+
+/* ── Temas escuros ── */
+[data-theme="escuro"] {
+  --bg:        #1a1d23;
+  --bg2:       #22262e;
+  --bg3:       #2a2f39;
+  --bg4:       #323844;
+  --border:    #3a404e;
+  --border2:   #4a5260;
+  --text:      #e8ecf2;
+  --text2:     #9aa5b8;
+  --text3:     #5e6a7e;
+  --accent:    #3b82f6;
+  --accent-bg: #1e2d4a;
+  --accent-lt: #1e3a5f;
+  --green:     #4ade80;
+  --green-bg:  #14261e;
+  --green-lt:  #1a3328;
+  --red:       #f87171;
+  --red-bg:    #2d1a1a;
+  --red-lt:    #3d2020;
+  --warn:      #fbbf24;
+  --warn-bg:   #2d2208;
+  --future-bg: #1e2228;
+  --future-text: #5e6a7e;
+  --chart-income:     #4ade80;
+  --chart-income-bg:  rgba(74,222,128,.18);
+  --chart-income-lt:  rgba(74,222,128,.07);
+  --chart-expense:    #f87171;
+  --chart-expense-bg: rgba(248,113,113,.18);
+  --chart-expense-lt: rgba(248,113,113,.07);
+}
+
+[data-theme="pro"] {
+  --bg:        #0f1117;
+  --bg2:       #161b26;
+  --bg3:       #1c2233;
+  --bg4:       #222a3e;
+  --border:    #2c3550;
+  --border2:   #374265;
+  --text:      #ccd6f6;
+  --text2:     #8892b0;
+  --text3:     #495670;
+  --accent:    #64ffda;
+  --accent-bg: #0a2a24;
+  --accent-lt: #0d3530;
+  --green:     #64ffda;
+  --green-bg:  #0a2a24;
+  --green-lt:  #0d3530;
+  --red:       #ff6b6b;
+  --red-bg:    #2d1010;
+  --red-lt:    #3d1515;
+  --warn:      #ffcc02;
+  --warn-bg:   #282200;
+  --future-bg: #131828;
+  --future-text: #495670;
+  --chart-income:     #64ffda;
+  --chart-income-bg:  rgba(100,255,218,.16);
+  --chart-income-lt:  rgba(100,255,218,.06);
+  --chart-expense:    #ff6b6b;
+  --chart-expense-bg: rgba(255,107,107,.16);
+  --chart-expense-lt: rgba(255,107,107,.06);
+}
+
+[data-theme="midnight"] {
+  --bg:        #0d0d0d;
+  --bg2:       #141414;
+  --bg3:       #1a1a1a;
+  --bg4:       #222222;
+  --border:    #2e2e2e;
+  --border2:   #3d3d3d;
+  --text:      #f0f0f0;
+  --text2:     #a0a0a0;
+  --text3:     #606060;
+  --accent:    #a78bfa;
+  --accent-bg: #1e1430;
+  --accent-lt: #2a1a45;
+  --green:     #6ee7b7;
+  --green-bg:  #0d2018;
+  --green-lt:  #102820;
+  --red:       #fca5a5;
+  --red-bg:    #2d1010;
+  --red-lt:    #3d1818;
+  --warn:      #fcd34d;
+  --warn-bg:   #201800;
+  --future-bg: #111111;
+  --future-text: #555555;
+  --chart-income:     #6ee7b7;
+  --chart-income-bg:  rgba(110,231,183,.16);
+  --chart-income-lt:  rgba(110,231,183,.06);
+  --chart-expense:    #fca5a5;
+  --chart-expense-bg: rgba(252,165,165,.16);
+  --chart-expense-lt: rgba(252,165,165,.06);
+}
+
+[data-theme="contraste"] {
+  --bg:        #000000;
+  --bg2:       #0a0a0a;
+  --bg3:       #141414;
+  --bg4:       #1c1c1c;
+  --border:    #444444;
+  --border2:   #666666;
+  --text:      #ffffff;
+  --text2:     #dddddd;
+  --text3:     #999999;
+  --accent:    #ffff00;
+  --accent-bg: #1a1a00;
+  --accent-lt: #2a2a00;
+  --green:     #00ff88;
+  --green-bg:  #002211;
+  --green-lt:  #003318;
+  --red:       #ff4444;
+  --red-bg:    #220000;
+  --red-lt:    #330000;
+  --warn:      #ffaa00;
+  --warn-bg:   #221100;
+  --future-bg: #0a0a0a;
+  --future-text: #666666;
+  --chart-income:     #00ff88;
+  --chart-income-bg:  rgba(0,255,136,.18);
+  --chart-income-lt:  rgba(0,255,136,.07);
+  --chart-expense:    #ff4444;
+  --chart-expense-bg: rgba(255,68,68,.18);
+  --chart-expense-lt: rgba(255,68,68,.07);
+}
+/* ── Overrides globais para temas escuros ── */
+[data-theme="escuro"],[data-theme="pro"],[data-theme="midnight"],[data-theme="contraste"] {
+  color-scheme: dark;
+}
+[data-theme="escuro"] .dash-toggle button.active,
+[data-theme="pro"] .dash-toggle button.active,
+[data-theme="midnight"] .dash-toggle button.active,
+[data-theme="contraste"] .dash-toggle button.active { background:var(--bg4); }
+
+[data-theme="escuro"] .ev-pill,
+[data-theme="pro"] .ev-pill,
+[data-theme="midnight"] .ev-pill,
+[data-theme="contraste"] .ev-pill,
+[data-theme="escuro"] .ev-cat-pill,
+[data-theme="pro"] .ev-cat-pill,
+[data-theme="midnight"] .ev-cat-pill,
+[data-theme="contraste"] .ev-cat-pill,
+[data-theme="escuro"] .ev-pill-mode-btn,
+[data-theme="pro"] .ev-pill-mode-btn,
+[data-theme="midnight"] .ev-pill-mode-btn,
+[data-theme="contraste"] .ev-pill-mode-btn,
+[data-theme="escuro"] .ev-action-btn,
+[data-theme="pro"] .ev-action-btn,
+[data-theme="midnight"] .ev-action-btn,
+[data-theme="contraste"] .ev-action-btn,
+[data-theme="escuro"] .ev-toggle-pill,
+[data-theme="pro"] .ev-toggle-pill,
+[data-theme="midnight"] .ev-toggle-pill,
+[data-theme="contraste"] .ev-toggle-pill { background:var(--bg3);border-color:var(--border);color:var(--green); }
+
+[data-theme="escuro"] .ev-toggle-group .btn.primary,
+[data-theme="pro"] .ev-toggle-group .btn.primary,
+[data-theme="midnight"] .ev-toggle-group .btn.primary,
+[data-theme="contraste"] .ev-toggle-group .btn.primary { background:var(--bg4);color:var(--green); }
+
+/* Botões inline com background:#fff hardcoded */
+[data-theme="escuro"] .btn[style*="background:#fff"],
+[data-theme="pro"] .btn[style*="background:#fff"],
+[data-theme="midnight"] .btn[style*="background:#fff"],
+[data-theme="contraste"] .btn[style*="background:#fff"],
+[data-theme="escuro"] button[style*="background:#fff"],
+[data-theme="pro"] button[style*="background:#fff"],
+[data-theme="midnight"] button[style*="background:#fff"],
+[data-theme="contraste"] button[style*="background:#fff"] { background:var(--bg3)!important; }
+
+/* Scrollbar estilização para temas escuros */
+[data-theme="escuro"] ::-webkit-scrollbar-track,
+[data-theme="pro"] ::-webkit-scrollbar-track,
+[data-theme="midnight"] ::-webkit-scrollbar-track,
+[data-theme="contraste"] ::-webkit-scrollbar-track { background:var(--bg3); }
+[data-theme="escuro"] ::-webkit-scrollbar-thumb,
+[data-theme="pro"] ::-webkit-scrollbar-thumb,
+[data-theme="midnight"] ::-webkit-scrollbar-thumb,
+[data-theme="contraste"] ::-webkit-scrollbar-thumb { background:var(--border2);border-radius:4px; }
+
+/* ── Substituição de cores hardcoded em dark themes ── */
+/* Títulos de categoria (background:#f1f8e9 / color:#2e7d32) */
+[data-theme="escuro"] [style*="background:#f1f8e9"],
+[data-theme="pro"] [style*="background:#f1f8e9"],
+[data-theme="midnight"] [style*="background:#f1f8e9"],
+[data-theme="contraste"] [style*="background:#f1f8e9"] { background:var(--green-bg)!important; }
+
+/* Textos verdes hardcoded (títulos de grupo, saldos, etc.) */
+[data-theme="escuro"] [style*="color:#2e7d32"],
+[data-theme="pro"] [style*="color:#2e7d32"],
+[data-theme="midnight"] [style*="color:#2e7d32"],
+[data-theme="contraste"] [style*="color:#2e7d32"],
+[data-theme="escuro"] [style*="color:#16a34a"],
+[data-theme="pro"] [style*="color:#16a34a"],
+[data-theme="midnight"] [style*="color:#16a34a"],
+[data-theme="contraste"] [style*="color:#16a34a"],
+[data-theme="escuro"] [style*="color:#15803d"],
+[data-theme="pro"] [style*="color:#15803d"],
+[data-theme="midnight"] [style*="color:#15803d"],
+[data-theme="contraste"] [style*="color:#15803d"] { color:var(--green)!important; }
+
+/* Fundos rosas/vermelhos claros (relatórios, recorrências) */
+[data-theme="escuro"] [style*="background:#fee2e2"],
+[data-theme="pro"] [style*="background:#fee2e2"],
+[data-theme="midnight"] [style*="background:#fee2e2"],
+[data-theme="contraste"] [style*="background:#fee2e2"],
+[data-theme="escuro"] [style*="background:#ffcdd2"],
+[data-theme="pro"] [style*="background:#ffcdd2"],
+[data-theme="midnight"] [style*="background:#ffcdd2"],
+[data-theme="contraste"] [style*="background:#ffcdd2"],
+[data-theme="escuro"] [style*="background:#fef2f2"],
+[data-theme="pro"] [style*="background:#fef2f2"],
+[data-theme="midnight"] [style*="background:#fef2f2"],
+[data-theme="contraste"] [style*="background:#fef2f2"] { background:var(--red-bg)!important;border-color:var(--border)!important; }
+
+/* Textos vermelhos hardcoded */
+[data-theme="escuro"] [style*="color:#dc2626"],
+[data-theme="pro"] [style*="color:#dc2626"],
+[data-theme="midnight"] [style*="color:#dc2626"],
+[data-theme="contraste"] [style*="color:#dc2626"] { color:var(--red)!important; }
+
+/* Bordas de campo de valor */
+[data-theme="escuro"] .amount-field-exp input,
+[data-theme="pro"] .amount-field-exp input,
+[data-theme="midnight"] .amount-field-exp input,
+[data-theme="contraste"] .amount-field-exp input { border-color:var(--red)!important; }
+[data-theme="escuro"] .amount-field-inc input,
+[data-theme="pro"] .amount-field-inc input,
+[data-theme="midnight"] .amount-field-inc input,
+[data-theme="contraste"] .amount-field-inc input { border-color:var(--green)!important; }
+[data-theme="escuro"] .btn.danger,
+[data-theme="pro"] .btn.danger,
+[data-theme="midnight"] .btn.danger,
+[data-theme="contraste"] .btn.danger { border-color:var(--red)!important; }
+[data-theme="escuro"] .btn.success,
+[data-theme="pro"] .btn.success,
+[data-theme="midnight"] .btn.success,
+[data-theme="contraste"] .btn.success { border-color:var(--green)!important; }
+
+/* Linha do ledger (transações futuras) */
+[data-theme="escuro"] table.ledger tbody tr.future td .amt-inc,
+[data-theme="pro"] table.ledger tbody tr.future td .amt-inc,
+[data-theme="midnight"] table.ledger tbody tr.future td .amt-inc,
+[data-theme="contraste"] table.ledger tbody tr.future td .amt-inc { color:var(--green)!important; }
+
+/* Hover em sort-headers das recorrências */
+[data-theme="escuro"] .adv-sort-th:hover,
+[data-theme="pro"] .adv-sort-th:hover,
+[data-theme="midnight"] .adv-sort-th:hover,
+[data-theme="contraste"] .adv-sort-th:hover { background:var(--bg3)!important;color:var(--green)!important; }
+[data-theme="escuro"] [style*="color:#2e7d32"].adv-sort-th,
+[data-theme="pro"] [style*="color:#2e7d32"].adv-sort-th,
+[data-theme="midnight"] [style*="color:#2e7d32"].adv-sort-th,
+[data-theme="contraste"] [style*="color:#2e7d32"].adv-sort-th { color:var(--green)!important; }
+
 /* ── Tooltip bonito reutilizável p/ todos os gráficos do Painel ── */
-.chart-tooltip{position:absolute;pointer-events:none;background:#fff;border-radius:12px;
-  box-shadow:0 10px 28px rgba(20,30,50,.16),0 2px 6px rgba(20,30,50,.08);padding:10px 14px;
+.chart-tooltip{position:absolute;pointer-events:none;background:var(--bg2);border-radius:12px;
+  box-shadow:0 10px 28px rgba(0,0,0,.22),0 2px 6px rgba(0,0,0,.12);padding:10px 14px;
   font-size:12.5px;z-index:80;transition:opacity .1s ease,transform .1s ease;opacity:0;
-  transform:translate(-50%,-100%) translateY(-10px);min-width:148px;border:1px solid var(--border);}
+  transform:translate(-50%,-100%) translateY(-10px);min-width:148px;border:1px solid var(--border2);}
 .chart-tooltip.show{opacity:1;}
 .chart-tooltip .ct-title{font-weight:700;font-size:12px;color:var(--text);margin:-10px -14px 8px;
   padding:7px 14px;border-radius:11px 11px 0 0;background:var(--bg3);text-align:center;}
@@ -64,6 +319,14 @@
 .dash-row{display:grid;gap:16px;margin-bottom:16px;min-width:0;overflow-x:hidden;}
 .dash-row-budget{grid-template-columns:1.6fr 1fr 1fr;}
 .dash-row-cat{grid-template-columns:1.3fr 1fr;}
+/* Metas na visão geral: cartões de largura fixa com scroll horizontal */
+#dash-goals-row { scrollbar-width: thin; scrollbar-color: var(--border2) transparent; }
+#dash-goals-row::-webkit-scrollbar { height: 5px; }
+#dash-goals-row::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+.dash-goal-mini { flex: 0 0 200px; scroll-snap-align: start; background: var(--bg3);
+  border: 1px solid var(--border); border-radius: 14px; overflow: hidden;
+  display: flex; flex-direction: column; cursor: pointer; transition: box-shadow .15s; }
+.dash-goal-mini:hover { box-shadow: 0 4px 14px rgba(0,0,0,.12); }
 .dash-row-flow{grid-template-columns:1.6fr 1fr;}
 @media (max-width: 980px){
   .dash-row-budget,.dash-row-cat,.dash-row-flow{grid-template-columns:1fr;}
@@ -78,12 +341,12 @@
   cursor:pointer;font-size:12.5px;font-weight:700;color:#fff;transition:all .15s;box-shadow:0 2px 8px rgba(20,30,50,.12);}
 .dash-nav-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px rgba(20,30,50,.18);filter:brightness(1.05);}
 .dash-nav-btn.active{outline:3px solid rgba(255,255,255,.5);outline-offset:-3px;}
-.budget-bar-row{display:grid;grid-template-columns:120px 1fr 56px 86px;gap:10px;align-items:center;padding:6px 0;font-size:12.5px;min-width:0;}
-.budget-bar-row > *{min-width:0;}
+.budget-bar-row{display:grid;grid-template-columns:minmax(60px,120px) 1fr minmax(36px,56px) minmax(70px,90px);gap:6px;align-items:center;padding:6px 0;font-size:12.5px;min-width:0;overflow:hidden;}
+.budget-bar-row > *{min-width:0;overflow:hidden;text-overflow:ellipsis;}
 .budget-bar-track{height:9px;border-radius:5px;background:var(--bg3);overflow:hidden;}
 .budget-bar-fill{height:100%;border-radius:5px;transition:width .5s cubic-bezier(.4,0,.2,1);}
-.card-bar-row{display:grid;grid-template-columns:130px 1fr 60px 96px;gap:10px;align-items:center;padding:7px 0;font-size:12.5px;min-width:0;}
-.card-bar-row > *{min-width:0;}
+.card-bar-row{display:grid;grid-template-columns:minmax(60px,130px) 1fr minmax(36px,60px) minmax(70px,96px);gap:6px;align-items:center;padding:7px 0;font-size:12.5px;min-width:0;overflow:hidden;}
+.card-bar-row > *{min-width:0;overflow:hidden;text-overflow:ellipsis;}
 .dash-period-select{appearance:none;-webkit-appearance:none;border:none;border-radius:11px;padding:8px 32px 8px 14px;
   font-size:12.5px;font-weight:700;color:#fff;cursor:pointer;background-color:#43a047;
   background-image:linear-gradient(135deg,#43a047,#2e7d32),url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='white'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
@@ -119,8 +382,8 @@
 .ev-action-btn{padding:7px 14px;border-radius:10px;border:1.5px solid #c8e6c9;background:#fff;color:#2e7d32;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;}
 .ev-action-btn:hover{border-color:#43a047;background:#f1f8e9;}
 .ev-action-btn:disabled{opacity:.4;cursor:not-allowed;background:#fff;border-color:#c8e6c9;}
-.apos-type-pill:has(input:checked){border-color:#43a047!important;background:#f1f8e9;color:#2e7d32;}
-.apos-type-pill:hover{border-color:#a5d6a7;}
+.apos-type-pill:has(input:checked){border-color:var(--chart-income)!important;background:var(--green-bg);color:var(--green);}
+.apos-type-pill:hover{border-color:var(--chart-income);}
 #apos-patrimonio-atual + .ev-action-btn:hover{border-color:var(--red)!important;background:#fef2f2!important;}
 .budget-sticky{position:sticky;z-index:3;background:var(--bg2);}
 .budget-sticky-1{left:0;min-width:170px;width:170px;}
@@ -230,7 +493,7 @@ table.ledger tbody tr.future td{color:var(--future-text);background:var(--future
 table.ledger tbody tr.future td .amt-exp{color:#f0a435 !important;}
 table.ledger tbody tr.future td .amt-inc{color:#4ade80 !important;}
 .future-divider td{
-  background:#e8f0fe !important;
+  background:var(--accent-bg) !important;
   padding:4px 10px;font-size:11px;font-weight:700;
   color:var(--accent);text-transform:uppercase;letter-spacing:.5px;
   border-top:2px solid var(--accent);border-bottom:2px solid var(--accent);
@@ -288,7 +551,37 @@ select.inp option{background:var(--bg2);}
 .btn{padding:7px 14px;border:1px solid var(--border2);border-radius:var(--radius);cursor:pointer;background:var(--bg3);font-size:14px;font-family:inherit;font-weight:500;color:var(--text);transition:all .1s;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
 .btn:hover{background:var(--bg4);border-color:var(--border2);}
 .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
-.btn.primary:hover{background:#1d4ed8;}
+.btn.primary:hover{filter:brightness(1.12);}
+
+/* Temas com accent claro precisam de texto escuro nos botões primários */
+[data-theme="contraste"] .btn.primary,
+[data-theme="pro"] .btn.primary { color:#000!important; }
+[data-theme="midnight"] .btn.primary { color:#fff; }
+
+/* future-divider usa accent como cor de fundo e borda */
+[data-theme="escuro"] .future-divider td,
+[data-theme="pro"] .future-divider td,
+[data-theme="midnight"] .future-divider td,
+[data-theme="contraste"] .future-divider td {
+  background:var(--accent-bg)!important;
+  color:var(--accent)!important;
+  border-color:var(--border2)!important;
+}
+/* multi-select-bar (barra de seleção múltipla) */
+[data-theme="contraste"] .multi-select-bar,
+[data-theme="pro"] .multi-select-bar { color:#000!important; }
+
+/* Accent nas nav-items e badges */
+[data-theme="escuro"] .badge-transfer,
+[data-theme="pro"] .badge-transfer,
+[data-theme="midnight"] .badge-transfer,
+[data-theme="contraste"] .badge-transfer { color:var(--accent)!important; }
+
+/* Hover do btn.primary nos temas escuros */
+[data-theme="escuro"] .btn.primary:hover,
+[data-theme="pro"] .btn.primary:hover,
+[data-theme="midnight"] .btn.primary:hover,
+[data-theme="contraste"] .btn.primary:hover { filter:brightness(1.2); background:var(--accent)!important; }
 .btn.danger{background:var(--red-bg);color:var(--red);border-color:#fca5a5;}
 .btn.success{background:var(--green-bg);color:var(--green);border-color:#86efac;}
 .btn.sm{padding:5px 10px;font-size:13px;}
@@ -487,15 +780,19 @@ select.inp option{background:var(--bg2);}
 
   <!-- OVERVIEW -->
   <div id="page-overview" class="page active">
-    <!-- Month selector + stats -->
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-      <button class="btn sm" onclick="overviewPrevMonth()">‹</button>
-      <span id="overview-month-label" style="font-size:15px;font-weight:600;min-width:140px;text-align:center"></span>
-      <button class="btn sm" onclick="overviewNextMonth()">›</button>
-      <button class="btn sm" onclick="overviewToday()" style="margin-left:4px">Hoje</button>
+    <!-- Stats + month selector — sticky. Usa margens negativas para cobrir
+         o padding:20px da .page e não deixar gap acima ao rolar. -->
+    <div style="position:sticky;top:-20px;z-index:60;background:var(--bg);
+                margin:-20px -20px 12px;padding:16px 20px 10px;
+                border-bottom:1px solid var(--border)">
+      <div class="stats-grid" id="overview-stats" style="margin-bottom:10px"></div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <button class="btn sm" onclick="overviewPrevMonth()">‹</button>
+        <span id="overview-month-label" style="font-size:15px;font-weight:600;min-width:140px;text-align:center"></span>
+        <button class="btn sm" onclick="overviewNextMonth()">›</button>
+        <button class="btn sm" onclick="overviewToday()" style="margin-left:4px">Hoje</button>
+      </div>
     </div>
-
-    <div class="stats-grid" id="overview-stats"></div>
 
     <!-- AI Insights -->
     <div class="tbl-card" id="ai-insights-card" style="margin-bottom:14px;display:none">
@@ -548,15 +845,8 @@ select.inp option{background:var(--bg2);}
       <div id="ai-insights-body" style="padding:12px 16px"></div>
     </div>
 
-    <!-- Category filter panel -->
-    <div class="tbl-card" style="padding:14px 18px;margin-bottom:14px">
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <span style="font-size:12px;font-weight:600;color:var(--text2)">Excluir categorias dos gráficos:</span>
-        <div id="cat-filter-chips" style="display:flex;flex-wrap:wrap;gap:6px;flex:1"></div>
-        <button class="ev-action-btn" style="padding:5px 10px;font-size:11px" onclick="openCatTypesConfig()" title="Definir se cada categoria é Receita ou Despesa">⚙ Tipos</button>
-        <button class="ev-action-btn" style="padding:5px 10px;font-size:11px" onclick="openCatFilterModal()">⚙ Configurar</button>
-      </div>
-    </div>
+    <!-- Category filter: compact inline panel merged into the flow chart header -->
+    <!-- (cards and period selector occupy row 1; excluir categorias will be added there) -->
 
     <!-- ═══ PAINEL FINANCEIRO — novo conjunto de gráficos ═══ -->
     <!-- LINHA 1: Receitas e despesas + gauge despesa/receita -->
@@ -574,6 +864,18 @@ select.inp option{background:var(--bg2);}
               <option value="36">Últimos 36 meses</option>
               <option value="all">Desde o início</option>
             </select>
+            <!-- Excluir categorias: compacto, inline -->
+            <div style="position:relative">
+              <button class="ev-action-btn" style="padding:5px 10px;font-size:11px" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'" title="Excluir categorias dos gráficos">⊘ Categorias</button>
+              <div style="display:none;position:absolute;top:calc(100% + 6px);right:0;z-index:100;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:12px;box-shadow:0 4px 16px rgba(0,0,0,.15);min-width:260px;max-width:340px">
+                <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Excluir dos gráficos</div>
+                <div id="cat-filter-chips" style="display:flex;flex-wrap:wrap;gap:5px;max-height:180px;overflow-y:auto"></div>
+                <div style="margin-top:10px;display:flex;gap:6px;border-top:1px solid var(--border);padding-top:8px">
+                  <button class="ev-action-btn" style="padding:4px 8px;font-size:11px;flex:1" onclick="openCatTypesConfig()">⚙ Tipos</button>
+                  <button class="ev-action-btn" style="padding:4px 8px;font-size:11px;flex:1" onclick="openCatFilterModal()">⚙ Configurar</button>
+                </div>
+              </div>
+            </div>
             <button class="ev-action-btn" style="padding:5px 10px;font-size:11px" onclick="dashGoToEvolucao('summary')" title="Ver detalhes na Evolução">↗ Ver mais</button>
           </div>
         </div>
@@ -601,7 +903,7 @@ select.inp option{background:var(--bg2);}
           <button class="ev-action-btn" style="padding:5px 10px;font-size:11px" onclick="dashGoToBudget('chart')" title="Ver gráficos no Orçamento">↗ Ver mais</button>
         </div>
         <div class="dash-sub">Acompanhamento por categoria no mês selecionado — clique numa categoria para ver as transações</div>
-        <div id="dash-budget-bars" style="max-height:340px;overflow-y:auto"></div>
+        <div id="dash-budget-bars" style="max-height:340px;overflow-y:auto;overflow-x:hidden"></div>
       </div>
       <div class="dash-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative">
         <button class="ev-action-btn" style="position:absolute;top:18px;right:18px;padding:4px 9px;font-size:10px" onclick="dashGoToBudget('table')" title="Ver detalhes no Orçamento">↗</button>
@@ -653,10 +955,25 @@ select.inp option{background:var(--bg2);}
           </div>
         </div>
         <div class="dash-sub">Fatura do mês selecionado, em relação ao limite — clique num cartão para ver as transações</div>
-        <div id="dash-cards-bars" style="max-height:248px;overflow-y:auto;margin-top:8px"></div>
+        <div id="dash-cards-bars" style="margin-top:8px"></div>
       </div>
     </div>
 
+
+    <!-- LINHA 4: Metas -->
+    <div class="dash-card" style="margin-bottom:14px" id="dash-goals-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px">
+        <h3 style="margin-bottom:0">🎯 Metas</h3>
+        <button class="ev-action-btn" style="padding:5px 10px;font-size:11px" onclick="goPage('goals')" title="Ver todas as metas">↗ Ver mais</button>
+      </div>
+      <div class="dash-sub" style="margin-bottom:12px">Progresso das suas metas financeiras</div>
+      <div id="dash-goals-row" style="display:flex;gap:14px;overflow-x:auto;padding-bottom:4px;scroll-snap-type:x mandatory">
+        <!-- preenchido por renderDashGoals() -->
+      </div>
+      <div id="dash-goals-empty" class="info-box" style="display:none;text-align:center;padding:20px;font-size:13px">
+        Nenhuma meta cadastrada ainda. <a href="#" onclick="goPage('goals');return false">Criar uma meta →</a>
+      </div>
+    </div>
 
     <!-- Future pending -->
     <div class="tbl-card" style="margin-bottom:14px">
@@ -1665,7 +1982,7 @@ select.inp option{background:var(--bg2);}
       <!-- 2b. Dívidas Pessoais (hidden if no debt data) -->
       <div class="tbl-card" id="pat-chart-debt-card" style="padding:18px;margin-bottom:16px;display:none">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-          <span style="font-weight:600;font-size:13px">💳 Dívidas Pessoais</span>
+          <span style="font-weight:600;font-size:13px">💳 Cartões e Dívidas</span>
         </div>
         <div style="position:relative;height:220px"><canvas id="pat-chart-debt"></canvas></div>
       </div>
@@ -2673,11 +2990,11 @@ select.inp option{background:var(--bg2);}
 
     <div style="margin-bottom:16px">
       <h2 style="margin:0;font-size:18px">⚙️ Configurações</h2>
-      <div style="font-size:12px;color:var(--text3);margin-top:2px">Idioma, segurança, usuários, backups e integrações</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:2px">Aparência, segurança, usuários, backups e integrações</div>
     </div>
 
-    <!-- Language selector -->
-    <div class="tbl-card" style="margin-bottom:14px">
+    <!-- Language selector — temporariamente oculto até as traduções estarem completas -->
+    <div class="tbl-card" style="margin-bottom:14px;display:none">
       <div class="tbl-header"><h3>🌐 Idioma / Language / Idioma</h3></div>
       <div style="padding:16px;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
         <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -2686,6 +3003,15 @@ select.inp option{background:var(--bg2);}
           <button class="btn lang-btn" data-lang="es" onclick="changeLanguage('es')">🇪🇸 Español</button>
         </div>
         <span id="lang-current" style="font-size:12px;color:var(--text3)"></span>
+      </div>
+    </div>
+
+    <!-- Aparência / Tema -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header"><h3>🎨 Aparência</h3></div>
+      <div style="padding:16px">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:14px">Escolha o tema de cores do aplicativo.</div>
+        <div id="theme-swatches" style="display:flex;gap:12px;flex-wrap:wrap"></div>
       </div>
     </div>
 
@@ -3168,8 +3494,28 @@ select.inp option{background:var(--bg2);}
     </div>
     <div class="modal-body">
       <div class="field">
-        <label class="lbl">Nome</label>
-        <input type="text" class="inp" id="acc-name" placeholder="Ex: Itaú">
+        <label class="lbl">Nome da conta (apelido)</label>
+        <input type="text" class="inp" id="acc-name" placeholder="Ex: Itaú Corrente">
+      </div>
+      <div class="field">
+        <label class="lbl">Banco / Instituição</label>
+        <div style="position:relative">
+          <input type="text" class="inp" id="acc-bank-search" placeholder="Buscar banco ou digitar nome…" autocomplete="off" oninput="accBankSearch(this.value)" onfocus="accBankSearch(this.value)">
+          <input type="hidden" id="acc-bank-slug">
+          <div id="acc-bank-dropdown" style="display:none;position:absolute;top:100%;left:0;right:0;z-index:200;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.15);max-height:220px;overflow-y:auto;margin-top:4px"></div>
+        </div>
+        <div id="acc-bank-preview" style="margin-top:6px;min-height:20px;display:flex;align-items:center;gap:8px"></div>
+        <div id="acc-custom-icon-fields" style="display:none;margin-top:8px;padding:10px;border:1px dashed var(--border2);border-radius:8px;background:var(--bg3)">
+          <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Ícone personalizado (opcional)</div>
+          <div style="display:grid;grid-template-columns:1fr auto;gap:6px;margin-bottom:6px">
+            <input type="url" class="inp" id="acc-custom-icon-url" placeholder="URL do ícone (.png)" style="font-size:12px" oninput="accCustomIconFromUrl()">
+            <span style="line-height:1;align-self:center;font-size:11px;color:var(--text3)">ou</span>
+          </div>
+          <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--text2);padding:6px 10px;border:1px solid var(--border2);border-radius:6px;background:var(--bg2)">
+            📁 Arquivo .png
+            <input type="file" id="acc-custom-icon-file" accept=".png,.jpg,.jpeg,.svg" style="display:none" onchange="accCustomIconFromFile(this)">
+          </label>
+        </div>
       </div>
       <div class="field-row">
         <div class="field">

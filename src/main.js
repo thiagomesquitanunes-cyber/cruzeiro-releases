@@ -709,24 +709,30 @@ function run(sql, params=[]) {
 
 // Accounts
 ipcMain.handle('accounts:list', () => all('SELECT * FROM accounts ORDER BY sort_order, name'));
-ipcMain.handle('accounts:create', (_, { name, type, currency, credit_limit }) => {
-  // Ensure the column exists (covers DBs where the migration didn't run)
+ipcMain.handle('accounts:create', (_, { name, type, currency, credit_limit, bank_slug, bank_name, bank_icon_b64 }) => {
   try { db.run('ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0'); } catch(e) {}
+  try { db.run('ALTER TABLE accounts ADD COLUMN bank_slug TEXT'); } catch(e) {}
+  try { db.run('ALTER TABLE accounts ADD COLUMN bank_name TEXT'); } catch(e) {}
+  try { db.run('ALTER TABLE accounts ADD COLUMN bank_icon_b64 TEXT'); } catch(e) {}
   const maxOrder = first('SELECT MAX(sort_order) as m FROM accounts WHERE type=?', [type])?.m || 0;
   let id;
   try {
-    id = run('INSERT INTO accounts (name,type,currency,sort_order,credit_limit) VALUES (?,?,?,?,?)', [name, type, currency||'BRL', maxOrder+1, credit_limit||0]);
+    id = run('INSERT INTO accounts (name,type,currency,sort_order,credit_limit,bank_slug,bank_name,bank_icon_b64) VALUES (?,?,?,?,?,?,?,?)',
+      [name, type, currency||'BRL', maxOrder+1, credit_limit||0, bank_slug||null, bank_name||null, bank_icon_b64||null]);
   } catch(e) {
-    // Fallback for legacy schema without credit_limit
     id = run('INSERT INTO accounts (name,type,currency,sort_order) VALUES (?,?,?,?)', [name, type, currency||'BRL', maxOrder+1]);
   }
   save();
   return first('SELECT * FROM accounts WHERE id=?', [id]);
 });
-ipcMain.handle('accounts:update', (_, { id, name, type, currency, hidden, credit_limit }) => {
+ipcMain.handle('accounts:update', (_, { id, name, type, currency, hidden, credit_limit, bank_slug, bank_name, bank_icon_b64 }) => {
   try { db.run('ALTER TABLE accounts ADD COLUMN credit_limit REAL DEFAULT 0'); } catch(e) {}
+  try { db.run('ALTER TABLE accounts ADD COLUMN bank_slug TEXT'); } catch(e) {}
+  try { db.run('ALTER TABLE accounts ADD COLUMN bank_name TEXT'); } catch(e) {}
+  try { db.run('ALTER TABLE accounts ADD COLUMN bank_icon_b64 TEXT'); } catch(e) {}
   try {
-    run('UPDATE accounts SET name=?,type=?,currency=?,hidden=?,credit_limit=? WHERE id=?', [name, type, currency, hidden?1:0, credit_limit||0, id]);
+    run('UPDATE accounts SET name=?,type=?,currency=?,hidden=?,credit_limit=?,bank_slug=?,bank_name=?,bank_icon_b64=? WHERE id=?',
+      [name, type, currency, hidden?1:0, credit_limit||0, bank_slug||null, bank_name||null, bank_icon_b64||null, id]);
   } catch(e) {
     run('UPDATE accounts SET name=?,type=?,currency=?,hidden=? WHERE id=?', [name, type, currency, hidden?1:0, id]);
   }

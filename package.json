@@ -1,6 +1,6 @@
 {
   "name": "cruzeiro",
-  "version": "4.55.8",
+  "version": "4.57.0",
   "description": "Gestão financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
@@ -20,10 +20,6 @@
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
-    "@stablelib/pbkdf2": "^2.0.1",
-    "@stablelib/random": "^2.0.1",
-    "@stablelib/sha256": "^2.0.1",
-    "@stablelib/xchacha20poly1305": "^2.0.1",
     "electron-updater": "^6.1.7",
     "officecrypto-tool": "^0.0.19",
     "sql.js": "^1.10.3"
@@ -36,15 +32,11 @@
       "target": [
         {
           "target": "nsis",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
         },
         {
           "target": "portable",
-          "arch": [
-            "x64"
-          ]
+          "arch": ["x64"]
         }
       ],
       "artifactName": "Cruzeiro-${version}-portable.exe"
@@ -69,14 +61,14 @@
       {
         "from": "assets/",
         "to": "assets/",
-        "filter": [
-          "**/*"
-        ]
+        "filter": ["**/*"]
       }
     ],
     "asar": true,
     "asarUnpack": [
-      "node_modules/sql.js/**/*"
+      "node_modules/sql.js/**/*",
+      "node_modules/@stablelib/**/*",
+      "node_modules/officecrypto-tool/**/*"
     ],
     "nsis": {
       "artifactName": "Cruzeiro-Setup-${version}.exe",
@@ -97,10 +89,7 @@
       "target": [
         {
           "target": "zip",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "arch": ["x64", "arm64"]
         }
       ],
       "category": "public.app-category.finance",
