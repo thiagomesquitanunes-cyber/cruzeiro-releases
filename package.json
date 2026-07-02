@@ -1,6 +1,6 @@
 {
   "name": "cruzeiro",
-  "version": "4.57.0",
+  "version": "4.57.4",
   "description": "Gestão financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
@@ -20,6 +20,10 @@
     "electron-builder": "^25.1.8"
   },
   "dependencies": {
+    "@stablelib/pbkdf2": "^2.0.1",
+    "@stablelib/random": "^2.0.1",
+    "@stablelib/sha256": "^2.0.1",
+    "@stablelib/xchacha20poly1305": "^2.0.1",
     "electron-updater": "^6.1.7",
     "officecrypto-tool": "^0.0.19",
     "sql.js": "^1.10.3"

@@ -4464,6 +4464,18 @@ ipcMain.handle('debt:sync-credit-cards', () => {
   // patrimônio total, mas a dívida sincronizada herda o mesmo status de
   // oculto da conta (só aparece com "Mostrar ocultos" marcado).
   const cards = all("SELECT * FROM accounts WHERE type='credit'");
+
+  // Limpeza de órfãs: dívidas sincronizadas cujo cartão foi excluído
+  // (ou mudou de tipo) — sem isso, a dívida fantasma fica para sempre.
+  const cardIds = new Set(cards.map(c => c.id));
+  all('SELECT id, linked_account_id FROM personal_debts WHERE linked_account_id IS NOT NULL')
+    .forEach(d => {
+      if (!cardIds.has(d.linked_account_id)) {
+        run('DELETE FROM personal_debt_installments WHERE debt_id=?', [d.id]);
+        run('DELETE FROM personal_debts WHERE id=?', [d.id]);
+      }
+    });
+
   let syncedMonths = 0;
   cards.forEach(acc => {
     // Encontra ou cria a dívida pessoal vinculada a este cartão.
@@ -5229,34 +5241,46 @@ ipcMain.handle('pat:account-balances', () => {
   if (!includedIds.length) return [];
 
   // For each account, get balance at end of each month (cumulative sum of transactions)
+  // NOTA: transferências ENTRAM no saldo. Excluí-las é correto em resumos de
+  // receita/despesa, mas ERRADO para saldo de conta: dinheiro transferido
+  // (p.ex. pagamento de fatura, aporte em corretora) realmente sai da conta.
   const placeholders = includedIds.map(() => '?').join(',');
   const txRows = all(
     `SELECT account_id, substr(date,1,7) as month, SUM(amount) as net
      FROM transactions
-     WHERE account_id IN (${placeholders}) AND transfer_id IS NULL
+     WHERE account_id IN (${placeholders})
      GROUP BY account_id, month
      ORDER BY account_id, month`,
     includedIds
   );
 
   // Build cumulative balances per account per month
-  const accountNames = {};
-  all(`SELECT id, name FROM accounts WHERE id IN (${placeholders})`, includedIds)
-    .forEach(a => accountNames[a.id] = a.name);
+  const accountMeta = {};
+  all(`SELECT * FROM accounts WHERE id IN (${placeholders})`, includedIds)
+    .forEach(a => accountMeta[a.id] = a);
 
   const byAccount = {};
   txRows.forEach(r => {
-    if (!byAccount[r.account_id]) byAccount[r.account_id] = { name: accountNames[r.account_id], months: {} };
+    if (!byAccount[r.account_id]) byAccount[r.account_id] = { months: {} };
     byAccount[r.account_id].months[r.month] = r.net;
   });
 
   // Convert to cumulative — MUST respect includedIds order (sort_order)
   const result = [];
   for (const accId of includedIds) {
+    const meta = accountMeta[accId] || {};
+    const base = {
+      account_id: parseInt(accId),
+      name: meta.name || '',
+      bank_slug: meta.bank_slug || null,
+      bank_name: meta.bank_name || null,
+      bank_icon_b64: meta.bank_icon_b64 || null,
+      type: meta.type || null,
+    };
     const data = byAccount[accId];
     if (!data) {
       // Account has no transactions — still include with zero balance
-      result.push({ account_id: parseInt(accId), name: accountNames[accId] || '', history: [] });
+      result.push({ ...base, history: [] });
       continue;
     }
     const months = Object.keys(data.months).sort();
@@ -5265,7 +5289,7 @@ ipcMain.handle('pat:account-balances', () => {
       cumulative += data.months[m];
       return { month: m, balance: Math.round(cumulative * 100) / 100 };
     });
-    result.push({ account_id: parseInt(accId), name: data.name, history });
+    result.push({ ...base, history });
   }
   return result;
 });

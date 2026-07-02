@@ -2065,9 +2065,13 @@ async function renderDashCards(fromDate, toDate) {
 
   const results = [];
   for (const c of cards) {
-    const txs = await ff.listTx({ accountId: c.id, fromDate }).catch(() => []);
-    const spent = txs.filter(t => t.date <= toDate && t.amount < 0).reduce((s,t) => s - t.amount, 0);
-    results.push({ id: c.id, name: c.name, spent, limit: c.credit_limit, pct: c.credit_limit > 0 ? (spent / c.credit_limit * 100) : 0, account: c });
+    // Saldo devedor REAL: soma de TODAS as transações até a data (gastos,
+    // pagamentos de fatura e estornos). Saldo negativo = valor devido.
+    // Mesma lógica da dívida sincronizada no Patrimônio — os números batem.
+    const txs = await ff.listTx({ accountId: c.id }).catch(() => []);
+    const bal = txs.filter(t => t.date <= toDate).reduce((s,t) => s + t.amount, 0);
+    const owed = bal < 0 ? -bal : 0;
+    results.push({ id: c.id, name: c.name, spent: owed, limit: c.credit_limit, pct: c.credit_limit > 0 ? (owed / c.credit_limit * 100) : 0, account: c });
   }
   results.sort((a,b) => b.pct - a.pct);
 
@@ -16636,10 +16640,11 @@ function refreshPatrimonioChart() {
       const totalOutflow = segMonths.slice(1).reduce((s, m) => s + (outflowByM[m] || 0), 0);
       const totalIncome  = segMonths.slice(1).reduce((s, m) => s + (incomeByM[m]  || 0), 0);
 
-      // Net return over the segment: compute what the "pure" ending value would be
-      // if we add back outflows and subtract inflows (Modified Dietz at segment level)
+      // Net return over the segment (Modified Dietz de ponto médio no nível
+      // do segmento): fluxos assumidos na metade do período agregado.
       const adjEnd = vCurKnown + totalOutflow + totalIncome - totalInflow;
-      const segReturn = vPrevKnown > 0 ? adjEnd / vPrevKnown - 1 : 0;
+      const segDenom = vPrevKnown + 0.5 * totalInflow - 0.5 * totalOutflow;
+      const segReturn = segDenom > 0 ? adjEnd / vPrevKnown - 1 : 0;
 
       // Monthly compound rate for the segment (guard against base <= 0 → NaN)
       const monthlyRate = (n > 0 && (1 + segReturn) > 0) ? Math.pow(1 + segReturn, 1/n) - 1 : 0;
@@ -16655,7 +16660,10 @@ function refreshPatrimonioChart() {
         const income  = incomeByM[mCur]  ?? 0;
         // If this is the final known month, use the actual value
         const vCur = (mCur === curM) ? vCurKnown : runVal * (1 + monthlyRate) + inflow - outflow;
-        const denom = runVal + inflow;
+        // Modified Dietz padrão com convenção de ponto médio (w=0,5):
+        // sem a data exata do fluxo dentro do mês, assume-se que aportes e
+        // resgates ocorrem na metade do período — capital médio investido.
+        const denom = runVal + 0.5 * inflow - 0.5 * outflow;
         if (denom > 0) {
           const r = (vCur + outflow + income - runVal - inflow) / denom;
           if (isFinite(r) && Math.abs(r) < 5) {
@@ -16677,13 +16685,13 @@ function refreshPatrimonioChart() {
       const expNext = pmo === 12 ? `${py+1}-01` : `${py}-${String(pmo+1).padStart(2,'0')}`;
 
       if (m === expNext) {
-        // Consecutive months — exact Modified Dietz
+        // Consecutive months — Modified Dietz padrão, ponto médio (w=0,5)
         const vPrev   = valByM[prev];
         const vCur    = valByM[m];
         const inflow  = inflowByM[m]  ?? 0;
         const outflow = outflowByM[m] ?? 0;
         const income  = incomeByM[m]  ?? 0;
-        const denom   = vPrev + inflow;
+        const denom   = vPrev + 0.5 * inflow - 0.5 * outflow;
         if (denom > 0) {
           const r = (vCur + outflow + income - vPrev - inflow) / denom;
           if (isFinite(r) && Math.abs(r) < 5) {
@@ -16740,18 +16748,23 @@ function refreshPatrimonioChart() {
   chartInvAssets.forEach(a => {
     // Exclude cash accounts from investment performance calculations
     if (_isCashAsset(a)) return;
-    const { factors } = buildAssetTWR(a.id);
+    const { factors, valuesByMonth } = buildAssetTWR(a.id);
     Object.entries(factors).forEach(([m, r]) => {
-      const prevM = (() => {
-        const [y, mo] = m.split('-').map(Number);
-        return mo === 1 ? `${y-1}-12` : `${y}-${String(mo-1).padStart(2,'0')}`;
-      })();
-      // Weight by prev-month value (correct reduce: sum all atualizacao values)
-      const aVal = _inv.txAll.filter(t => t.asset_id === a.id && t.tx_type === 'atualizacao'
-        && t.month.slice(0,7) === prevM).reduce((s,t) => s + t.total_value, 0);
+      // Peso = valor do ativo ENTRANDO no sub-período (denom do Modified
+      // Dietz), calculado dentro do buildAssetTWR — inclusive nos meses
+      // interpolados, onde não existe 'atualizacao' no mês anterior.
+      // Fallback: valor de atualizacao do mês anterior; senão peso 1.
+      let weight = valuesByMonth[m];
+      if (!(weight > 0)) {
+        const prevM = (() => {
+          const [y, mo] = m.split('-').map(Number);
+          return mo === 1 ? `${y-1}-12` : `${y}-${String(mo-1).padStart(2,'0')}`;
+        })();
+        const aVal = _inv.txAll.filter(t => t.asset_id === a.id && t.tx_type === 'atualizacao'
+          && t.month.slice(0,7) === prevM).reduce((s,t) => s + t.total_value, 0);
+        weight = aVal > 0 ? aVal : 1;
+      }
       if (!allFactors[m]) allFactors[m] = { sumRW: 0, sumW: 0 };
-      // Use weight=1 if no prev value (new asset starting this month)
-      const weight = aVal > 0 ? aVal : 1;
       allFactors[m].sumRW += r * weight;
       allFactors[m].sumW  += weight;
     });
@@ -17800,7 +17813,7 @@ function refreshPatrimonioTable() {
       // when the asset hasn't been sold yet (or has no recorded sale proceeds).
       const patPnl = Object.values(patNetCash).reduce((s,v) => s+v, 0) + (includeHypotheticalSale ? latestPatVal : 0);
       const patPnlLabel = patPnl >= 0 ? `▲ ${fmtBRL(patPnl)}` : `▼ ${fmtBRL(Math.abs(patPnl))}`;
-      const patPnlColor = patPnl >= 0 ? '#16a34a' : '#dc2626';
+      const patPnlColor = patPnl >= 0 ? 'var(--green)' : 'var(--red)';
 
       // Inject P&L into the asset name subtitle div
       const pnlDiv = document.getElementById(`pat-pnl-${a.id}`);
@@ -18086,7 +18099,7 @@ function refreshPatrimonioTable() {
     grandIrr = calcIRR(realFlows);
   }
   const grandIrrLabel = grandIrr !== null ? ` — TIR: ${(grandIrr*100).toFixed(1)}% a.a.` : '';
-  const grandIrrColor = grandIrr !== null ? (grandIrr >= 0 ? '#16a34a' : '#dc2626') : 'var(--text3)';
+  const grandIrrColor = grandIrr !== null ? (grandIrr >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text3)';
 
   // Ganho/Perda total: soma simples do fluxo nominal + valor atual
   const _grandFlowSum = Object.values(invNetCashByMonth).reduce((s, v) => s + v, 0);
@@ -18094,7 +18107,7 @@ function refreshPatrimonioTable() {
   const grandGanhoLabel = grandGanho !== null
     ? `${grandGanho >= 0 ? '▲' : '▼'} ${fmtBRL(Math.abs(grandGanho))}`
     : '';
-  const grandGanhoColor = grandGanho !== null ? (grandGanho >= 0 ? '#16a34a' : '#dc2626') : 'var(--text3)';
+  const grandGanhoColor = grandGanho !== null ? (grandGanho >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text3)';
 
   const showReal2 = _inv.showRealFlow;
   const totNomFlowCells = months.map(m => {
@@ -21684,7 +21697,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     }
 
     const irrLabel2 = catIrr !== null ? `TIR: ${(catIrr*100).toFixed(1)}% a.a.` : '';
-    const irrColor2 = catIrr !== null ? (catIrr >= 0 ? '#16a34a' : '#dc2626') : 'var(--text3)';
+    const irrColor2 = catIrr !== null ? (catIrr >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text3)';
 
     // Ganho/Perda por categoria: soma simples do fluxo nominal + valor atual
     const _catFlowSum = Object.values(catNetCashByMonth).reduce((s, v) => s + v, 0);
@@ -21692,7 +21705,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     const catGanhoLabel2 = catGanho2 !== null
       ? `${catGanho2 >= 0 ? '▲' : '▼'} ${fmtBRL(Math.abs(catGanho2))}`
       : '';
-    const catGanhoColor2 = catGanho2 !== null ? (catGanho2 >= 0 ? '#16a34a' : '#dc2626') : 'var(--text3)';
+    const catGanhoColor2 = catGanho2 !== null ? (catGanho2 >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text3)';
 
     const BG_SUB = 'var(--bg4)';
     const valueCells2 = allMonths.map(m2 => {
@@ -21836,7 +21849,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
       nomFlows[nomFlows.length - 1] += latestVal; // add current value at final period
       irrNominal = calcIRR(nomFlows);
     }
-    const irrColor = (irr === null || isCashAsset) ? 'var(--text3)' : irr >= 0 ? '#16a34a' : '#dc2626';
+    const irrColor = (irr === null || isCashAsset) ? 'var(--text3)' : irr >= 0 ? 'var(--green)' : 'var(--red)';
     const irrLabel = isCashAsset ? '' : irr !== null ? `TIR: ${(irr*100).toFixed(1)}% a.a.` : 'TIR: —';
 
     // P&L = soma simples do fluxo nominal + valor atual (os sinais já estão corretos)
@@ -21844,7 +21857,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     if (hasCashFlows && !isCashAsset) {
       const pnl = Object.values(monthlyNetCash).reduce((s, v) => s + v, 0) + latestVal;
       pnlLabel = pnl >= 0 ? `▲ ${fmtBRL(pnl)}` : `▼ ${fmtBRL(Math.abs(pnl))}`;
-      pnlColor = pnl >= 0 ? '#16a34a' : '#dc2626';
+      pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
     }
 
     // Benchmark label: compare nominal TIR vs CDI/IBOV (same nominal base)
@@ -21866,7 +21879,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
         const bmkAnn = Math.pow(1 + avgMonthlyRate, 12) - 1;
         const diff = irrNominal - bmkAnn;
         const sign = diff >= 0 ? '+' : '';
-        const col  = diff >= 0 ? '#16a34a' : '#dc2626';
+        const col  = diff >= 0 ? 'var(--green)' : 'var(--red)';
         const name = a.benchmark === 'ibov' ? 'IBOV' : 'CDI';
         bmkLabel = ` <span style="color:${col};font-size:10px">${sign}${(diff*100).toFixed(1)}% a.a. vs ${name}</span>`;
       }
@@ -21876,7 +21889,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     // Uses the already-computed nominal IRR for consistency
     function nomRetLabel(netCash, latVal, cM) {
       if (irrNominal === null || isCashAsset) return '';
-      const col = irrNominal >= 0 ? '#16a34a' : '#dc2626';
+      const col = irrNominal >= 0 ? 'var(--green)' : 'var(--red)';
       const sign = irrNominal >= 0 ? '+' : '';
       return ` <span style="color:${col};font-size:9px">(${sign}${(irrNominal*100).toFixed(1)}% a.a. nominal)</span>`;
     }
@@ -22514,7 +22527,7 @@ function renderAposKPIs({ needPMT, metaPatrimonio, goalType, goalRaw, rateReal, 
   const reached = needPMT === 0;
   const kpis = [
     { icon:'🎯', label: goalType==='patrimonio' ? 'Meta de patrimônio' : 'Patrimônio necessário',
-      value: fmtBRL(metaPatrimonio), color:'#2e7d32',
+      value: fmtBRL(metaPatrimonio), color:'var(--green)',
       sub: goalType==='renda' ? `para sustentar renda de ${fmtBRL(goalRaw)}/mês` : '' },
     { icon:'📅', label:'Anos até a aposentadoria', value:`${yearsTotal} anos`, color:'#0891b2', sub:'' },
     { icon:'💵', label:'Poupança total necessária/mês',
@@ -22631,7 +22644,7 @@ function renderAposCharts(rows, metaPatrimonio) {
       interaction:{ mode:'index', intersect:false },
       plugins:{
         legend:{ position:'top', align:'end', labels:{boxWidth:10,boxHeight:10,usePointStyle:true,pointStyle:'circle',font:{size:11,weight:'600'}} },
-        title:{ display:true, text:'Patrimônio real e projetado vs meta', font:{size:13,weight:'700'}, color:'#2e7d32', padding:{bottom:12} },
+        title:{ display:true, text:'Patrimônio real e projetado vs meta', font:{size:13,weight:'700'}, color:'var(--green)', padding:{bottom:12} },
         tooltip:{ enabled:false, external:(context) => dashTooltip(context, {
           getTitle: (dp) => labels[dp[0].dataIndex],
           getRows:  (dp) => dp.filter(d=>d.parsed.y!=null).map(d => ({ color:d.dataset.borderColor, label:d.dataset.label, value:fmtBRL(d.parsed.y) })),
@@ -22658,7 +22671,7 @@ function renderAposCharts(rows, metaPatrimonio) {
       interaction:{ mode:'index', intersect:false },
       plugins:{
         legend:{ position:'top', align:'end', labels:{boxWidth:10,boxHeight:10,usePointStyle:true,pointStyle:'circle',font:{size:11,weight:'600'}} },
-        title:{ display:true, text:'Poupança necessária (futura) e realizada (histórica)', font:{size:13,weight:'700'}, color:'#2e7d32', padding:{bottom:12} },
+        title:{ display:true, text:'Poupança necessária (futura) e realizada (histórica)', font:{size:13,weight:'700'}, color:'var(--green)', padding:{bottom:12} },
         tooltip:{ enabled:false, external:(context) => dashTooltip(context, {
           getTitle: (dp) => labels[dp[0].dataIndex],
           getRows:  (dp) => dp.filter(d=>d.parsed.y!=null).map(d => ({ color:d.dataset.borderColor, label:d.dataset.label, value:fmtBRL(d.parsed.y) })),
