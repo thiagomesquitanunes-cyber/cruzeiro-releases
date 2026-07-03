@@ -5866,25 +5866,29 @@ function showMemoDupUI(matches, finalRows, updatedInstallments, accountId, check
   preview.innerHTML = `
     <div style="margin-bottom:10px">
       <div style="font-size:14px;font-weight:700;margin-bottom:4px">
-        🔁 ${matches.length} lançamento(s) futuro(s) correspondente(s)
+        🔁 ${matches.length} lançamento(s) correspondente(s) encontrado(s)
       </div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">
-        Estas linhas têm o <strong>mesmo memorando e categoria</strong> de lançamentos futuros já registrados
-        (ex: recorrências com valor variável), com até 7 dias de diferença.
-        <br><strong>🔄 Substituir</strong>: apaga o lançamento futuro e importa o valor real (recomendado)
-        &nbsp;·&nbsp; <strong>✅ Manter ambos</strong> &nbsp;·&nbsp; <strong>🚫 Pular</strong>: mantém o futuro, descarta a importação.
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px;line-height:1.6">
+        Estas linhas têm o <strong>mesmo memorando e categoria</strong> de lançamentos já registrados, com até 7 dias de diferença (o detector principal não pegou por causa da diferença de valor ou data).
+        <br>📅 <strong>Previsão de recorrência</strong> (não conferida): <strong>🔄 Substituir</strong> é o recomendado — apaga a previsão e importa o valor real.
+        <br>✅ <strong>Já conferido</strong> (transação real): <strong>🚫 Pular</strong> é o recomendado — já está certo, não precisa duplicar.
+        <br><strong>✅ Manter ambos</strong> importa mesmo assim, caso sejam de fato duas transações diferentes.
       </div>
 
       <div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px">
         <div style="display:grid;grid-template-columns:1fr 1fr 150px;background:var(--bg4);border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase">
           <div style="padding:8px 10px;border-right:1px solid var(--border2)">🆕 Importando (valor real)</div>
-          <div style="padding:8px 10px;border-right:1px solid var(--border2);background:#eff6ff">📅 Lançamento futuro existente</div>
+          <div style="padding:8px 10px;border-right:1px solid var(--border2);background:#eff6ff">📌 Lançamento correspondente</div>
           <div style="padding:8px 10px;text-align:center">Ação</div>
         </div>
         ${matches.map(m => {
           const r  = finalRows[m.rowIndex];
           const ex = m.existing[0];
           const amtCls = v => v < 0 ? 'color:var(--red)' : 'color:var(--green)';
+          const isPlaceholder = !ex.cleared && ex.recurring_id; // provisão de recorrência
+          const isConfirmedDup = !!ex.cleared;                   // já conferido = transação real
+          const statusLabel = isConfirmedDup ? '✅ já conferido — mesma transação' : (isPlaceholder ? '📅 previsão de recorrência' : 'não conferido');
+          const defaultAction = isConfirmedDup ? 'skip' : 'replace';
           return `<div style="display:grid;grid-template-columns:1fr 1fr 150px;border-bottom:1px solid var(--border)">
             <div style="padding:7px 10px;border-right:1px solid var(--border2);font-size:12px">
               <div style="color:var(--text3);font-size:10px">${fmtDate(r.dateISO)}</div>
@@ -5892,19 +5896,19 @@ function showMemoDupUI(matches, finalRows, updatedInstallments, accountId, check
               <div style="${amtCls(r.amount)};font-family:'DM Mono',monospace">${fmtBRL(r.amount)}</div>
             </div>
             <div style="padding:7px 10px;border-right:1px solid var(--border2);font-size:12px;background:#f8fafc">
-              <div style="color:var(--text3);font-size:10px">${fmtDate(ex.date)} · não conferido</div>
+              <div style="color:var(--text3);font-size:10px">${fmtDate(ex.date)} · ${statusLabel}</div>
               <div style="color:#1d4ed8">${esc(ex.memo || '')}</div>
               <div style="${amtCls(ex.amount)};font-family:'DM Mono',monospace">${fmtBRL(ex.amount)}</div>
             </div>
             <div style="padding:6px 8px;display:flex;flex-direction:column;gap:3px;justify-content:center;font-size:11px">
-              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#1d4ed8;font-weight:500">
-                <input type="radio" name="mdup-${m.rowIndex}" value="replace" checked> 🔄 Substituir
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#1d4ed8;font-weight:500" title="${isConfirmedDup ? 'Cuidado: apaga o lançamento já conferido e insere este no lugar' : 'Apaga a previsão e insere o valor real'}">
+                <input type="radio" name="mdup-${m.rowIndex}" value="replace" ${defaultAction==='replace'?'checked':''}> 🔄 Substituir
               </label>
               <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--green)">
                 <input type="radio" name="mdup-${m.rowIndex}" value="both"> ✅ Manter ambos
               </label>
-              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--red)">
-                <input type="radio" name="mdup-${m.rowIndex}" value="skip"> 🚫 Pular
+              <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:var(--red)" title="${isConfirmedDup ? 'Recomendado: já está registrado, não importa de novo' : ''}">
+                <input type="radio" name="mdup-${m.rowIndex}" value="skip" ${defaultAction==='skip'?'checked':''}> 🚫 Pular
               </label>
             </div>
           </div>`;

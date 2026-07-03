@@ -2667,6 +2667,11 @@ ipcMain.handle('office:decrypt', async (_, { buffer: arrayBuffer, password }) =>
 // ── Round-2 duplicate check: same memo + category, ±7 days, any amount ──
 // Targets recurring placeholders (uncleared future txns) whose amount varies
 // month to month (condomínio, contas de consumo, etc).
+// Também serve de segunda camada de segurança contra duplicatas comuns
+// (mesmo memo+categoria, data próxima) que o detector principal não pegou
+// — por isso NÃO se limita a lançamentos não conferidos: um lançamento já
+// conferido com o mesmo memo/categoria/data é o sinal mais forte possível
+// de que é a mesma transação sendo reimportada.
 ipcMain.handle('bank:check-memo-dups', (_, { accountId, rows }) => {
   const matches = [];
   for (let i = 0; i < (rows || []).length; i++) {
@@ -2674,8 +2679,8 @@ ipcMain.handle('bank:check-memo-dups', (_, { accountId, rows }) => {
     if (!r || !r.memo || !r.dateISO) continue;
     try {
       const existing = all(
-        `SELECT id, date, amount, memo, category FROM transactions
-         WHERE account_id=? AND cleared=0
+        `SELECT id, date, amount, memo, category, cleared, recurring_id FROM transactions
+         WHERE account_id=?
            AND LOWER(TRIM(memo)) = LOWER(TRIM(?))
            AND LOWER(TRIM(COALESCE(category,''))) = LOWER(TRIM(?))
            AND ABS(julianday(date) - julianday(?)) <= 7
