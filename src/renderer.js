@@ -5305,6 +5305,8 @@ async function confirmBankImport() {
   try {
     const accountIds = [...new Set(withML.map(r => r.accountId))];
     let allDups = [];
+    let autoSkipGlobalIndices = [];
+    let autoSkipInfo = null; // { untilDate, count } — apenas para exibição
     for (const accId of accountIds) {
       const idxMap = []; // local index -> global index in withML
       const rowsForDupCheck = [];
@@ -5321,13 +5323,39 @@ async function confirmBankImport() {
       if (res?.needsConfirmation && res.potentialDups?.length) {
         for (const d of res.potentialDups) allDups.push({ ...d, rowIndex: idxMap[d.rowIndex] });
       }
+      if (res?.autoSkippedByBalance?.indices?.length) {
+        autoSkipGlobalIndices.push(...res.autoSkippedByBalance.indices.map(li => idxMap[li]));
+        autoSkipInfo = {
+          untilDate: res.autoSkippedByBalance.untilDate,
+          count: (autoSkipInfo?.count || 0) + res.autoSkippedByBalance.indices.length,
+        };
+      }
     }
     G('bank-result').innerHTML = '';
-    if (allDups.length) {
-      showDupResolutionUI(allDups, withML, parcelInstallments, accountId, checkDailySaldo);
+
+    // Remove em bloco as linhas presumidas já importadas pela conferência de
+    // saldo diário, e remapeia os índices das duplicatas individuais
+    // restantes para a lista já filtrada (senão o rowIndex fica torto).
+    let keptRows = withML, remappedDups = allDups;
+    if (autoSkipGlobalIndices.length) {
+      const skipSet = new Set(autoSkipGlobalIndices);
+      const oldToNew = new Map();
+      keptRows = [];
+      withML.forEach((r, gi) => {
+        if (skipSet.has(gi)) return;
+        oldToNew.set(gi, keptRows.length);
+        keptRows.push(r);
+      });
+      remappedDups = allDups
+        .filter(d => oldToNew.has(d.rowIndex))
+        .map(d => ({ ...d, rowIndex: oldToNew.get(d.rowIndex) }));
+    }
+
+    if (remappedDups.length || autoSkipInfo) {
+      showDupResolutionUI(remappedDups, keptRows, parcelInstallments, accountId, checkDailySaldo, autoSkipInfo);
     } else {
       // No dups — go straight to edit table
-      renderImportEditTable(withML);
+      renderImportEditTable(keptRows);
     }
   } catch(e) {
     G('bank-result').innerHTML = '';
@@ -6036,16 +6064,27 @@ async function doImport(finalRows, parcelInstallments, accountId, checkDailySald
   }
 }
 
-function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accountId, checkDailySaldo) {
-  // Build a map: rowIndex → existing records from DB
+function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accountId, checkDailySaldo, autoSkipInfo) {
+  // Build a map: rowIndex → objeto completo do match (existing + reason + score + nickname)
   const dupMap = {};
-  potentialDups.forEach(d => { dupMap[d.rowIndex] = d.existing || []; });
+  potentialDups.forEach(d => { dupMap[d.rowIndex] = d; });
 
   const preview = G('bank-preview');
+  const fmtBRDateTop = iso => iso && /^\d{4}-\d{2}-\d{2}/.test(iso) ? iso.slice(0,10).split('-').reverse().join('/') : iso;
+  const autoSkipBanner = autoSkipInfo ? `
+    <div style="display:flex;align-items:center;gap:10px;background:var(--green-bg);border:1px solid var(--green);border-radius:10px;padding:10px 14px;margin-bottom:12px">
+      <span style="font-size:20px">💰</span>
+      <div style="font-size:12.5px;color:var(--text)">
+        <strong>Conferência por saldo diário:</strong> o saldo do extrato bateu com o saldo do Cruzeiro em <strong>${fmtBRDateTop(autoSkipInfo.untilDate)}</strong> —
+        ${autoSkipInfo.count} lançamento(s) até essa data já ${autoSkipInfo.count===1?'foi':'foram'} presumido(s) como já importado(s) e não aparece(m) na lista abaixo.
+      </div>
+    </div>` : '';
 
   // Replace the entire preview content with a custom dup-resolution panel
   preview.innerHTML = `
     <div style="margin-bottom:10px">
+      ${autoSkipBanner}
+      ${potentialDups.length > 0 ? `
       <div style="font-size:14px;font-weight:700;margin-bottom:4px">
         ⚠️ ${potentialDups.length} possível(is) duplicata(s) encontrada(s)
       </div>
@@ -6058,9 +6097,12 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
       <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
         <button class="btn xs" onclick="dupBulkAction('skip')" title="Marca 'Pular' em todas as linhas sinalizadas">🚫 Pular todas</button>
         <button class="btn xs" onclick="dupBulkAction('import')" title="Marca 'Importar' em todas as linhas sinalizadas">✅ Importar todas</button>
-      </div>
+      </div>` : `
+      <div style="font-size:13px;color:var(--text2);margin-bottom:6px">
+        Nenhuma outra duplicata encontrada nas linhas restantes. Pode seguir para a edição normalmente.
+      </div>`}
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px;${potentialDups.length===0?'display:none':''}">
         <!-- Header -->
         <div style="display:grid;grid-template-columns:1fr 1fr auto;background:var(--bg4);border-bottom:1px solid var(--border);font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;padding:0;grid-column:1/-1">
           <div style="padding:8px 10px;border-right:1px solid var(--border2);background:var(--bg4)">🆕 Registro novo (do arquivo)</div>
@@ -6128,7 +6170,9 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
         <button class="btn primary" onclick="confirmDupAndImport()">✓ Confirmar e importar</button>
         <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
         <span style="font-size:12px;color:var(--text3)">
-          ${potentialDups.length} possível(is) duplicata(s) — as ações recomendadas já vêm pré-marcadas; revise e confirme
+          ${potentialDups.length > 0
+            ? `${potentialDups.length} possível(is) duplicata(s) — as ações recomendadas já vêm pré-marcadas; revise e confirme`
+            : `${finalRows.length} lançamento(s) prontos para seguir`}
         </span>
       </div>
     </div>`;

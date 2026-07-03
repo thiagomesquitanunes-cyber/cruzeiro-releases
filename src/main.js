@@ -2714,10 +2714,46 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
     return (best && bestScore >= ML_MIN_SCORE && best.memo) ? best.memo : null;
   };
 
+  // ── Conferência por saldo diário (bloco) ──────────────────────────────
+  // Extratos que trazem o saldo do dia (ex.: Itaú) permitem uma checagem
+  // muito mais confiável que comparar linha a linha: se o saldo acumulado
+  // do Cruzeiro bate com o saldo informado pelo banco numa certa data,
+  // TUDO até essa data já está corretamente registrado — não importa se
+  // cada transação individual "parece" duplicata ou não. Isso resolve o
+  // caso de reimportar um extrato antigo com muitas linhas que mudaram de
+  // categoria/memo desde então (o que atrapalharia o matcher por texto).
+  const SALDO_TOL = 0.05; // poucos centavos — cobre rendimento automático de c/c
+  let autoSkipUntilISO = null;
+  const autoSkippedLocal = [];
+  if (dryRun) {
+    const withSaldo = rows
+      .map((r, i) => ({ i, iso: toISO(r.date), saldo: r.saldo }))
+      .filter(x => x.iso && x.saldo !== undefined && x.saldo !== null)
+      .sort((a, b) => a.iso.localeCompare(b.iso));
+    for (const x of withSaldo) {
+      const dbBal = first(
+        'SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND date<=?',
+        [accountId, x.iso]
+      )?.bal || 0;
+      if (Math.abs(dbBal - x.saldo) <= SALDO_TOL) {
+        autoSkipUntilISO = x.iso; // guarda a data batida MAIS RECENTE encontrada
+      }
+    }
+  }
+
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const date = toISO(r.date);
     if (!date) continue;
+
+    if (dryRun && autoSkipUntilISO && date <= autoSkipUntilISO) {
+      // Presumido já importado pela conferência de saldo — nem entra no
+      // matcher linha a linha, e nem aparece na lista de duplicatas pra
+      // revisão manual (o usuário pediu justamente pra pular essa etapa
+      // quando o saldo já garante que está tudo certo até aqui).
+      autoSkippedLocal.push(i);
+      continue;
+    }
 
     if (skipSet.has(i)) continue; // user chose to skip this one
 
@@ -2848,9 +2884,12 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
 
   // Dry run: apenas reporta o que pareceria duplicado, sem inserir nada
   if (dryRun) {
-    return potentialDups.length > 0
-      ? { needsConfirmation: true, potentialDups, totalRows: rows.length }
-      : { needsConfirmation: false, potentialDups: [], totalRows: rows.length };
+    const autoSkippedByBalance = autoSkippedLocal.length
+      ? { untilDate: autoSkipUntilISO, indices: autoSkippedLocal }
+      : null;
+    return (potentialDups.length > 0 || autoSkippedByBalance)
+      ? { needsConfirmation: true, potentialDups, totalRows: rows.length, autoSkippedByBalance }
+      : { needsConfirmation: false, potentialDups: [], totalRows: rows.length, autoSkippedByBalance: null };
   }
 
   // Substituição de provisões de recorrência: antes de inserir a transação
