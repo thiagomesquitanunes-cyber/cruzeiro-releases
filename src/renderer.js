@@ -5789,8 +5789,8 @@ async function doImportFromTable() {
 }
 
 // Shared tail of the import flow (called directly or after memo-dup resolution)
-async function finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks) {
-  const importResult = await doImport(finalRows, updatedInstallments, accountId, checkDailySaldo);
+async function finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks, replaceIds = []) {
+  const importResult = await doImport(finalRows, updatedInstallments, accountId, checkDailySaldo, replaceIds);
   if (!importResult) return; // erro já exibido por doImport
 
   let patLinkedCount = 0;
@@ -5947,7 +5947,7 @@ async function confirmMemoDupImport() {
   await finishImportWithPatLinks(rowsToImport, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks);
 }
 
-async function doImport(finalRows, parcelInstallments, accountId, checkDailySaldo) {
+async function doImport(finalRows, parcelInstallments, accountId, checkDailySaldo, replaceIds = []) {
   G('bank-result').innerHTML = '<div class="info-box">⏳ Importando…</div>';
   try {
     // Separate transfer rows from regular rows
@@ -6197,26 +6197,81 @@ async function confirmDupAndImport() {
   const { finalRows, parcelInstallments, accountId, checkDailySaldo, dupMap } = preview._dup || {};
   if (!finalRows) return;
 
-  // Respeita o radio em todas as linhas; "replace" importa a linha E
-  // marca a provisão de recorrência correspondente para exclusão
-  const replaceIds = [];
+  // Separa as linhas em 3 grupos, conforme o radio marcado em cada uma:
+  //  - "replace": provisão de recorrência confirmada — processada AGORA
+  //    mesmo (apaga a provisão + insere a real, herdando memo/categoria
+  //    dela). Não precisa edição manual nem passa pelo Round-2 depois.
+  //  - "import" / não-duplicata: segue para a tela de edição normal.
+  //  - "skip": descartada.
+  const directReplaceRows = [];
   const selectedRows = finalRows.filter((r, i) => {
     const radios = preview.querySelectorAll(`input[name="dup-action-${i}"]`);
     const checked = [...radios].find(rb => rb.checked);
     const action = checked?.value;
     if (action === 'replace') {
       const exId = parseInt(checked.dataset.existingId);
-      if (exId) replaceIds.push(exId);
-      return true; // importa a transação real no lugar
+      const ex0  = dupMap[i]?.existing?.[0];
+      directReplaceRows.push({ row: r, existingId: exId, existingMemo: ex0?.memo || r.memo, existingCategory: ex0?.category || r.category || '' });
+      return false; // não segue para a edição manual
     }
     return action !== 'skip';
   });
 
-  // Update pending import with only the selected (non-discarded) rows
-  _pendingImport = { rows: selectedRows, parcelInstallments, accountId, checkDailySaldo, replaceIds };
+  if (directReplaceRows.length) {
+    G('bank-result').innerHTML = `<div class="info-box">⏳ Substituindo ${directReplaceRows.length} provisão(ões) de recorrência…</div>`;
+    try {
+      await applyDirectReplacements(directReplaceRows, accountId, checkDailySaldo);
+      toast(`🔄 ${directReplaceRows.length} provisão(ões) substituída(s) pelo valor real — nada a revisar nelas.`);
+    } catch(e) {
+      toast('Erro ao substituir provisão: ' + e.message);
+    }
+    G('bank-result').innerHTML = '';
+  }
+
+  if (!selectedRows.length) {
+    // Só havia substituições diretas — nada mais a fazer nesta importação
+    if (currentPage === 'account') refreshAccount();
+    _pendingImport = null;
+    clearPersistedImportState();
+    preview.style.display = 'none';
+    return;
+  }
+
+  // Update pending import with only the selected (non-discarded, non-replaced) rows
+  _pendingImport = { rows: selectedRows, parcelInstallments, accountId, checkDailySaldo };
 
   // renderImportEditTable rebuilds preview.innerHTML from scratch — no need to clear first
   renderImportEditTable(selectedRows);
+}
+
+// Insere diretamente as transações confirmadas como "substituir provisão":
+// apaga a provisão de recorrência e insere a real com o valor/data do
+// extrato, herdando memo e categoria da provisão (é a mesma recorrência,
+// já corretamente categorizada — não faz sentido pedir pro usuário
+// preencher de novo algo que o app já sabia).
+async function applyDirectReplacements(directReplaceRows, accountId, checkDailySaldo) {
+  const groups = new Map(); // accountId -> { rows: [], replaceIds: [] }
+  for (const { row, existingId, existingMemo, existingCategory } of directReplaceRows) {
+    const accId = row.accountId ?? accountId;
+    if (!groups.has(accId)) groups.set(accId, { rows: [], replaceIds: [] });
+    const g = groups.get(accId);
+    g.rows.push({
+      date: row.dateISO.split('-').reverse().join('/'),
+      amount: row.amount,
+      memo: existingMemo,
+      category: existingCategory,
+      saldo: row.saldo ?? null,
+    });
+    if (existingId) g.replaceIds.push(existingId);
+  }
+  for (const [accId, g] of groups) {
+    if (!g.rows.length) continue;
+    await ff.bankImport({
+      accountId: accId, rows: g.rows,
+      checkDailySaldo: checkDailySaldo && accId === accountId,
+      skipIds: [], dryRun: false, replaceIds: g.replaceIds,
+    });
+  }
 }
 
 // ── Global date/value parsing helpers (used by all parsers) ──

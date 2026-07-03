@@ -2768,7 +2768,7 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
       // generosa (±R$1 exata OU até 30% de diferença com mesmo sinal —
       // cobre recorrências lançadas com valor estimado, tipo condomínio).
       const candidates = all(
-        `SELECT id, date, memo, amount, cleared, recurring_id FROM transactions
+        `SELECT id, date, memo, amount, cleared, recurring_id, category FROM transactions
          WHERE account_id=?
          AND ABS(julianday(date) - julianday(?)) <= 10
          AND ( ABS(amount-?) <= 1.00
@@ -2871,7 +2871,7 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
           nickname: impNickname || null,
           score: Math.round(bestScore * 100) / 100,
           existing: [{
-            id: bestMatch.id, memo: bestMatch.memo,
+            id: bestMatch.id, memo: bestMatch.memo, category: bestMatch.category || '',
             date: bestMatch.date, amount: bestMatch.amount,
             recurring: !!bestMatch.recurring_id, cleared: !!bestMatch.cleared,
           }],
