@@ -643,6 +643,51 @@ select.inp option{background:var(--bg2);}
 .goal-color-btn.active{border-color:var(--text);}
 /* ── Tour ── */
 #tour-overlay{position:fixed;inset:0;z-index:19000;pointer-events:none;}
+
+/* ═══ Moedinha — assistente-mascote ═══ */
+#guide-root{position:fixed;bottom:18px;right:18px;z-index:18000;display:flex;flex-direction:column;align-items:flex-end;gap:10px;}
+#guide-mascot{cursor:pointer;position:relative;filter:drop-shadow(0 4px 10px rgba(0,0,0,.25));
+  animation:gm-bob 3.2s ease-in-out infinite;transition:transform .18s;}
+#guide-mascot:hover{transform:scale(1.08);}
+#guide-mascot:active{transform:scale(.95);}
+@keyframes gm-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+/* Piscar: pálpebras descem a cada ~4s */
+.gm-lid{animation:gm-blink 4.2s infinite;}
+@keyframes gm-blink{0%,94%,100%{height:0}96%,98%{height:14px}}
+/* Barrinhas balançam suavemente */
+.gm-bars{transform-origin:100px 106px;animation:gm-sway 3.2s ease-in-out infinite;}
+@keyframes gm-sway{0%,100%{transform:rotate(0)}50%{transform:rotate(-3deg)}}
+/* Badge de novidade */
+#guide-badge{position:absolute;top:-2px;right:-2px;width:20px;height:20px;border-radius:50%;
+  background:var(--red);color:#fff;font-size:12px;font-weight:800;display:flex;align-items:center;
+  justify-content:center;border:2px solid var(--bg);animation:gm-pulse 1.6s infinite;}
+@keyframes gm-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+/* Balão */
+#guide-bubble{width:320px;max-height:min(480px,70vh);background:var(--bg2);border:1px solid var(--border2);
+  border-radius:16px;box-shadow:0 8px 28px rgba(0,0,0,.22);display:flex;flex-direction:column;
+  overflow:hidden;animation:gm-pop .22s cubic-bezier(.34,1.56,.64,1);}
+@keyframes gm-pop{from{opacity:0;transform:translateY(12px) scale(.94)}to{opacity:1;transform:none}}
+#guide-bubble-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;
+  background:linear-gradient(135deg,#00695c,#00897b);color:#fff;}
+#guide-bubble-title{font-weight:800;font-size:14px;letter-spacing:.02em;}
+.guide-hbtn{background:rgba(255,255,255,.15);border:none;color:#fff;width:24px;height:24px;border-radius:6px;
+  cursor:pointer;font-size:12px;line-height:1;}
+.guide-hbtn:hover{background:rgba(255,255,255,.3);}
+#guide-bubble-body{padding:14px;overflow-y:auto;font-size:13px;line-height:1.5;color:var(--text);}
+#guide-bubble-body h4{margin:0 0 6px;font-size:13.5px;}
+#guide-bubble-footer{display:flex;align-items:center;gap:6px;padding:8px 12px;border-top:1px solid var(--border);}
+.guide-fbtn{background:none;border:none;color:var(--text3);font-size:11.5px;cursor:pointer;padding:4px 6px;border-radius:6px;}
+.guide-fbtn:hover{background:var(--bg3);color:var(--text2);}
+/* Checklist de progresso */
+.guide-check{display:flex;align-items:flex-start;gap:8px;padding:7px 9px;border-radius:9px;margin-bottom:6px;
+  background:var(--bg3);border:1px solid var(--border);}
+.guide-check.done{opacity:.62;}
+.guide-check .gc-ico{font-size:14px;line-height:1.3;flex-shrink:0;}
+.guide-check .gc-label{font-size:12.5px;}
+.guide-check .gc-tip{font-size:11.5px;color:var(--text3);margin-top:2px;}
+.guide-check a{color:var(--accent);cursor:pointer;text-decoration:underline;}
+.guide-progressbar{height:7px;border-radius:4px;background:var(--bg3);overflow:hidden;margin:8px 0 12px;}
+.guide-progressbar>div{height:100%;border-radius:4px;background:linear-gradient(90deg,#ffd54f,#66bb6a);transition:width .5s;}
 #tour-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0);transition:background .4s;z-index:19001;}
 #tour-spotlight{position:fixed;border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.55);transition:all .45s cubic-bezier(.4,0,.2,1);z-index:19002;pointer-events:none;}
 #tour-card{position:fixed;z-index:19003;background:var(--bg2);border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,.28);padding:0;width:360px;max-width:calc(100vw - 32px);pointer-events:all;transition:all .3s;}
@@ -3015,14 +3060,23 @@ select.inp option{background:var(--bg2);}
       </div>
     </div>
 
-    <!-- Tour restart + manual -->
+    <!-- Moedinha, tour e manual -->
     <div class="tbl-card" style="margin-bottom:14px">
-      <div class="tbl-header"><h3>🎓 Tour e Manual</h3></div>
-      <div style="padding:16px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
-        <div style="font-size:13px;color:var(--text2)">Reveja o tour guiado ou abra o manual completo no idioma selecionado.</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn" onclick="openManual()">📖 Abrir manual</button>
-          <button style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:7px 14px;cursor:pointer;font-size:14px" onclick="startTour()">▶ Reiniciar tour</button>
+      <div class="tbl-header"><h3>🪙 Assistente Moedinha, Tour e Manual</h3></div>
+      <div style="padding:16px;display:flex;flex-direction:column;gap:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+          <div style="font-size:13px;color:var(--text2)">A <strong>Moedinha</strong> fica no cantinho da tela dando dicas contextuais da aba em que você está — e acompanha o que já foi feito e o que falta.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" onclick="guideEnableFromSettings()">🪙 Chamar a Moedinha</button>
+            <button class="btn" onclick="guideDisableFromSettings()">🚫 Desativar</button>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px">
+          <div style="font-size:13px;color:var(--text2)">Prefere o formato clássico? O tour guiado em etapas e o manual completo continuam disponíveis.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" onclick="openManual()">📖 Abrir manual</button>
+            <button style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:7px 14px;cursor:pointer;font-size:14px" onclick="startTour()">▶ Tour clássico</button>
+          </div>
         </div>
       </div>
     </div>
@@ -3830,6 +3884,68 @@ select.inp option{background:var(--bg2);}
 
 
 <!-- ═══ TOUR DE BOAS-VINDAS ═══ -->
+<!-- ═══ CRUZINHO — assistente-mascote ═══ -->
+<div id="guide-root" style="display:none">
+  <!-- Balão de fala -->
+  <div id="guide-bubble" style="display:none">
+    <div id="guide-bubble-header">
+      <span id="guide-bubble-title">Moedinha</span>
+      <div style="display:flex;gap:4px">
+        <button class="guide-hbtn" onclick="guideMinimize()" title="Minimizar">—</button>
+      </div>
+    </div>
+    <div id="guide-bubble-body"><!-- conteúdo dinâmico --></div>
+    <div id="guide-bubble-footer">
+      <button class="guide-fbtn" onclick="guideSnooze()" title="Some por esta sessão">😴 Agora não</button>
+      <span style="flex:1"></span>
+      <button class="guide-fbtn" onclick="guideOpenSettingsInfo()" title="Como me chamar de volta">❓</button>
+    </div>
+  </div>
+
+  <!-- Mascote: moedinha C$ do logo, com olhos e barrinhas verdes -->
+  <div id="guide-mascot" onclick="guideToggle()" title="Moedinha — sua guia (clique!)">
+    <svg viewBox="0 0 120 120" width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="gm-gold" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#ffd54f"/><stop offset="100%" stop-color="#f9a825"/>
+        </linearGradient>
+        <linearGradient id="gm-gold2" x1="0%" y1="100%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#fff3c4"/><stop offset="100%" stop-color="#ffd54f"/>
+        </linearGradient>
+        <linearGradient id="gm-grn" x1="0%" y1="100%" x2="100%" y2="0%">
+          <stop offset="0%" stop-color="#66bb6a"/><stop offset="100%" stop-color="#a5d6a7"/>
+        </linearGradient>
+      </defs>
+      <!-- barrinhas verdes (rabinho/gráfico) -->
+      <g class="gm-bars">
+        <rect x="88" y="84" width="7" height="22" rx="3" fill="url(#gm-grn)"/>
+        <rect x="98" y="72" width="7" height="34" rx="3" fill="url(#gm-grn)"/>
+        <rect x="108" y="60" width="7" height="46" rx="3" fill="url(#gm-grn)"/>
+      </g>
+      <!-- corpo: moeda -->
+      <g class="gm-body">
+        <circle cx="56" cy="60" r="44" fill="#00695c"/>
+        <circle cx="56" cy="60" r="44" fill="none" stroke="url(#gm-gold)" stroke-width="8"/>
+        <circle cx="56" cy="60" r="33" fill="none" stroke="url(#gm-gold2)" stroke-width="1.5" opacity=".55"/>
+        <!-- olhos -->
+        <g class="gm-eyes">
+          <circle cx="42" cy="50" r="6" fill="#fff"/>
+          <circle cx="70" cy="50" r="6" fill="#fff"/>
+          <circle class="gm-pupil" cx="44" cy="51" r="3" fill="#1a1a1a"/>
+          <circle class="gm-pupil" cx="72" cy="51" r="3" fill="#1a1a1a"/>
+          <rect class="gm-lid" x="34" y="40" width="16" height="0" rx="4" fill="#00695c"/>
+          <rect class="gm-lid" x="62" y="40" width="16" height="0" rx="4" fill="#00695c"/>
+        </g>
+        <!-- sorriso -->
+        <path class="gm-mouth" d="M 42 68 Q 56 80 70 68" fill="none" stroke="url(#gm-gold)" stroke-width="4" stroke-linecap="round"/>
+        <!-- cifrão no peito -->
+        <text x="56" y="98" text-anchor="middle" font-family="Georgia,serif" font-size="15" font-weight="700" fill="url(#gm-gold)" opacity=".9">C$</text>
+      </g>
+    </svg>
+    <span id="guide-badge" style="display:none">!</span>
+  </div>
+</div>
+
 <div id="tour-overlay" style="display:none">
   <div id="tour-backdrop"></div>
   <div id="tour-spotlight" style="display:none"></div>

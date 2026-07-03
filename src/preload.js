@@ -31,6 +31,7 @@ const api = {
   aiSetKey:        (k)   => ipcRenderer.invoke('ai:set-key', k),
   aiClearKey:      ()    => ipcRenderer.invoke('ai:clear-key'),
   aiParseTransaction: (d) => ipcRenderer.invoke('ai:parse-transaction', d),
+  aiCategorizeBatch:  (d) => ipcRenderer.invoke('ai:categorize-batch', d),
   aiGenerateInsights: (d) => ipcRenderer.invoke('ai:generate-insights', d),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   importSavePending:  (state) => ipcRenderer.invoke('import:save-pending', state),
@@ -194,6 +195,7 @@ const api = {
 
   // ML
   mlPredict:      (data)  => ipcRenderer.invoke('ml:predict', data),
+  mlPredictBatch: (data)  => ipcRenderer.invoke('ml:predict-batch', data),
   mlLearn:        (data)  => ipcRenderer.invoke('ml:learn', data),
   mlList:         ()      => ipcRenderer.invoke('ml:list'),
   mlClear:        ()      => ipcRenderer.invoke('ml:clear'),

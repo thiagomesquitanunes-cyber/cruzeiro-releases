@@ -709,7 +709,9 @@ async function goPage(name) {
     }).catch(()=>{});
     refreshAiKeyStatus();
   }
-  if (name === 'aposentadoria') aposInit();
+  if (name === 'aposentadoria') { aposInit(); try { guideMark('visitedApos'); } catch(e) {} }
+  // Moedinha: atualiza dicas/badge para a nova página (não bloqueia a navegação)
+  try { guideOnPageChange(name); } catch(e) {}
 }
 
 // ── AI key management (settings) ──
@@ -1586,6 +1588,7 @@ async function dashToggleFlowIpca() {
   await ensureDashFlowChart();
 }
 async function dashToggleFlowMa() {
+  try { guideMark('usedMA'); } catch(e) {}
   _dash.useMa = !_dash.useMa;
   G('dash-flow-ma-pill')?.classList.toggle('active', _dash.useMa);
   await ensureDashFlowChart();
@@ -1640,6 +1643,7 @@ async function refreshDashboardWidgets({ monthStr, fromDate, toDate, rows, incom
     return;
   }
   _dash.selectedMonth = monthStr;
+  try { guideMark('clickedFlowChart'); } catch(e) {}
 
   // Busca uma vez só e compartilha entre os widgets que dependem do mesmo
   // cálculo (fluxo, participação por categoria, gauge) — em vez de cada um
@@ -5278,19 +5282,19 @@ async function confirmBankImport() {
     .map(r => ({...r, dateISO: r.date.includes('-') ? r.date.slice(0,10) : toISOClient(r.date)}))
     .filter(r => r.dateISO && (!dateFrom || r.dateISO >= dateFrom));
 
-  // Apply ML suggestions to memo/category
-  const mlRules = await ff.mlList();
-  const withML = normalised.map(r => {
-    let sugMemo = r.memo, sugCat = r.category||'';
-    for (const rule of mlRules) {
-      const memoNorm = norm(r.memo);
-      if (memoNorm.includes(norm(rule.pattern||rule.memo||''))) {
-        sugMemo = rule.memo || sugMemo;
-        sugCat  = rule.category || sugCat;
-        break;
-      }
-    }
-    return {...r, sugMemo, sugCat};
+  // Sugestões de ML por linha — UMA chamada em lote com o scorer novo
+  // (pontuação por tokens + similaridade de valor + threshold de confiança)
+  let mlPreds = [];
+  try {
+    mlPreds = await ff.mlPredictBatch({ rows: normalised.map(r => ({ desc: r.memo, amount: r.amount })) });
+  } catch(e) { mlPreds = []; }
+  const withML = normalised.map((r, i) => {
+    const p = mlPreds[i];
+    return {
+      ...r,
+      sugMemo: (p && p.memo) ? p.memo : r.memo,
+      sugCat:  (p && p.category) ? p.category : (r.category || ''),
+    };
   });
 
   const checkDailySaldo = selBank === 'itau' && rows.some(r => r.saldo != null);
@@ -5555,6 +5559,7 @@ function renderImportEditTable(rows) {
     </div>
     <div class="import-footer" style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
       <button class="btn primary" onclick="doImportFromTable()">✓ Confirmar importação</button>
+      <button class="btn" id="btn-ai-categorize" onclick="aiCategorizeImportRows()" title="Usa a IA configurada nas Configurações para sugerir categorias nas linhas ainda sem categoria">✨ Categorizar com IA</button>
       <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
       <span style="font-size:12px;color:var(--text3)">${rows.length} lançamento(s)${rows.some(r=>r._removed) ? ` · ${rows.filter(r=>r._removed).length} removida(s) — não serão importadas` : ''} · 🧠 = sugerido pelo ML</span>
 
@@ -5578,9 +5583,68 @@ function renderImportEditTable(rows) {
   preview.addEventListener('input', onEditInput);
 }
 
+// ── Categorização por IA das linhas sem categoria ─────────────────────────
+async function aiCategorizeImportRows() {
+  const btn = G('btn-ai-categorize');
+  const catInputs = [...(G('bank-preview-body')?.querySelectorAll('.import-cat-inp') || [])];
+  if (!catInputs.length) return;
+
+  // Só as linhas ainda sem categoria (e não removidas/transferidas)
+  const pending = [];
+  catInputs.forEach(inp => {
+    const idx = parseInt(inp.dataset.idx);
+    const row = _importEditRows[idx];
+    if (!row || row._removed || row._transferDone) return;
+    if ((inp.value || '').trim()) return; // já tem categoria
+    pending.push({ idx, inp, memo: row.memo || row.desc || '', amount: row.amount });
+  });
+  if (!pending.length) { toast('Todas as linhas já têm categoria! ✅'); return; }
+
+  // Verifica se há chave de IA configurada
+  try {
+    const ks = await ff.aiGetKeyStatus();
+    if (!ks?.hasKey) {
+      toast('Configure uma chave de IA em Configurações → Assistente de IA primeiro.');
+      goPage('backup');
+      return;
+    }
+  } catch(e) {}
+
+  if (btn) { btn.disabled = true; btn.textContent = `⏳ Categorizando ${pending.length} linha(s)…`; }
+  try {
+    const res = await ff.aiCategorizeBatch({
+      rows: pending.map(p => ({ memo: p.memo, amount: p.amount })),
+      categories: [...CATS_RAW],
+    });
+    if (!res.ok) {
+      const msg = res.error === 'NO_KEY' ? 'Configure uma chave de IA nas Configurações.'
+        : res.error === 'BAD_KEY' ? 'Chave de IA inválida — confira nas Configurações.'
+        : `Erro da IA: ${res.error || 'desconhecido'}`;
+      toast(msg);
+      return;
+    }
+    let applied = 0;
+    Object.entries(res.cats || {}).forEach(([k, cat]) => {
+      const p = pending[parseInt(k)];
+      if (!p || !cat) return;
+      p.inp.value = cat;
+      p.inp.style.borderColor = 'var(--accent)';
+      p.inp.title = 'Categoria sugerida pela IA — revise antes de confirmar';
+      if (_importEditRows[p.idx]) _importEditRows[p.idx].category = cat;
+      applied++;
+    });
+    persistImportState();
+    toast(applied ? `✨ ${applied} categoria(s) sugerida(s) pela IA — revise antes de confirmar!` : 'A IA não conseguiu sugerir categorias para essas linhas.');
+  } catch(e) {
+    toast('Erro ao categorizar com IA: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✨ Categorizar com IA'; }
+  }
+}
+
 async function doImportFromTable() {
   if (!_pendingImport) return;
-  const { rows, parcelInstallments, accountId, checkDailySaldo } = _pendingImport;
+  const { rows, parcelInstallments, accountId, checkDailySaldo, replaceIds } = _pendingImport;
 
   // Linhas já processadas como transferência manual (via modal) NÃO entram na importação —
   // o registro já foi criado de fato nas contas; importá-las de novo duplicaria.
@@ -5905,7 +5969,7 @@ async function doImport(finalRows, parcelInstallments, accountId, checkDailySald
     let result = { inserted: 0, skipped: 0, dailyMismatches: [] };
     for (const [accId, rowsForBackend] of groups) {
       if (!rowsForBackend.length) continue;
-      const r = await ff.bankImport({ accountId: accId, rows: rowsForBackend, checkDailySaldo: checkDailySaldo && accId === accountId, skipIds: [] });
+      const r = await ff.bankImport({ accountId: accId, rows: rowsForBackend, checkDailySaldo: checkDailySaldo && accId === accountId, skipIds: [], replaceIds: (accId === accountId ? (replaceIds || []) : []) });
       result.inserted += (r.inserted || 0);
       result.skipped  += (r.skipped  || 0);
       if (r.dailyMismatches?.length) result.dailyMismatches.push(...r.dailyMismatches);
@@ -5985,9 +6049,15 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
       <div style="font-size:14px;font-weight:700;margin-bottom:4px">
         ⚠️ ${potentialDups.length} possível(is) duplicata(s) encontrada(s)
       </div>
-      <div style="font-size:12px;color:var(--text2);margin-bottom:10px">
-        Para cada linha marcada em amarelo, o Cruzeiro encontrou um lançamento existente com mesma data e valor.
-        <br><strong>✅ Marque "Importar" para inserir</strong> mesmo assim &nbsp;·&nbsp; <strong>🚫 Marque "Pular"</strong> para descartar (é uma duplicata de fato).
+      <div style="font-size:12px;color:var(--text2);margin-bottom:10px;line-height:1.6">
+        Para cada linha em amarelo, o Cruzeiro encontrou um lançamento existente muito parecido (valor, data próxima e descrição são comparados — inclusive apelidos que você já ensinou ao app). Escolha o que fazer:
+        <br>🔄 <strong>Substituir provisão</strong> — o lançamento existente é uma <em>previsão de recorrência</em> (valor/data estimados): importa o valor real e apaga a estimativa. <em>Recomendado nesses casos.</em>
+        <br>🚫 <strong>Pular</strong> — é a mesma transação já registrada: não importa de novo.
+        <br>✅ <strong>Importar</strong> — são transações diferentes que só se parecem: importa normalmente.
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+        <button class="btn xs" onclick="dupBulkAction('skip')" title="Marca 'Pular' em todas as linhas sinalizadas">🚫 Pular todas</button>
+        <button class="btn xs" onclick="dupBulkAction('import')" title="Marca 'Importar' em todas as linhas sinalizadas">✅ Importar todas</button>
       </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px">
@@ -6000,8 +6070,22 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
         <!-- Rows -->
         <div id="dup-rows-container" style="grid-column:1/-1">
         ${finalRows.map((r, i) => {
-          const exList = dupMap[i];
-          const isDup  = !!exList;
+          const dupInfo = dupMap[i];
+          const exList  = dupInfo?.existing;
+          const isDup   = !!dupInfo;
+          const ex0     = exList?.[0];
+          const isProvision = !!ex0?.recurring && !ex0?.cleared;
+          const daysTxt = dupInfo?.daysDiff > 0 ? ` · ${dupInfo.daysDiff} dia(s) de diferença` : '';
+          const reasonLabel = (({
+            'recorrencia': '🔄 provisão de recorrência (valor/data estimados)',
+            'exata': 'mesma data e valor',
+            'mesmo-dia-valor': '⚠️ mesmo dia e valor, mas descrições diferentes — confira!',
+            'valor-igual-data-proxima': 'mesmo valor em data próxima',
+            'similaridade-alta': 'alta similaridade (valor + data + descrição)',
+          })[dupInfo?.reason] || 'mesma data e valor') + daysTxt;
+          const nickTxt = dupInfo?.nickname
+            ? `<div style="font-size:10px;color:var(--accent)">🧠 reconhecido como "${esc(dupInfo.nickname)}"</div>` : '';
+          const fmtBRDate = iso => iso && /^\d{4}-\d{2}-\d{2}/.test(iso) ? iso.slice(0,10).split('-').reverse().join('/') : iso;
           const amtCls = r.amount < 0 ? 'color:var(--red)' : 'color:var(--green)';
           const amtStr = fmtBRL(r.amount);
           const exStr  = exList?.map(e => `"${esc(e.memo)}"`).join(', ') || '';
@@ -6016,18 +6100,23 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
             <!-- Existing record -->
             <div style="padding:7px 10px;font-size:12px;${isDup?'':'color:var(--text3)'}">
               ${isDup
-                ? `<div style="color:var(--text3);font-size:10px">${r.dateISO} · mesmo valor</div>
+                ? `<div style="color:var(--text3);font-size:10px">${fmtBRDate(ex0?.date) || r.dateISO} · ${reasonLabel}</div>
                    <div style="color:#b45309">${exStr}</div>
-                   <div style="color:#b45309;font-family:'DM Mono',monospace;font-size:12px">${amtStr}</div>`
+                   ${nickTxt}
+                   <div style="color:#b45309;font-family:'DM Mono',monospace;font-size:12px">${ex0 ? fmtBRL(ex0.amount) : amtStr}</div>`
                 : '<span style="font-size:11px">—</span>'}
             </div>
             <!-- Ação: sempre visível; padrão importar (não-dup) ou pular (dup) -->
-            <div style="padding:6px 8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:140px">
+            <div style="padding:6px 8px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:170px">
+              ${isProvision ? `
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--accent);font-weight:600" title="Importa a transação real e remove a provisão estimada da recorrência">
+                <input type="radio" name="dup-action-${i}" value="replace" data-existing-id="${ex0.id}" checked> 🔄 Substituir provisão
+              </label>` : ''}
               <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--green);font-weight:500">
-                <input type="radio" name="dup-action-${i}" value="import" ${!isDup?'checked':''}> ✅ Importar
+                <input type="radio" name="dup-action-${i}" value="import" ${(!isDup || (dupInfo?.reason === 'mesmo-dia-valor' && !isProvision))?'checked':''}> ✅ Importar
               </label>
               <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--red);font-weight:500">
-                <input type="radio" name="dup-action-${i}" value="skip" ${isDup?'checked':''}> 🚫 Pular
+                <input type="radio" name="dup-action-${i}" value="skip" ${isDup && !isProvision && dupInfo?.reason !== 'mesmo-dia-valor' ?'checked':''}> 🚫 Pular
               </label>
             </div>
           </div>`;
@@ -6039,7 +6128,7 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
         <button class="btn primary" onclick="confirmDupAndImport()">✓ Confirmar e importar</button>
         <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
         <span style="font-size:12px;color:var(--text3)">
-          ${potentialDups.length} duplicata(s) · por padrão marcadas para <strong>Pular</strong>
+          ${potentialDups.length} possível(is) duplicata(s) — as ações recomendadas já vêm pré-marcadas; revise e confirme
         </span>
       </div>
     </div>`;
@@ -6049,20 +6138,38 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
   G('bank-result').innerHTML = '';
 }
 
+// Ação em massa nas linhas sinalizadas como duplicata (não mexe nas linhas limpas)
+function dupBulkAction(action) {
+  const preview = G('bank-preview');
+  const dupMap = preview?._dup?.dupMap || {};
+  Object.keys(dupMap).forEach(i => {
+    const radio = preview.querySelector(`input[name="dup-action-${i}"][value="${action}"]`);
+    if (radio) radio.checked = true;
+  });
+}
+
 async function confirmDupAndImport() {
   const preview = G('bank-preview');
   const { finalRows, parcelInstallments, accountId, checkDailySaldo, dupMap } = preview._dup || {};
   if (!finalRows) return;
 
-  // Respeita o radio em todas as linhas
+  // Respeita o radio em todas as linhas; "replace" importa a linha E
+  // marca a provisão de recorrência correspondente para exclusão
+  const replaceIds = [];
   const selectedRows = finalRows.filter((r, i) => {
     const radios = preview.querySelectorAll(`input[name="dup-action-${i}"]`);
-    const action = [...radios].find(rb => rb.checked)?.value;
+    const checked = [...radios].find(rb => rb.checked);
+    const action = checked?.value;
+    if (action === 'replace') {
+      const exId = parseInt(checked.dataset.existingId);
+      if (exId) replaceIds.push(exId);
+      return true; // importa a transação real no lugar
+    }
     return action !== 'skip';
   });
 
   // Update pending import with only the selected (non-discarded) rows
-  _pendingImport = { rows: selectedRows, parcelInstallments, accountId, checkDailySaldo };
+  _pendingImport = { rows: selectedRows, parcelInstallments, accountId, checkDailySaldo, replaceIds };
 
   // renderImportEditTable rebuilds preview.innerHTML from scratch — no need to clear first
   renderImportEditTable(selectedRows);
@@ -8320,10 +8427,19 @@ function _bwSummaryAddSelected() {
 
 // Load existing inv_assets for name mapping dropdown
 let _invAssetsList = [];
-let _brokerMappings = {}; // {broker: {originalName: mappedName}}
+let _brokerMappings = {};      // {broker: {originalName: mappedName}} — exato, como salvo em disco
+let _brokerMappingsNorm = {};  // {broker: {norm(originalName): mappedName}} — tolerante a
+                                // diferença de acentuação/maiúsculas/espaços entre extratos
 async function loadInvAssetsList() {
   try { _invAssetsList = await ff.invAssetsList() || []; } catch(e) { _invAssetsList = []; }
   try { _brokerMappings = await ff.brokerMappingsGet() || {}; } catch(e) { _brokerMappings = {}; }
+  _brokerMappingsNorm = {};
+  Object.entries(_brokerMappings).forEach(([broker, map]) => {
+    _brokerMappingsNorm[broker] = {};
+    Object.entries(map).forEach(([orig, mapped]) => {
+      _brokerMappingsNorm[broker][norm(orig)] = mapped;
+    });
+  });
 }
 
 function renderBrokerPreview(parsed) {
@@ -8473,8 +8589,13 @@ function renderBrokerPreview(parsed) {
     const liqLabel = a.liquidacaoTotal ? ' 🔴' : '';
     const vencLabel = a.maturity_month
       ? `<span style="color:var(--text3);font-size:10px">${a.maturity_month}</span>` : '—';
-    const brokerMap = _brokerMappings[parsed.broker] || {};
-    const learned = brokerMap[a.name];
+    const brokerMap     = _brokerMappings[parsed.broker] || {};
+    const brokerMapNorm = _brokerMappingsNorm[parsed.broker] || {};
+    // Tenta correspondência exata primeiro; se não achar, tenta normalizada
+    // (ignora acentos/maiúsculas/espaços) — cobre variações sutis no texto
+    // bruto do extrato entre um mês e outro, que antes faziam o app
+    // "esquecer" um mapeamento já ensinado.
+    const learned = brokerMap[a.name] ?? brokerMapNorm[norm(a.name)];
     // Sem mapeamento aprendido ainda (1ª vez que esse ativo aparece nessa
     // corretora) → pré-preenche com o nome oficial dado pela corretora, em
     // vez de deixar em branco. O usuário pode alterar (e o app memoriza,
@@ -8859,6 +8980,13 @@ async function confirmBrokerImport() {
       const origName = parsed.assets[i].name;
       if (newName) {
         ff.brokerMappingLearn({ broker: parsed.broker, original: origName, mapped: newName }).catch(() => {});
+        // Atualiza o cache local imediatamente — assim, se o usuário importar
+        // outro extrato da mesma corretora na mesma sessão (sem reabrir o
+        // app), o mapeamento recém-aprendido já vale sem precisar recarregar.
+        if (!_brokerMappings[parsed.broker]) _brokerMappings[parsed.broker] = {};
+        _brokerMappings[parsed.broker][origName] = newName;
+        if (!_brokerMappingsNorm[parsed.broker]) _brokerMappingsNorm[parsed.broker] = {};
+        _brokerMappingsNorm[parsed.broker][norm(origName)] = newName;
         parsed.assets[i].name = newName;
       } else {
         parsed.assets[i]._skip = true;
@@ -12396,9 +12524,282 @@ async function checkFirstRun() {
   try {
     const s = await ff.settingsGet();
     if (!s.tourDone) {
-      await startTour();
+      // Novo fluxo: em vez do tour em etapas, a Moedinha se apresenta
+      guideFirstRun();
+      await ff.settingsSave({ ...s, tourDone: true });
+    } else {
+      guideInit(); // aparece minimizado no canto, sem incomodar
     }
   } catch(e) {}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CRUZINHO — assistente-mascote contextual
+// ═══════════════════════════════════════════════════════════════════════
+// Estado persistido em localStorage: { disabled, introDone }
+// snoozed (por sessão) fica só em memória.
+let _guide = { open: false, snoozed: false, page: null };
+
+function _guideState() {
+  try { return JSON.parse(localStorage.getItem('cruzeiro-guide') || '{}'); } catch(e) { return {}; }
+}
+function _guideSaveState(patch) {
+  const s = { ..._guideState(), ...patch };
+  try { localStorage.setItem('cruzeiro-guide', JSON.stringify(s)); } catch(e) {}
+}
+
+// ── Config por página: título, intro e checks de progresso ──────────────
+// done() retorna true/false; tip aparece quando NÃO feito, com link de ação.
+const GUIDE_PAGES = {
+  overview: {
+    title: 'Visão Geral',
+    intro: 'Este é o painel principal — tudo que acontece no app aparece resumido aqui. 📊',
+    checks: [
+      { label: 'Criar sua primeira conta', tip: 'Clique em <a onclick="openNewAccount()">+ Nova conta</a> no menu lateral (ou no ⚙ ao lado de "Contas").',
+        done: () => (accounts||[]).length > 0 },
+      { label: 'Adicionar lançamentos', tip: 'Use <a onclick="openNewTx()">+ Lançamento</a> no topo, ou importe um extrato do seu banco na aba <a onclick="goPage(\'import\')">Importar</a>.',
+        done: async () => { const t = await ff.listTx({ limit: 1 }).catch(()=>[]); return t.length > 0; } },
+      { label: 'Definir metas de orçamento', tip: 'Vá em <a onclick="goPage(\'budget\')">Orçamento</a> e defina quanto quer gastar por categoria.',
+        done: async () => { const b = await ff.budgetList().catch(()=>[]); return (b||[]).length > 0; } },
+      { label: 'Explorar os gráficos', tip: 'Clique num mês do gráfico "Receitas e Despesas" para ver o detalhamento daquele mês nos painéis abaixo.',
+        done: () => _guideState().clickedFlowChart === true },
+    ],
+  },
+  account: {
+    title: 'Extrato da Conta',
+    intro: 'Aqui você vê e edita os lançamentos de uma conta. ✏️',
+    checks: [
+      { label: 'Importar um extrato bancário', tip: 'Na aba <a onclick="goPage(\'import\')">Importar</a>, escolha seu banco e envie o arquivo — o app aprende suas categorias com o tempo!',
+        done: async () => { const t = await ff.listTx({ limit: 50 }).catch(()=>[]); return t.length >= 10; } },
+      { label: 'Categorizar lançamentos', tip: 'Clique na categoria de um lançamento para alterá-la. Categorias organizadas = relatórios melhores.',
+        done: async () => { const t = await ff.listTx({ limit: 30 }).catch(()=>[]); return t.some(x => x.category && x.category !== ''); } },
+      { label: 'Conciliar (✓) lançamentos', tip: 'Marque o ✓ nos lançamentos conferidos com o extrato oficial do banco.',
+        done: async () => { const t = await ff.listTx({ limit: 30 }).catch(()=>[]); return t.some(x => x.cleared); } },
+    ],
+  },
+  budget: {
+    title: 'Orçamento',
+    intro: 'Planeje quanto gastar por categoria e acompanhe em tempo real. 🎯',
+    checks: [
+      { label: 'Criar metas de orçamento', tip: 'Clique em "+ Nova meta" e escolha categoria e valor mensal.',
+        done: async () => { const b = await ff.budgetList().catch(()=>[]); return (b||[]).length > 0; } },
+      { label: 'Cobrir suas 5 maiores despesas', tip: 'Defina metas ao menos para as categorias em que você mais gasta.',
+        done: async () => { const b = await ff.budgetList().catch(()=>[]); return (b||[]).length >= 5; } },
+    ],
+  },
+  evolucao: {
+    title: 'Evolução',
+    intro: 'Sua vida financeira mês a mês: receitas, despesas e tendências. 📈',
+    checks: [
+      { label: 'Ter 3+ meses de dados', tip: 'Importe extratos antigos na aba <a onclick="goPage(\'import\')">Importar</a> para enxergar tendências.',
+        done: async () => { const t = await ff.listTx({ limit: 500 }).catch(()=>[]); const months = new Set(t.map(x => (x.date||'').slice(0,7))); return months.size >= 3; } },
+      { label: 'Experimentar a média móvel', tip: 'Ative o botão "MM 12m" para suavizar variações e ver a tendência real.',
+        done: () => _guideState().usedMA === true },
+    ],
+  },
+  patrimonio: {
+    title: 'Patrimônio',
+    intro: 'Seu patrimônio completo: contas, investimentos, imóveis e dívidas. 💎',
+    checks: [
+      { label: 'Cadastrar um investimento', tip: 'Clique em "+ Novo" para adicionar um ativo, ou importe o extrato da sua corretora na aba <a onclick="goPage(\'import\')">Importar</a>.',
+        done: async () => { const a = await ff.invAssetsList().catch(()=>[]); return (a||[]).length > 0; } },
+      { label: 'Incluir contas bancárias no patrimônio', tip: 'Use o botão "⚙ Contas" para escolher quais contas somam no seu patrimônio total.',
+        done: async () => { const r = await ff.patAccountBalances?.().catch(()=>[]) || []; return r.length > 0; } },
+      { label: 'Atualizar o IPCA', tip: 'O botão "📈 IPCA" corrige seus valores pela inflação — essencial para comparar meses distantes.',
+        done: () => _guideState().fetchedIPCA === true },
+    ],
+  },
+  goals: {
+    title: 'Metas',
+    intro: 'Defina objetivos — reserva de emergência, viagem, aposentadoria — e acompanhe o progresso. 🏆',
+    checks: [
+      { label: 'Criar sua primeira meta', tip: 'Clique em "+ Nova meta". Sugestão: comece pela reserva de emergência!',
+        done: async () => { const g = await ff.goalList().catch(()=>[]); return (g||[]).length > 0; } },
+      { label: 'Vincular uma conta à meta', tip: 'Metas vinculadas a uma conta atualizam o progresso sozinhas.',
+        done: async () => { const g = await ff.goalList().catch(()=>[]); return (g||[]).some(x => x.account_id); } },
+    ],
+  },
+  recurring: {
+    title: 'Recorrências',
+    intro: 'Contas que se repetem todo mês — aluguel, assinaturas, salário. 🔄',
+    checks: [
+      { label: 'Cadastrar uma recorrência', tip: 'Clique em "+ Nova recorrência" para o app lançar automaticamente todo mês.',
+        done: async () => { const r = await ff.listRecurring().catch(()=>[]); return (r||[]).length > 0; } },
+    ],
+  },
+  aposentadoria: {
+    title: 'Aposentadoria',
+    intro: 'Planeje sua independência financeira com projeções realistas. 🏖️',
+    checks: [
+      { label: 'Configurar o plano', tip: 'Preencha idade, patrimônio-alvo (ou renda desejada) e taxa real — o app calcula quanto poupar por mês.',
+        done: () => _guideState().visitedApos === true },
+    ],
+  },
+  import: {
+    title: 'Importar',
+    intro: 'Traga extratos de bancos, faturas de cartão e posições de corretoras. O app aprende com você! 🧠',
+    checks: [
+      { label: 'Importar um extrato', tip: 'Escolha o banco, envie o arquivo e confirme. Da segunda vez em diante, categorias e nomes vêm preenchidos.',
+        done: async () => { const t = await ff.listTx({ limit: 20 }).catch(()=>[]); return t.length >= 5; } },
+    ],
+  },
+  backup: {
+    title: 'Configurações',
+    intro: 'Backups, temas, segurança e integrações. ⚙️',
+    checks: [
+      { label: 'Escolher um tema', tip: 'Experimente os temas escuros no card "🎨 Aparência"!',
+        done: () => (localStorage.getItem('cruzeiro-theme')||'claro') !== 'claro' || _guideState().sawThemes === true },
+      { label: 'Fazer um backup', tip: 'Seus dados são preciosos — use "Exportar backup" de vez em quando.',
+        done: () => _guideState().didBackup === true },
+    ],
+  },
+};
+
+// ── Núcleo ───────────────────────────────────────────────────────────────
+function guideInit() {
+  const st = _guideState();
+  if (st.disabled) return;
+  const root = G('guide-root');
+  if (root) root.style.display = '';
+}
+
+function guideFirstRun() {
+  _guideSaveState({ introDone: true });
+  const root = G('guide-root');
+  if (root) root.style.display = '';
+  _guide.open = true;
+  const bubble = G('guide-bubble');
+  if (bubble) bubble.style.display = 'flex';
+  const body = G('guide-bubble-body');
+  if (body) body.innerHTML = `
+    <h4>Oi! Eu sou a Moedinha 👋</h4>
+    <p>Sou a mascote do Cruzeiro e vou te ajudar a dominar o app — sem enrolação, prometo! 🪙</p>
+    <p><strong>Primeiros passos:</strong></p>
+    <div class="guide-check"><span class="gc-ico">1️⃣</span><div class="gc-label">Crie uma <a onclick="openNewAccount()">conta</a> (banco, cartão ou dinheiro)</div></div>
+    <div class="guide-check"><span class="gc-ico">2️⃣</span><div class="gc-label">Importe um <a onclick="goPage('import');guideRefresh('import')">extrato</a> ou lance manualmente</div></div>
+    <div class="guide-check"><span class="gc-ico">3️⃣</span><div class="gc-label">Explore a <a onclick="goPage('overview');guideRefresh('overview')">Visão Geral</a> e me chame quando quiser!</div></div>
+    <p style="font-size:12px;color:var(--text3)">Vou ficar aqui no cantinho. Clique em mim sempre que quiser dicas da tela em que você estiver. 😉</p>`;
+}
+
+async function guideToggle() {
+  const st = _guideState();
+  if (st.disabled) { _guideSaveState({ disabled: false }); }
+  const bubble = G('guide-bubble');
+  if (!bubble) return;
+  _guide.open = !_guide.open;
+  bubble.style.display = _guide.open ? 'flex' : 'none';
+  if (_guide.open) {
+    G('guide-badge').style.display = 'none';
+    await guideRefresh(currentPage);
+  }
+}
+
+function guideMinimize() {
+  _guide.open = false;
+  const bubble = G('guide-bubble');
+  if (bubble) bubble.style.display = 'none';
+}
+
+function guideSnooze() {
+  // Some por esta sessão — volta no próximo uso do app
+  _guide.snoozed = true;
+  guideMinimize();
+  const root = G('guide-root');
+  if (root) root.style.display = 'none';
+  toast('Até logo! Me reative em Configurações quando quiser. 👋');
+}
+
+function guideOpenSettingsInfo() {
+  const body = G('guide-bubble-body');
+  if (body) body.innerHTML = `
+    <h4>Como funciono 🤔</h4>
+    <p>• <strong>Clique em mim</strong> em qualquer aba para dicas daquela tela.</p>
+    <p>• <strong>"Agora não"</strong> me esconde até você reabrir o app.</p>
+    <p>• Para me desativar de vez (ou reativar), use <em>Configurações → Assistente Moedinha</em>.</p>
+    <p style="font-size:12px;color:var(--text3)">Dica: eu marco um <strong style="color:var(--red)">!</strong> quando tenho sugestões novas para a tela atual.</p>
+    <button class="btn sm" onclick="guideRefresh(currentPage)">← Voltar às dicas</button>`;
+}
+
+async function guideRefresh(page) {
+  _guide.page = page;
+  const cfg = GUIDE_PAGES[page];
+  const body = G('guide-bubble-body');
+  if (!body) return;
+  if (!cfg) {
+    body.innerHTML = `<h4>${esc(page)}</h4><p>Explore à vontade — se precisar, estou aqui! 🪙</p>`;
+    return;
+  }
+  body.innerHTML = `<h4>${esc(cfg.title)}</h4><p>${cfg.intro}</p><div style="text-align:center;color:var(--text3);font-size:12px">⏳ Avaliando seu progresso…</div>`;
+
+  // Avalia os checks (async, tolerante a falhas)
+  const results = [];
+  for (const c of cfg.checks) {
+    let done = false;
+    try { done = await c.done(); } catch(e) {}
+    results.push({ ...c, isDone: !!done });
+  }
+  const doneCount = results.filter(r => r.isDone).length;
+  const pct = cfg.checks.length ? Math.round(doneCount / cfg.checks.length * 100) : 100;
+
+  const checksHtml = results.map(r => `
+    <div class="guide-check ${r.isDone ? 'done' : ''}">
+      <span class="gc-ico">${r.isDone ? '✅' : '⬜'}</span>
+      <div>
+        <div class="gc-label">${r.label}</div>
+        ${!r.isDone && r.tip ? `<div class="gc-tip">${r.tip}</div>` : ''}
+      </div>
+    </div>`).join('');
+
+  const cheer = pct === 100 ? `<p style="text-align:center">🎉 <strong>Tudo em dia aqui!</strong> Você está mandando muito bem.</p>`
+    : pct >= 50 ? `<p style="font-size:12px;color:var(--text3)">Bom progresso! Falta pouco. 💪</p>` : '';
+
+  body.innerHTML = `
+    <h4>${esc(cfg.title)}</h4>
+    <p>${cfg.intro}</p>
+    <div class="guide-progressbar"><div style="width:${pct}%"></div></div>
+    ${checksHtml}
+    ${cheer}`;
+}
+
+// Chamado pelo goPage — mostra badge se há pendências na nova página
+async function guideOnPageChange(page) {
+  const st = _guideState();
+  if (st.disabled || _guide.snoozed) return;
+  if (_guide.open) { await guideRefresh(page); return; }
+  // Badge discreto: só se a página tem checks e há algo por fazer
+  const cfg = GUIDE_PAGES[page];
+  if (!cfg) return;
+  try {
+    for (const c of cfg.checks) {
+      let done = false;
+      try { done = await c.done(); } catch(e) {}
+      if (!done) { const b = G('guide-badge'); if (b) b.style.display = 'flex'; return; }
+    }
+    const b = G('guide-badge'); if (b) b.style.display = 'none';
+  } catch(e) {}
+}
+
+// Marca micro-conquistas usadas nos checks
+function guideMark(key) { _guideSaveState({ [key]: true }); }
+
+// Controles a partir das Configurações
+function guideEnableFromSettings() {
+  _guideSaveState({ disabled: false });
+  _guide.snoozed = false;
+  const root = G('guide-root');
+  if (root) root.style.display = '';
+  _guide.open = true;
+  const bubble = G('guide-bubble');
+  if (bubble) bubble.style.display = 'flex';
+  guideRefresh(currentPage);
+  toast('Moedinha ativada! 🪙');
+}
+function guideDisableFromSettings() {
+  _guideSaveState({ disabled: true });
+  guideMinimize();
+  const root = G('guide-root');
+  if (root) root.style.display = 'none';
+  toast('Moedinha desativada. Reative aqui quando quiser!');
 }
 
 
@@ -14866,6 +15267,7 @@ async function removePassword() {
 }
 
 async function doManualBackup() {
+  try { guideMark('didBackup'); } catch(e) {}
   const result = await ff.backupNow();
   if (result.ok) { toast('💾 Backup criado com sucesso!'); refreshBackup(); }
   else toast('❌ Erro ao criar backup');
@@ -17164,6 +17566,7 @@ function updatePatIpcaStatus() {
 }
 
 async function patFetchIPCA() {
+  try { guideMark('fetchedIPCA'); } catch(e) {}
   toast('⏳ Buscando IPCA mensal do BCB…');
   const result = await ff.patIpcaMonthlyFetch();
   if (result.ok) {

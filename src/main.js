@@ -1247,22 +1247,101 @@ ipcMain.handle('report:budget', (_, { fromDate, toDate, excludeTransfers }) => {
     GROUP BY month, category ORDER BY month, expenses DESC`, p);
   return rows;
 });
+// ── ML de categorização — núcleo compartilhado ─────────────────────────
+// Tokeniza descrições ignorando "ruído" típico de extratos: códigos de
+// autorização, sufixos de cartão, datas, marcadores de parcela e palavras
+// genéricas de banco que não identificam o estabelecimento.
+const ML_STOPWORDS = new Set([
+  'pagamento','compra','cartao','debito','credito','pix','ted','doc','transf',
+  'transferencia','recebida','enviada','loja','ltda','me','sa','eireli','epp',
+  'brasil','br','com','de','do','da','dos','das','em','no','na','para','via',
+]);
+function mlTokens(desc) {
+  const normed = normKey(desc);
+  return normed.split(/[\s\/\-\*\.,:;()]+/).filter(t => {
+    if (t.length < 3) return false;
+    if (/^\d+$/.test(t)) return false;                    // só números
+    if (/^\d{2}[\/\-]\d{2}/.test(t)) return false;        // datas
+    if (/^parc/.test(t)) return false;                    // parcela/parc
+    if (/^\d+x\d*$/.test(t)) return false;                // 3x, 10x2
+    if (/\d{4,}/.test(t)) return false;                   // códigos com 4+ dígitos
+    if (/[a-z]/.test(t) && (t.match(/\d/g)||[]).length >= 2) return false; // códigos alfanuméricos (8k3j2)
+    if (ML_STOPWORDS.has(t)) return false;
+    return true;
+  });
+}
+// Pontua uma regra contra uma descrição+valor. Retorna score numérico.
+// tokens/tokSet do desc são pré-computados pelo chamador (batch-friendly).
+function mlScoreRule(rule, key, tokSet, amount) {
+  let ds = 0;
+  if (key === rule.keyword) {
+    ds = 10; // match exato
+  } else if (rule.keyword && key.includes(rule.keyword)) {
+    ds = rule.keyword.length / key.length * 8;
+  } else {
+    // Sobreposição de tokens ponderada por comprimento (tokens mais longos
+    // e específicos valem mais — "starbucks" > "pao")
+    const rTokens = rule._tokens || (rule._tokens = mlTokens(rule.keyword));
+    if (!rTokens.length) return 0;
+    let hitW = 0, totW = 0, hits = 0;
+    for (const t of rTokens) {
+      totW += t.length;
+      if (tokSet.has(t)) { hitW += t.length; hits++; }
+    }
+    if (hitW === 0) return 0;
+    const coverage = hitW / totW;
+    ds = coverage * 6;
+    // Cobertura mínima: evita generalizar a partir de um único token
+    // genérico em comum ("posto", "mercado"). Regras multi-token exigem
+    // 2+ tokens batendo (ou um token dominante ≥60% do peso, caso de
+    // regras tipo "netflix assinatura" onde só o nome importa).
+    if (hitW < 4 || coverage < 0.45) return 0;
+    if (rTokens.length > 1 && hits < 2 && coverage < 0.6) return 0;
+  }
+  // Similaridade de valor (0.5–1.0): transações do mesmo estabelecimento
+  // tendem a ter valores parecidos (assinaturas) ou ao menos mesma ordem
+  let vs = 0.5;
+  if (rule.n_val > 0) {
+    const mean = rule.sum_val / rule.n_val;
+    const dist = Math.abs(Math.abs(amount) - Math.abs(mean)) / (Math.abs(mean) || 1);
+    vs = Math.max(0, 1 - dist);
+  }
+  // Reforço por frequência: regra usada 20x é mais confiável que usada 1x
+  const freq = 1 + Math.log10((rule.count || 1)) * 0.25;
+  return ds * (0.5 + 0.5 * vs) * freq;
+}
+// Threshold de confiança: abaixo disso, melhor não sugerir do que errar.
+const ML_MIN_SCORE = 1.6;
+
 ipcMain.handle('ml:predict', (_, { desc, amount }) => {
-  const key  = normKey(desc);
+  const key = normKey(desc);
+  const tokSet = new Set(mlTokens(desc));
   const rules = all('SELECT * FROM ml_rules ORDER BY count DESC');
   let best = null, bestScore = 0;
   for (const r of rules) {
-    let ds = 0;
-    if (key === r.keyword) ds = 10;
-    else if (key.includes(r.keyword)) ds = r.keyword.length / key.length * 8;
-    else { const words = r.keyword.split(' ').filter(w=>w.length>3); const hits=words.filter(w=>key.includes(w)).length; if(hits>0) ds=hits/words.length*4; }
-    if (!ds) continue;
-    let vs = 0.5;
-    if (r.n_val > 0) { const mean=r.sum_val/r.n_val; const dist=Math.abs(Math.abs(amount)-Math.abs(mean))/(Math.abs(mean)||1); vs=Math.max(0,1-dist); }
-    const score = ds*(0.5+0.5*vs);
-    if (score > bestScore) { bestScore=score; best=r; }
+    const score = mlScoreRule(r, key, tokSet, amount);
+    if (score > bestScore) { bestScore = score; best = r; }
   }
-  return best;
+  if (!best || bestScore < ML_MIN_SCORE) return null;
+  return { ...best, _score: Math.round(bestScore * 100) / 100 };
+});
+
+// Predição em lote — uma chamada IPC para todas as linhas da importação.
+// Carrega as regras uma única vez e tokeniza cada uma apenas na 1ª vez.
+ipcMain.handle('ml:predict-batch', (_, { rows }) => {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  const rules = all('SELECT * FROM ml_rules ORDER BY count DESC');
+  return rows.map(({ desc, amount }) => {
+    const key = normKey(desc);
+    const tokSet = new Set(mlTokens(desc));
+    let best = null, bestScore = 0;
+    for (const r of rules) {
+      const score = mlScoreRule(r, key, tokSet, amount);
+      if (score > bestScore) { bestScore = score; best = r; }
+    }
+    if (!best || bestScore < ML_MIN_SCORE) return null;
+    return { memo: best.memo || '', category: best.category || '', score: Math.round(bestScore * 100) / 100 };
+  });
 });
 ipcMain.handle('ml:learn', (_, { desc, memo, category, amount }) => {
   const key = normKey(desc).substring(0,50); if (!key) return;
@@ -2609,7 +2688,7 @@ ipcMain.handle('bank:check-memo-dups', (_, { accountId, rows }) => {
   return { matches };
 });
 
-ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, dryRun }) => {
+ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, dryRun, replaceIds }) => {
   // dryRun: only check for dups, don't insert anything
   // skipIds = array of row indices the user chose to skip (confirmed duplicates)
   const skipSet = new Set(skipIds || []);
@@ -2618,6 +2697,22 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
   // We do NOT auto-skip — we report them so the user can decide
   const potentialDups = [];
   const toInsert = [];
+
+  // Regras de ML carregadas uma vez: usadas para traduzir o texto bruto do
+  // extrato para o APELIDO que o usuário dá (ex.: "UBER *TRIP 8K3J2" → "Uber"),
+  // permitindo reconhecer duplicatas mesmo quando o lançamento existente já
+  // foi renomeado pelo usuário.
+  const dupMlRules = dryRun ? all('SELECT * FROM ml_rules ORDER BY count DESC') : [];
+  const mlNickname = (desc, amount) => {
+    const key = normKey(desc);
+    const tokSet = new Set(mlTokens(desc));
+    let best = null, bestScore = 0;
+    for (const rr of dupMlRules) {
+      const s = mlScoreRule(rr, key, tokSet, amount);
+      if (s > bestScore) { bestScore = s; best = rr; }
+    }
+    return (best && bestScore >= ML_MIN_SCORE && best.memo) ? best.memo : null;
+  };
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -2632,23 +2727,118 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
     // recém-criada manualmente no mesmo lote) e bloquearia a importação inteira
     // sem inserir nada, mesmo após o usuário já ter confirmado.
     if (dryRun) {
-      // Check DB for same account + similar amount (±R$1,00) within ±7 days
-      // Tolerance of R$1 catches last-installment cent adjustments
-      const existing = all(
-        `SELECT id, memo FROM transactions WHERE account_id=?
-         AND ABS(julianday(date) - julianday(?)) <= 7
-         AND ABS(amount-?)<=1.00 LIMIT 3`,
-        [accountId, date, r.amount]
+      // ── Detecção de duplicatas multi-sinal ────────────────────────────
+      // Candidatos: mesma conta, ±10 dias, e valor dentro de uma banda
+      // generosa (±R$1 exata OU até 30% de diferença com mesmo sinal —
+      // cobre recorrências lançadas com valor estimado, tipo condomínio).
+      const candidates = all(
+        `SELECT id, date, memo, amount, cleared, recurring_id FROM transactions
+         WHERE account_id=?
+         AND ABS(julianday(date) - julianday(?)) <= 10
+         AND ( ABS(amount-?) <= 1.00
+               OR (amount * ? > 0 AND ABS(amount-?) <= 0.30 * MAX(ABS(amount), ABS(?)))
+               OR (recurring_id IS NOT NULL AND cleared=0 AND amount * ? > 0
+                   AND ABS(amount-?) <= 0.60 * MAX(ABS(amount), ABS(?))) )
+         LIMIT 12`,
+        [accountId, date, r.amount, r.amount, r.amount, r.amount, r.amount, r.amount, r.amount]
       );
 
-      if (existing.length > 0) {
-        // Flag as potential dup — don't insert yet
+      let bestMatch = null, bestScore = 0, bestReason = '', bestDays = 0;
+      const impTokens = mlTokens(r.memo || r.desc || '');
+      const impTokSet = new Set(impTokens);
+      // Apelido aprendido pelo ML para este texto de extrato (se houver)
+      const impNickname = mlNickname(r.memo || r.desc || '', r.amount);
+      const impNickKey  = impNickname ? normKey(impNickname) : null;
+      const impNickTokSet = impNickname ? new Set(mlTokens(impNickname)) : null;
+
+      for (const c of candidates) {
+        const days = Math.abs((new Date(date) - new Date(c.date)) / 86400000);
+        const diff = Math.abs(r.amount - c.amount);
+        const relDiff = diff / Math.max(Math.abs(r.amount), Math.abs(c.amount), 0.01);
+
+        // Similaridade de valor: 1.0 exato → decai com a diferença relativa
+        const vs = diff <= 0.01 ? 1 : diff <= 1.00 ? 0.95 : Math.max(0, 1 - relDiff * 2.2);
+        // Proximidade de data: mesmo dia = 1, decai até 0 em ~12 dias
+        const ds = Math.max(0, 1 - days / 12);
+        // Similaridade de texto: sobreposição de tokens ponderada (Dice)
+        const cTokens = mlTokens(c.memo || '');
+        const cKey = normKey(c.memo || '');
+        const diceSim = (aTokens, aSet, bTokens) => {
+          if (!aTokens.length || !bTokens.length) return null;
+          let hitW = 0;
+          const wSum = arr => arr.reduce((s, t) => s + t.length, 0);
+          for (const t of bTokens) if (aSet.has(t)) hitW += t.length;
+          const totW = (wSum(aTokens) + wSum(bTokens)) / 2;
+          return totW > 0 ? Math.min(1, hitW / totW) : 0;
+        };
+        let ts = 0.5; // neutro quando um dos lados não tem descrição útil
+        const tsRaw = diceSim(impTokens, impTokSet, cTokens);
+        if (tsRaw !== null) ts = tsRaw;
+        // Tradução via ML: se o apelido aprendido para o texto do extrato
+        // bate com o memo do lançamento existente, é forte indício de que
+        // é a MESMA transação (extrato bruto vs apelido do usuário).
+        if (impNickKey && cKey) {
+          if (impNickKey === cKey) ts = Math.max(ts, 1);
+          else {
+            const tsNick = diceSim(mlTokens(impNickname), impNickTokSet, cTokens);
+            if (tsNick !== null) ts = Math.max(ts, tsNick);
+          }
+        }
+
+        // Provisão de recorrência: transação gerada pelo motor de
+        // recorrências (recurring_id) ainda não conciliada = valor/data
+        // ESTIMADOS. É o candidato mais forte a "mesma transação".
+        const isProvision = c.recurring_id && !c.cleared;
+
+        let score = 0.45 * vs + 0.30 * ts + 0.25 * ds + (isProvision ? 0.15 : 0);
+        let reason = '';
+        let isDup = false;
+
+        if (isProvision && ts >= 0.30 && vs >= 0.35 && days <= 10) {
+          // Recorrência provisionada: texto parecido basta, mesmo com
+          // valor/data estimados diferentes do real
+          isDup = true;
+          reason = 'recorrencia';
+        } else if (vs >= 0.95 && days <= 3) {
+          // Valor (quase) exato em data próxima — duplicata clássica.
+          // Guarda anti-falso-positivo: se as duas descrições têm tokens
+          // significativos e NENHUM em comum (estabelecimentos claramente
+          // diferentes), só marca se for valor idêntico NO MESMO dia.
+          const bothMeaningful = impTokens.length >= 1 && cTokens.length >= 1;
+          if (bothMeaningful && ts === 0) {
+            if (diff <= 0.01 && days === 0) { isDup = true; reason = 'mesmo-dia-valor'; }
+          } else {
+            isDup = true;
+            reason = days === 0 ? 'exata' : 'valor-igual-data-proxima';
+          }
+        } else if (score >= 0.80) {
+          isDup = true;
+          reason = 'similaridade-alta';
+        }
+
+        if (isDup && score > bestScore) {
+          bestScore = score;
+          bestMatch = c;
+          bestReason = reason;
+          bestDays = Math.round(days);
+        }
+      }
+
+      if (bestMatch) {
         potentialDups.push({
           rowIndex: i,
           date: r.date,
           memo: r.memo || r.desc || '',
           amount: r.amount,
-          existing: existing.map(e => ({ id: e.id, memo: e.memo })),
+          reason: bestReason,
+          daysDiff: bestDays,
+          nickname: impNickname || null,
+          score: Math.round(bestScore * 100) / 100,
+          existing: [{
+            id: bestMatch.id, memo: bestMatch.memo,
+            date: bestMatch.date, amount: bestMatch.amount,
+            recurring: !!bestMatch.recurring_id, cleared: !!bestMatch.cleared,
+          }],
         });
         continue;
       }
@@ -2661,6 +2851,16 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
     return potentialDups.length > 0
       ? { needsConfirmation: true, potentialDups, totalRows: rows.length }
       : { needsConfirmation: false, potentialDups: [], totalRows: rows.length };
+  }
+
+  // Substituição de provisões de recorrência: antes de inserir a transação
+  // REAL importada, remove a provisão correspondente (que tinha valor/data
+  // apenas estimados). Sem isso, ou ficaria duplicado, ou ficaria o valor errado.
+  let replaced = 0;
+  if (Array.isArray(replaceIds) && replaceIds.length) {
+    for (const rid of replaceIds) {
+      try { run('DELETE FROM transactions WHERE id=? AND recurring_id IS NOT NULL AND cleared=0', [rid]); replaced++; } catch(e) {}
+    }
   }
 
   // Insert all approved rows
@@ -2697,7 +2897,7 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
   }
 
   save();
-  return { inserted, duplicates: 0, dailyMismatches };
+  return { inserted, replaced: (typeof replaced !== 'undefined' ? replaced : 0), duplicates: 0, dailyMismatches };
 });
 
 function toISO(dmy) {
@@ -3305,7 +3505,14 @@ ipcMain.handle('manual:open', (_, { lang }) => {
 
 // ── Broker name mappings ──
 function getBrokerMappingsPath() {
-  const base = app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..');
+  // Respeita a pasta de dados customizada (ex.: Dropbox), igual ao DB e aos
+  // backups — sem isso, o arquivo ficava preso na pasta local do Windows
+  // (userData) e nunca era sincronizado entre computadores.
+  const settings = loadSettings();
+  const base = settings.dataDir
+    ? settings.dataDir
+    : (app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..'));
+  if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true });
   return path.join(base, '_broker_mappings.json');
 }
 function loadBrokerMappings() {
@@ -3336,7 +3543,11 @@ ipcMain.handle('broker:mapping-learn', (_, { broker, original, mapped }) => {
 
 // ── Custom bank parsers config ──
 function getBankParsersPath() {
-  const base = app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..');
+  const settings = loadSettings();
+  const base = settings.dataDir
+    ? settings.dataDir
+    : (app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..'));
+  if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true });
   return path.join(base, '_bank_parsers.json');
 }
 function loadBankParsers() {
@@ -6176,6 +6387,37 @@ Outras regras:
   try { parsed = JSON.parse(stripJsonFence(r.text)); }
   catch(e) { return { ok: false, error: 'PARSE_FAIL', detail: (r.text||'').slice(0,300) }; }
   return { ok: true, result: parsed };
+});
+
+// ── AI: categorização em lote de transações importadas ──
+// Recebe linhas sem categoria + lista de categorias do usuário; devolve
+// um mapeamento índice→categoria. Uma única chamada para até ~60 linhas.
+ipcMain.handle('ai:categorize-batch', async (_, { rows, categories }) => {
+  if (!Array.isArray(rows) || !rows.length) return { ok: false, error: 'EMPTY' };
+  const catList = (categories || []).join(', ');
+  const lines = rows.slice(0, 60).map((r, i) =>
+    `${i}|${String(r.memo || '').slice(0, 80)}|${r.amount}`).join('\n');
+  const sys = `Você categoriza transações bancárias brasileiras.
+Categorias disponíveis (use EXATAMENTE um destes nomes): ${catList}
+
+Receberá linhas no formato: indice|descricao|valor (valor negativo = despesa, positivo = receita).
+Para cada linha, escolha a categoria mais provável da lista. Se realmente não der para inferir, use "".
+Responda SOMENTE com JSON válido, sem markdown: {"cats":{"0":"Categoria","1":"Outra", ...}}`;
+  const r = await callLLM(sys, lines);
+  if (!r.ok) return r;
+  try {
+    const parsed = JSON.parse(stripJsonFence(r.text));
+    const cats = parsed.cats || parsed;
+    // Sanitiza: só aceita categorias que existem na lista do usuário
+    const valid = new Set(categories || []);
+    const out = {};
+    Object.entries(cats).forEach(([k, v]) => {
+      if (valid.has(v)) out[k] = v;
+    });
+    return { ok: true, cats: out };
+  } catch(e) {
+    return { ok: false, error: 'PARSE_FAIL', detail: (r.text || '').slice(0, 300) };
+  }
 });
 
 // ── AI: proactive financial insights ──
