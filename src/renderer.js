@@ -6155,7 +6155,9 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
         ⚠️ ${potentialDups.length} possível(is) duplicata(s) encontrada(s)
       </div>
       <div style="font-size:12px;color:var(--text2);margin-bottom:10px;line-height:1.6">
-        Para cada linha em amarelo, o Cruzeiro encontrou um lançamento existente muito parecido (valor, data próxima e descrição são comparados — inclusive apelidos que você já ensinou ao app). Escolha o que fazer:
+        O Cruzeiro encontrou lançamentos existentes parecidos (valor, data próxima e descrição são comparados — inclusive apelidos que você já ensinou ao app).
+        <br>🔴 <strong>Vermelho</strong> — mesma data, valor e descrição parecida: quase certeza de duplicata.
+        <br>🟡 <strong>Amarelo</strong> — data ou descrição batem só parcialmente: vale conferir com mais atenção antes de confirmar.
         <br>🔄 <strong>Substituir provisão</strong> — o lançamento existente é uma <em>previsão de recorrência</em> (valor/data estimados): importa o valor real e apaga a estimativa. <em>Recomendado nesses casos.</em>
         <br>🚫 <strong>Pular</strong> — é a mesma transação já registrada: não importa de novo.
         <br>✅ <strong>Importar</strong> — são transações diferentes que só se parecem: importa normalmente.
@@ -6197,7 +6199,18 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
           const amtCls = r.amount < 0 ? 'color:var(--red)' : 'color:var(--green)';
           const amtStr = fmtBRL(r.amount);
           const exStr  = exList?.map(e => `"${esc(e.memo)}"`).join(', ') || '';
-          const rowBg  = isDup ? 'background:var(--warn-bg)' : '';
+          // Cor por nível de confiança: "exata" (mesmo dia + valor + alguma
+          // correspondência de descrição) é praticamente certeza de
+          // duplicata — vermelho, baixo risco de erro. Provisão de
+          // recorrência é uma categoria à parte (ação "substituir", não
+          // uma duplicata comum) — cor de destaque própria. Os demais
+          // motivos (mesmo dia/valor mas descrição diferente, valor igual
+          // em data próxima, similaridade) são onde a classificação
+          // automática erra mais — mantém amarelo, pedindo mais atenção.
+          const rowBg = !isDup ? ''
+            : isProvision ? 'background:var(--accent-bg)'
+            : dupInfo.reason === 'exata' ? 'background:var(--red-bg)'
+            : 'background:var(--warn-bg)';
           return `<div style="display:grid;grid-template-columns:1fr 1fr auto;border-bottom:1px solid var(--border);${rowBg}" data-idx="${i}">
             <!-- New record -->
             <div style="padding:7px 10px;border-right:1px solid var(--border2);font-size:12px">
@@ -6221,10 +6234,10 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
                 <input type="radio" name="dup-action-${i}" value="replace" data-existing-id="${ex0.id}" checked> 🔄 Substituir provisão
               </label>` : ''}
               <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--green);font-weight:500">
-                <input type="radio" name="dup-action-${i}" value="import" ${(!isDup || (dupInfo?.reason === 'mesmo-dia-valor' && !isProvision))?'checked':''}> ✅ Importar
+                <input type="radio" name="dup-action-${i}" value="import" ${!isDup ? 'checked' : ''}> ✅ Importar
               </label>
               <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--red);font-weight:500">
-                <input type="radio" name="dup-action-${i}" value="skip" ${isDup && !isProvision && dupInfo?.reason !== 'mesmo-dia-valor' ?'checked':''}> 🚫 Pular
+                <input type="radio" name="dup-action-${i}" value="skip" ${isDup && !isProvision ? 'checked' : ''}> 🚫 Pular
               </label>
             </div>
           </div>`;
