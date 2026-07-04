@@ -6436,6 +6436,68 @@ Outras regras:
 // ── AI: categorização em lote de transações importadas ──
 // Recebe linhas sem categoria + lista de categorias do usuário; devolve
 // um mapeamento índice→categoria. Uma única chamada para até ~60 linhas.
+// ── Auditoria de saldo pós-fatura: detecção de duplicatas reais no banco ──
+// Procura grupos de transações com mesma data+valor+memo aparecendo 2+
+// vezes na conta dentro do período — usado quando a auditoria do livro-razão
+// (na renderer) não encontra uma linha "sem destino" que explique sozinha
+// a diferença, sugerindo que algo pode ter sido inserido duas vezes.
+// Soma de transações de uma conta num intervalo de datas — a "verdade
+// terrena" (consulta fresca ao banco, não a contabilidade em memória do
+// renderer) usada como um dos lados da comparação na auditoria de saldo
+// pós-fatura.
+ipcMain.handle('tx:sum-in-range', (_, { accountId, dateFrom, dateTo }) => {
+  const row = first(
+    'SELECT COALESCE(SUM(amount),0) as total, COUNT(*) as n FROM transactions WHERE account_id=? AND date BETWEEN ? AND ?',
+    [accountId, dateFrom, dateTo]
+  );
+  return { total: row?.total || 0, count: row?.n || 0 };
+});
+
+ipcMain.handle('tx:find-duplicates-in-range', (_, { accountId, dateFrom, dateTo }) => {
+  const rows = all(
+    `SELECT id, date, amount, memo, COUNT(*) OVER (PARTITION BY date, amount, LOWER(TRIM(memo))) as grp_count
+     FROM transactions
+     WHERE account_id=? AND date BETWEEN ? AND ?
+     ORDER BY date, memo`,
+    [accountId, dateFrom, dateTo]
+  );
+  const groups = {};
+  rows.filter(r => r.grp_count > 1).forEach(r => {
+    const key = `${r.date}|${r.amount}|${normKey(r.memo)}`;
+    (groups[key] = groups[key] || []).push({ id: r.id, date: r.date, amount: r.amount, memo: r.memo });
+  });
+  return Object.values(groups);
+});
+
+// ── AI: diagnóstico de divergência de saldo na fatura ──
+// Fallback usado quando a auditoria determinística (livro-razão por linha +
+// checagem de duplicatas no banco) não consegue explicar sozinha a
+// diferença entre o total da fatura e o total registrado.
+ipcMain.handle('ai:diagnose-fatura-gap', async (_, { diff, unaccountedRows, dbDuplicateGroups }) => {
+  const sys = `Você audita faturas de cartão de crédito importadas para um app financeiro.
+O total da fatura (soma das linhas do arquivo importado) não bateu com o total efetivamente
+registrado na conta. Diferença: R$ ${diff.toFixed(2)} (positivo = faltou dinheiro registrado;
+negativo = foi registrado a mais que o esperado).
+
+Linhas da fatura sem destino identificado (podem ser a causa de "faltou"):
+${JSON.stringify(unaccountedRows || [], null, 0)}
+
+Grupos de transações duplicadas encontradas na conta (podem ser a causa de "sobrou"):
+${JSON.stringify(dbDuplicateGroups || [], null, 0)}
+
+Responda SOMENTE com JSON válido, sem markdown:
+{"explicacao": "frase curta e direta explicando a causa mais provável",
+ "confianca": "alta"|"media"|"baixa"}`;
+  const r = await callLLM(sys, 'Diagnostique a diferença.');
+  if (!r.ok) return r;
+  try {
+    const parsed = JSON.parse(stripJsonFence(r.text));
+    return { ok: true, ...parsed };
+  } catch(e) {
+    return { ok: false, error: 'PARSE_FAIL' };
+  }
+});
+
 ipcMain.handle('ai:categorize-batch', async (_, { rows, categories }) => {
   if (!Array.isArray(rows) || !rows.length) return { ok: false, error: 'EMPTY' };
   const catList = (categories || []).join(', ');

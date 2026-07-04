@@ -632,14 +632,22 @@ async function renderSidebar() {
 function populateAccountSelects() {
   const visible = accounts.filter(a => !a.hidden);
   const opts = visible.map(a => `<option value="${a.id}">${esc(a.name)}${a.currency!=='BRL'?' ('+a.currency+')':''}</option>`).join('');
-  ['tx-account','tr-from','tr-to','rec-account','qif-account','bank-account'].forEach(id => {
+  ['tx-account','tr-from','tr-to','rec-account','qif-account'].forEach(id => {
     const el = G(id); if (el) el.innerHTML = opts;
   });
-  // Restore import default for current bank
+  // Conta de destino da importação: só contas VISÍVEIS fazem sentido como
+  // destino de um extrato novo — igual ao seletor de ajuste de corretora.
   const bankSel = G('bank-account');
   if (bankSel) {
+    bankSel.innerHTML = '<option value="">— Selecione a conta —</option>' + opts;
+    // Só reaplica o valor lembrado se a conta ainda existir e estiver visível
+    // (senão o campo fica preso silenciosamente numa conta que já não existe
+    // mais, dando a impressão de que "o app escolheu sozinho" sem mostrar
+    // nada pra revisar).
     const def = (window._importDefaults || {})[window._selBank || 'itau'];
-    if (def) bankSel.value = def;
+    if (def && visible.some(a => String(a.id) === String(def))) {
+      bankSel.value = def;
+    }
     bankSel.onchange = () => {
       if (!window._importDefaults) window._importDefaults = {};
       window._importDefaults[window._selBank || 'itau'] = bankSel.value;
@@ -2910,9 +2918,11 @@ function rowClick(e, id) {
     selectedRows.has(id) ? selectedRows.delete(id) : selectedRows.add(id);
     _selAnchor = id;
   } else {
-    // Plain click: if clicking an editable cell, let dblclick handle edit
-    if (e.target.classList.contains('cell-editable') && !e.shiftKey) return;
-    // Set this row as sole selection + new anchor
+    // Plain click: seleciona a linha normalmente. A edição inline só
+    // dispara no DUPLO clique (ondblclick), então não há necessidade de
+    // ignorar o clique simples aqui — isso só fazia a seleção parecer
+    // "não funcionar" quando o clique caía em cima do texto (memo, data,
+    // categoria, valores), que é a maior parte da área visível da linha.
     selectedRows.clear();
     selectedRows.add(id);
     _selAnchor = id;
@@ -4480,7 +4490,7 @@ async function initImportPage() {
   // Populate broker account selector with investment accounts
   const brokerAccSel = G('broker-account');
   if (brokerAccSel && accounts.length) {
-    const invAccounts = accounts.filter(a => a.type === 'investment' || a.type === 'checking');
+    const invAccounts = accounts.filter(a => (a.type === 'investment' || a.type === 'checking') && !a.hidden);
     brokerAccSel.innerHTML = '<option value="">— Não criar ajuste —</option>' +
       invAccounts.map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
   }
@@ -5206,6 +5216,7 @@ function shiftMonths(isoDate, months) {
 }
 
 let _pendingImport = null; // {rows, parcelInstallments, accountId, checkDailySaldo}
+let _importAudit = null;   // {parsedRows, accounted} — livro-razão da conferência de saldo pós-fatura
 // Quando o usuário cria um ativo novo a partir de uma movimentação não
 // identificada na importação de corretora — guarda qual movimentação deve
 // ser vinculada automaticamente assim que o ativo for salvo.
@@ -5292,10 +5303,30 @@ async function confirmBankImport() {
     const p = mlPreds[i];
     return {
       ...r,
+      _gi: i, // índice estável — sobrevive a todo filter/spread subsequente,
+              // usado pela auditoria de saldo pós-importação para saber
+              // exatamente qual linha da fatura acabou em qual destino
       sugMemo: (p && p.memo) ? p.memo : r.memo,
       sugCat:  (p && p.category) ? p.category : (r.category || ''),
     };
   });
+
+  // ── Auditoria de saldo pós-fatura ─────────────────────────────────────
+  // Compara o TOTAL DECLARADO pela própria fatura (quando o parser consegue
+  // extrair — hoje: PDFs do Itaú e Santander) contra o que uma consulta
+  // FRESCA ao banco de dados mostra ter ficado registrado na conta, depois
+  // que toda a importação (e as decisões do usuário sobre duplicatas) já
+  // se resolveram. Isso pega não só bugs do fluxo de importação, mas
+  // também erros de julgamento do usuário — descartar algo que não era
+  // duplicata, ou manter algo que era — já que nesses casos o livro-razão
+  // interno "bate" (a decisão foi registrada), mas o total real da conta
+  // não corresponde ao que a fatura de fato diz.
+  _importAudit = {
+    accountId,
+    parsedRows: withML.map(r => ({ gi: r._gi, accountId: r.accountId, amount: r.amount, memo: r.memo, dateISO: r.dateISO })),
+    accounted: [], // { gi, accountId, amount, kind, memo, dateISO } — usado só como PISTA de diagnóstico
+    declaredTotal: (_bankParsed && _bankParsed.declaredTotal != null) ? _bankParsed.declaredTotal : null,
+  };
 
   const checkDailySaldo = selBank === 'itau' && rows.some(r => r.saldo != null);
   _pendingImport = { rows: withML, parcelInstallments, accountId, checkDailySaldo };
@@ -5332,6 +5363,16 @@ async function confirmBankImport() {
       }
     }
     G('bank-result').innerHTML = '';
+
+    // Contabiliza na auditoria as linhas presumidas já importadas pela
+    // conferência de saldo diário — ANTES de removê-las de keptRows.
+    if (autoSkipGlobalIndices.length && _importAudit) {
+      autoSkipGlobalIndices.forEach(gi => {
+        const r = withML[gi];
+        if (!r) return;
+        _importAudit.accounted.push({ gi: r._gi, accountId: r.accountId, amount: r.amount, kind: 'saldo-diario', memo: r.memo, dateISO: r.dateISO });
+      });
+    }
 
     // Remove em bloco as linhas presumidas já importadas pela conferência de
     // saldo diário, e remapeia os índices das duplicatas individuais
@@ -5679,6 +5720,17 @@ async function doImportFromTable() {
   // Linhas marcadas como removidas pelo usuário (🗑️ na pré-visualização) também ficam de fora.
   const sourceRows = rows.filter((r, i) => !(_importEditRows[i]?._transferDone) && !(_importEditRows[i]?._removed));
 
+  // Contabiliza na auditoria as linhas excluídas pelo usuário ou que viraram
+  // transferência — são exclusões LEGÍTIMAS (decisão consciente), não bugs,
+  // mas precisam constar no livro-razão pra o total bater no final.
+  rows.forEach((r, i) => {
+    if (_importEditRows[i]?._removed) {
+      _importAudit?.accounted.push({ gi: r._gi, accountId: r.accountId ?? accountId, amount: r.amount, kind: 'excluded-by-user', memo: r.memo, dateISO: r.dateISO });
+    } else if (_importEditRows[i]?._transferDone) {
+      _importAudit?.accounted.push({ gi: r._gi, accountId: r.accountId ?? accountId, amount: r.amount, kind: 'transfer-created', memo: r.memo, dateISO: r.dateISO });
+    }
+  });
+
   // Read edited memo/category from table inputs (índices preservados a partir das linhas originais)
   const memoInputs = G('bank-preview-body').querySelectorAll('.import-memo-inp');
   const catInputs  = G('bank-preview-body').querySelectorAll('.import-cat-inp');
@@ -5793,6 +5845,13 @@ async function finishImportWithPatLinks(finalRows, updatedInstallments, accountI
   const importResult = await doImport(finalRows, updatedInstallments, accountId, checkDailySaldo, replaceIds);
   if (!importResult) return; // erro já exibido por doImport
 
+  // Contabiliza na auditoria as linhas que de fato foram inseridas
+  if (_importAudit) {
+    finalRows.forEach(r => {
+      _importAudit.accounted.push({ gi: r._gi, accountId: r.accountId ?? accountId, amount: r.amount, kind: 'inserted', memo: r.memo, dateISO: r.dateISO });
+    });
+  }
+
   let patLinkedCount = 0;
   for (const p of (patLinks || [])) {
     // Evita duas linhas conflitantes pro mesmo ativo+mês: se já existe um
@@ -5827,6 +5886,7 @@ async function finishImportWithPatLinks(finalRows, updatedInstallments, accountI
   if (debtLinks?.length && currentPage === 'patrimonio') refreshPatrimonioTable();
 
   showImportSummaryModal({ ...importResult, patLinkedCount, debtLinkedCount });
+  runFaturaBalanceAudit().catch(e => console.error('runFaturaBalanceAudit:', e));
 }
 
 // Resumo proeminente (modal, não toast) ao final de uma importação — antes
@@ -5942,6 +6002,8 @@ async function confirmMemoDupImport() {
       }
     } else if (action === 'skip') {
       skipIdx.add(m.rowIndex);
+      const r = finalRows[m.rowIndex];
+      _importAudit?.accounted.push({ gi: r?._gi, accountId: r?.accountId ?? accountId, amount: r?.amount, kind: 'matched-skip-round2', memo: r?.memo, dateISO: r?.dateISO });
     }
     // 'both': nothing to do — import alongside the placeholder
   }
@@ -6206,7 +6268,7 @@ async function confirmDupAndImport() {
   //    mesmo (apaga a provisão + insere a real, herdando memo/categoria
   //    dela). Não precisa edição manual nem passa pelo Round-2 depois.
   //  - "import" / não-duplicata: segue para a tela de edição normal.
-  //  - "skip": descartada.
+  //  - "skip": descartada — reconhecida como já existente.
   const directReplaceRows = [];
   const selectedRows = finalRows.filter((r, i) => {
     const radios = preview.querySelectorAll(`input[name="dup-action-${i}"]`);
@@ -6218,13 +6280,20 @@ async function confirmDupAndImport() {
       directReplaceRows.push({ row: r, existingId: exId, existingMemo: ex0?.memo || r.memo, existingCategory: ex0?.category || r.category || '' });
       return false; // não segue para a edição manual
     }
-    return action !== 'skip';
+    if (action === 'skip') {
+      _importAudit?.accounted.push({ gi: r._gi, accountId: r.accountId ?? accountId, amount: r.amount, kind: 'matched-skip', memo: r.memo, dateISO: r.dateISO });
+      return false;
+    }
+    return true;
   });
 
   if (directReplaceRows.length) {
     G('bank-result').innerHTML = `<div class="info-box">⏳ Substituindo ${directReplaceRows.length} provisão(ões) de recorrência…</div>`;
     try {
       await applyDirectReplacements(directReplaceRows, accountId, checkDailySaldo);
+      directReplaceRows.forEach(({ row }) => {
+        _importAudit?.accounted.push({ gi: row._gi, accountId: row.accountId ?? accountId, amount: row.amount, kind: 'replaced', memo: row.memo, dateISO: row.dateISO });
+      });
       toast(`🔄 ${directReplaceRows.length} provisão(ões) substituída(s) pelo valor real — nada a revisar nelas.`);
     } catch(e) {
       toast('Erro ao substituir provisão: ' + e.message);
@@ -6238,6 +6307,7 @@ async function confirmDupAndImport() {
     _pendingImport = null;
     clearPersistedImportState();
     preview.style.display = 'none';
+    runFaturaBalanceAudit().catch(e => console.error('runFaturaBalanceAudit:', e));
     return;
   }
 
@@ -6278,7 +6348,197 @@ async function applyDirectReplacements(directReplaceRows, accountId, checkDailyS
   }
 }
 
-// ── Global date/value parsing helpers (used by all parsers) ──
+// ══════════════════════════════════════════════════════════════════════
+// AUDITORIA DE SALDO PÓS-FATURA
+// ══════════════════════════════════════════════════════════════════════
+// Ao final de toda importação, confere se cada linha da fatura terminou em
+// exatamente um destino conhecido (inserida, reconhecida como duplicata,
+// substituída, excluída pelo usuário ou virou transferência). Se sobrar
+// alguma sem destino — ou for contabilizada mais de uma vez — investiga
+// sozinha o motivo e sugere a correção, sem o usuário precisar caçar a
+// diferença manualmente.
+async function runFaturaBalanceAudit() {
+  const audit = _importAudit;
+  _importAudit = null; // consome — cada importação tem sua própria auditoria
+  if (!audit || !audit.parsedRows.length) return;
+
+  const accountIds = [...new Set(audit.parsedRows.map(r => r.accountId))];
+
+  for (const accId of accountIds) {
+    const parsed = audit.parsedRows.filter(r => r.accountId === accId);
+    const dates = parsed.map(r => r.dateISO).filter(Boolean).sort();
+    const dateFrom = dates[0], dateTo = dates[dates.length - 1];
+    if (!dateFrom || !dateTo) continue;
+
+    // ── Fonte de verdade nº1: o total DECLARADO pela própria fatura ──
+    // (quando o parser conseguiu extrair — PDF do Itaú/Santander/XP hoje).
+    // IMPORTANTE: esse valor é CUMULATIVO (saldo anterior + atividade deste
+    // período — confirmado batendo a aritmética de uma fatura real da XP:
+    // "Total anterior" + "Pagamentos" + "Despesas" = "Valor total devido").
+    // Por isso compara contra o SALDO TOTAL da conta, não contra a soma de
+    // um intervalo de datas. Fallback (sem total declarado, ex: CSV): usa
+    // a soma das PRÓPRIAS linhas do arquivo — aí sim comparado só contra o
+    // período coberto por elas, já que não tem significado cumulativo.
+    const usingDeclared = audit.declaredTotal != null;
+    const externalTotal = usingDeclared ? -Math.abs(audit.declaredTotal)
+                                          : parsed.reduce((s, r) => s + r.amount, 0);
+
+    // ── Fonte de verdade nº2: consulta FRESCA ao banco, pós-importação ──
+    let dbTotal;
+    try {
+      dbTotal = usingDeclared
+        ? await ff.getBalance(accId)
+        : (await ff.txSumInRange({ accountId: accId, dateFrom, dateTo }))?.total || 0;
+    } catch(e) { continue; }
+
+    const diff = Math.round((externalTotal - dbTotal) * 100) / 100;
+    if (Math.abs(diff) <= 0.02) continue; // bateu — nada a fazer
+
+    // Livro-razão interno vira só PISTA de diagnóstico a partir daqui —
+    // ajuda a apontar QUAL linha é a suspeita mais provável, mas quem
+    // decide SE há divergência é a comparação acima, não isso.
+    const accountedForAcc = audit.accounted.filter(r => r.accountId === accId);
+    const countByGi = {};
+    accountedForAcc.forEach(r => { countByGi[r.gi] = (countByGi[r.gi] || 0) + 1; });
+    const unaccountedRows = parsed.filter(r => !countByGi[r.gi]);
+    const doubleAccountedRows = parsed.filter(r => countByGi[r.gi] > 1);
+
+    await diagnoseFaturaGap(accId, diff, parsed, unaccountedRows, doubleAccountedRows, {
+      usingDeclared, dateFrom, dateTo,
+    });
+  }
+}
+
+async function diagnoseFaturaGap(accountId, diff, parsedRows, unaccountedRows, doubleAccountedRows, ctx = {}) {
+  const accName = accounts.find(a => a.id === accountId)?.name || 'conta';
+  let explanation = '';
+  let suggestions = []; // { label, action: () => Promise }
+
+  if (unaccountedRows.length) {
+    // Pista mais confiável: linha(s) da fatura que não foram pra lugar
+    // nenhum no livro-razão interno — forte candidata a explicar o "faltou".
+    explanation = `${unaccountedRows.length} lançamento(s) da fatura não ${unaccountedRows.length===1?'foi encontrado':'foram encontrados'} na conta — provavelmente ${unaccountedRows.length===1?'foi':'foram'} descartado(s) por engano durante a importação.`;
+    unaccountedRows.forEach(r => {
+      suggestions.push({
+        label: `➕ Adicionar: ${fmtDateBR(r.dateISO)} · ${r.memo} · ${fmtBRL(r.amount)}`,
+        action: async () => {
+          await ff.bankImport({
+            accountId, rows: [{ date: r.dateISO.split('-').reverse().join('/'), amount: r.amount, memo: r.memo, category: '', saldo: null }],
+            checkDailySaldo: false, skipIds: [], dryRun: false, replaceIds: [],
+          });
+        },
+      });
+    });
+  }
+
+  if (doubleAccountedRows.length) {
+    explanation += (explanation?' ':'') + `${doubleAccountedRows.length} linha(s) parecem ter sido processadas mais de uma vez.`;
+  }
+
+  // Se o livro-razão não aponta uma causa clara — o que inclui exatamente o
+  // caso de erro de JULGAMENTO do usuário (uma decisão consciente, então
+  // "consistente" do ponto de vista do livro-razão, mas errada na prática)
+  // — procura duplicatas reais já gravadas no banco dentro do período.
+  let dbDupGroups = [];
+  if (!unaccountedRows.length && !doubleAccountedRows.length) {
+    try {
+      dbDupGroups = await ff.txFindDuplicatesInRange({ accountId, dateFrom: ctx.dateFrom, dateTo: ctx.dateTo });
+    } catch(e) {}
+    if (dbDupGroups.length) {
+      explanation = `Encontrei ${dbDupGroups.length} grupo(s) de lançamentos duplicados na conta, no período da fatura — provável causa se sobrou dinheiro registrado.`;
+      dbDupGroups.forEach(group => {
+        group.slice(1).forEach(dup => {
+          suggestions.push({
+            label: `🗑 Remover duplicata: ${fmtDateBR(dup.date)} · ${dup.memo} · ${fmtBRL(dup.amount)}`,
+            action: async () => { await ff.deleteTx(dup.id); },
+          });
+        });
+      });
+    } else {
+      // Nenhuma pista determinística — provavelmente uma linha foi marcada
+      // "Pular" (achando que era duplicata) ou "Manter" (achando que não
+      // era) de forma equivocada. Não há candidato óbvio pra sugerir
+      // automaticamente — melhor avisar claramente do que arriscar.
+      explanation = 'Não encontrei uma causa técnica óbvia (nenhuma linha ficou sem destino, nem há duplicatas na conta). Provavelmente alguma decisão tomada na tela de duplicatas — manter ou pular uma linha — não era a certa. Vale revisar o extrato deste período manualmente.';
+    }
+  }
+
+  // Última linha de defesa: IA configurada, só para uma pista textual a mais.
+  if (!explanation) {
+    try {
+      const ks = await ff.aiGetKeyStatus();
+      if (ks?.hasKey) {
+        const res = await ff.aiDiagnoseFaturaGap({
+          diff,
+          unaccountedRows: unaccountedRows.map(r => ({ date: r.dateISO, memo: r.memo, amount: r.amount })),
+          dbDuplicateGroups: dbDupGroups,
+        });
+        if (res.ok && res.explicacao) explanation = `🤖 ${res.explicacao}`;
+      }
+    } catch(e) {}
+    if (!explanation) explanation = 'Não consegui identificar automaticamente a causa exata — vale revisar a conta manualmente.';
+  }
+
+  const basisNote = ctx.usingDeclared
+    ? 'Comparado com o total impresso na própria fatura (pode incluir saldo de fatura anterior não paga, se houver).'
+    : 'Este arquivo não trazia um total impresso — comparado com a soma das próprias linhas do arquivo.';
+
+  showFaturaAuditPanel({ accountId, accName, diff, explanation, suggestions, basisNote });
+}
+
+function fmtDateBR(iso) { return (iso||'').split('-').reverse().join('/'); }
+
+function showFaturaAuditPanel({ accountId, accName, diff, explanation, suggestions, basisNote }) {
+  // diff = externalTotal - dbTotal. Negativo → a conta tem MENOS débito do
+  // que a fatura diz que deveria ter → falta uma transação real (não foi
+  // registrada). Positivo → a conta tem MAIS débito do que deveria →
+  // sobrou algo (provável duplicata mantida por engano).
+  const sign = diff < 0 ? 'faltam' : 'sobram';
+  const color = 'var(--warn)';
+  const html = `
+    <div id="fatura-audit-panel" style="position:fixed;bottom:20px;right:20px;z-index:19500;max-width:420px;
+      background:var(--bg2);border:1px solid ${color};border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,.25);
+      padding:16px;animation:gm-pop .22s cubic-bezier(.34,1.56,.64,1)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:20px">🔍</span>
+        <div style="font-weight:700;font-size:13.5px;color:${color}">Conferência da fatura — ${esc(accName)}</div>
+        <button class="btn-icon" style="margin-left:auto" onclick="document.getElementById('fatura-audit-panel')?.remove()">✕</button>
+      </div>
+      <div style="font-size:12.5px;color:var(--text2);margin-bottom:6px">
+        O total da fatura ficou <strong style="color:${color}">${fmtBRL(Math.abs(diff))}</strong> ${sign} em relação ao que foi registrado na conta.
+      </div>
+      ${basisNote ? `<div style="font-size:11px;color:var(--text3);margin-bottom:10px;font-style:italic">${esc(basisNote)}</div>` : ''}
+      <div style="font-size:12.5px;color:var(--text);margin-bottom:10px;line-height:1.5">${esc(explanation)}</div>
+      ${suggestions.length ? `
+        <div style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto">
+          ${suggestions.map((s, i) => `<button class="btn xs" style="text-align:left" onclick="applyFaturaAuditFix(${i})">${esc(s.label)}</button>`).join('')}
+        </div>` : ''}
+    </div>`;
+  document.getElementById('fatura-audit-panel')?.remove();
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  document.body.appendChild(div.firstElementChild);
+  window._faturaAuditSuggestions = suggestions;
+  window._faturaAuditAccountId = accountId;
+}
+
+async function applyFaturaAuditFix(i) {
+  const s = window._faturaAuditSuggestions?.[i];
+  if (!s) return;
+  const btn = document.querySelectorAll('#fatura-audit-panel .btn.xs')[i];
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Aplicando…'; }
+  try {
+    await s.action();
+    toast('✅ Correção aplicada.');
+    if (btn) { btn.style.opacity = '.5'; btn.textContent = '✓ ' + s.label; }
+    if (currentPage === 'account' && currentAccountId === window._faturaAuditAccountId) refreshAccount();
+  } catch(e) {
+    toast('Erro ao aplicar correção: ' + e.message);
+    if (btn) btn.disabled = false;
+  }
+}
+
+
 function pDate(v) {
   if (!v && v !== 0) return null;
   if (v instanceof Date) return v.toISOString().slice(0,10);
@@ -6538,7 +6798,17 @@ function parseBankBradesco(buffer) {
   return res;
 }
 
+// Roteador: a fatura da XP pode vir em CSV (posições/lançamentos) ou em PDF
+// (fatura completa, com o "Valor total devido" que a auditoria de saldo
+// usa). Mesmo botão "XP" no menu aceita os dois — sniffa os bytes mágicos
+// do arquivo em vez de confiar na extensão, igual ao Itaú.
 function parseBankXP(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const isPdf = bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46; // "%PDF"
+  return isPdf ? parseBankXPFaturaPDF(buffer) : parseBankXPCsv(buffer);
+}
+
+function parseBankXPCsv(buffer) {
   // Try UTF-8 first, fall back to latin1 (XP sometimes exports latin1)
   let text;
   try { text = new TextDecoder('utf-8').decode(buffer).replace(/^\uFEFF/, ''); }
@@ -6551,14 +6821,17 @@ function parseBankXP(buffer) {
 
   // Detect header row and column positions
   let hdrIdx = 0;
-  let dateCol = 0, descCol = 1, valCol = -1;
+  let dateCol = 0, descCol = 1, valCol = -1, parcelaCol = -1;
   for (let i = 0; i < Math.min(rows.length, 5); i++) {
     const r = rows[i].map(c => norm(String(c)));
     const di = r.findIndex(c => c === 'data' || c.startsWith('data'));
-    const li = r.findIndex(c => c.includes('lancamento') || c.includes('descri') || c.includes('historico'));
+    // "estabelecimento" é o nome de coluna usado na fatura CSV da XP —
+    // adicionado junto com lancamento/descri/historico dos outros formatos.
+    const li = r.findIndex(c => c.includes('lancamento') || c.includes('descri') || c.includes('historico') || c.includes('estabelecimento'));
     const vi = r.findIndex(c => c.includes('valor') || c.includes('montante'));
+    const pi = r.findIndex(c => c.includes('parcela'));
     if (di >= 0 && li >= 0 && vi >= 0) {
-      hdrIdx = i + 1; dateCol = di; descCol = li; valCol = vi; break;
+      hdrIdx = i + 1; dateCol = di; descCol = li; valCol = vi; parcelaCol = pi; break;
     }
   }
   if (valCol < 0) {
@@ -6572,7 +6845,7 @@ function parseBankXP(buffer) {
     const row = rows[i];
     if (!row || row.length < Math.max(dateCol, descCol, valCol) + 1) continue;
     const rawDate = String(row[dateCol]||'').trim();
-    const rawDesc = String(row[descCol]||'').trim();
+    let   rawDesc = String(row[descCol]||'').trim();
     const rawVal  = String(row[valCol]||'').trim();
     if (!rawDate || !rawDesc) continue;
     if (SKIP.some(s => norm(rawDesc).startsWith(s))) continue;
@@ -6580,10 +6853,111 @@ function parseBankXP(buffer) {
     if (!date) continue;
     const num = pVal(rawVal);
     if (num === 0 && !rawVal) continue;
+    // Coluna "Parcela" (ex: "6 de 6") — a data bruta da linha é sempre a da
+    // COMPRA ORIGINAL, não a da parcela atual. Anexa a info ao memo no
+    // formato que detectParcela()/shiftMonths() (em confirmBankImport)
+    // já reconhecem, pra reaproveitar o mesmo deslocamento de mês usado
+    // por todos os outros parsers de cartão — sem duplicar essa lógica aqui.
+    if (parcelaCol >= 0 && row[parcelaCol] != null) {
+      const rawParc = String(row[parcelaCol]).trim();
+      const pm = rawParc.match(/(\d+)\s*(?:de|\/)\s*(\d+)/i);
+      if (pm) {
+        const parcel = parseInt(pm[1]), total = parseInt(pm[2]);
+        if (parcel > 0 && total > 1 && parcel <= total) {
+          rawDesc = `${rawDesc} Parcela ${parcel} de ${total}`;
+        }
+      }
+    }
     // XP: positive = despesa (saída), invert to negative for Cruzeiro
     res.push({ date, desc: rawDesc, memo: rawDesc, amount: -num, saldo: null, category: '' });
   }
   return res;
+}
+
+// ── Fatura XP em PDF ──────────────────────────────────────────────────
+// Layout simples de uma coluna só (ao contrário do Itaú/Santander, que têm
+// duas colunas lado a lado) — cada transação já vem com o ANO completo
+// (DD/MM/AA), então não precisa da lógica de "resolver ano pela emissão"
+// que os outros parsers de PDF de cartão precisam. Cada linha termina em
+// um ou dois valores monetários (R$ sempre; US$ só quando há conversão
+// de moeda estrangeira — a linha "IOF Transacoes Exterior R$" é a única
+// exceção sem a coluna US$ preenchida).
+async function parseBankXPFaturaPDF(buffer) {
+  await loadPdfJsLib();
+  const pdf = await getPdfDocumentWithPassword(buffer);
+  if (!pdf) throw new Error('__IMPORT_CANCELLED__'); // usuário cancelou a senha
+
+  const MONEY_RE = /^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+  const DATE_RE  = /^(\d{2})\/(\d{2})\/(\d{2})$/;
+  const HOLDER_RE = /^([A-ZÀ-Ú][A-ZÀ-Ú .]+?)\s*-\s*(\d{4}\*+\d{4})$/;
+  const SKIP_RE = /^subtotal\b|^data\s+descri|^titular$|^endere[çc]o$|^vencimento$|^resumo\s+da\s+sua\s+fatura|^total\s+da\s+fatura\s+anterior|^pagamentos\/cr[ée]ditos|^saldo\s+financiado|^despesas\s+at[ée]|^valor\s+total\s+devido|^fatura\s+fechada|^pr[óo]ximo\s+fechamento|^melhor\s+dia\s+de\s+compra|^as\s+informa[çc][õo]es/i;
+
+  const result = [];
+  let currentHolder = null;
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+
+    // Agrupa itens por linha (mesma coordenada Y, arredondada) — evita
+    // que texto de colunas/rótulos vizinhos grude na transação errada.
+    const rowMap = {};
+    for (const item of content.items) {
+      const t = item.str.trim();
+      if (!t) continue;
+      const y = Math.round(item.transform[5]);
+      (rowMap[y] = rowMap[y] || []).push({ x: item.transform[4], text: t });
+    }
+    const ys = Object.keys(rowMap).map(Number).sort((a, b) => b - a); // topo→base
+    const lines = ys.map(y => rowMap[y].sort((a, b) => a.x - b.x).map(i => i.text).join(' ').replace(/\s+/g, ' ').trim());
+
+    for (const line of lines) {
+      if (!line) continue;
+
+      const holderM = line.match(HOLDER_RE);
+      if (holderM) { currentHolder = holderM[1].trim(); continue; }
+
+      if (SKIP_RE.test(line)) continue;
+
+      const m = line.match(/^(\d{2}\/\d{2}\/\d{2})\s+(.+)$/);
+      if (!m) continue;
+      const dateRaw = m[1];
+      const tokens = m[2].trim().split(/\s+/);
+      if (tokens.length < 2) continue;
+
+      // Últimos 1 ou 2 tokens são valores monetários (R$ sempre, US$ às
+      // vezes). Detecta olhando de trás pra frente.
+      let rVal = null, descTokens = tokens;
+      const last = tokens[tokens.length - 1];
+      const prev = tokens[tokens.length - 2];
+      if (MONEY_RE.test(last) && prev !== undefined && MONEY_RE.test(prev)) {
+        rVal = prev; // R$ vem antes do US$ na tabela
+        descTokens = tokens.slice(0, -2);
+      } else if (MONEY_RE.test(last)) {
+        rVal = last;
+        descTokens = tokens.slice(0, -1);
+      } else {
+        continue; // linha não é uma transação (ex: cabeçalho de rodapé)
+      }
+
+      const desc = descTokens.join(' ').trim();
+      if (!desc || !rVal) continue;
+
+      const dm = dateRaw.match(DATE_RE);
+      if (!dm) continue;
+      const iso = `20${dm[3]}-${dm[2]}-${dm[1]}`;
+      const amount = -parseFloat(rVal.replace(/\./g, '').replace(',', '.'));
+      if (isNaN(amount) || amount === 0) continue;
+
+      let memo = desc;
+      if (currentHolder) memo += ` [${currentHolder}]`;
+      result.push({ date: iso, desc, memo, amount, saldo: null, category: '', cardHolder: currentHolder });
+    }
+  }
+
+  if (!result.length) throw new Error('Nenhuma transação encontrada na fatura XP.');
+  result.declaredTotal = await extractFaturaDeclaredTotal(pdf);
+  return result;
 }
 
 function parseBankBTG(buffer) {
@@ -9354,6 +9728,37 @@ async function onWizardFileSelected(event) {
   }
 }
 
+// ── Extração genérica do "Total da fatura" declarado no PDF ──────────────
+// Usado pela auditoria de saldo pós-fatura: compara esse valor (fonte
+// externa e independente) contra o que de fato ficou registrado na conta,
+// o que pega inclusive erros de julgamento do usuário na resolução de
+// duplicatas — não só bugs internos do fluxo de importação.
+async function extractFaturaDeclaredTotal(pdf) {
+  const patterns = [
+    /total\s+desta\s+fatura[^\d\-]{0,20}(-?\s?\d{1,3}(?:\.\d{3})*,\d{2})/i,
+    /valor\s+total\s+devido[^\d\-]{0,20}(-?\s?\d{1,3}(?:\.\d{3})*,\d{2})/i,
+    /valor\s+total\s+da\s+fatura[^\d\-]{0,20}(-?\s?\d{1,3}(?:\.\d{3})*,\d{2})/i,
+    /total\s+da\s+fatura[^\d\-]{0,20}(-?\s?\d{1,3}(?:\.\d{3})*,\d{2})/i,
+    /total\s+a\s+pagar[^\d\-]{0,20}(-?\s?\d{1,3}(?:\.\d{3})*,\d{2})/i,
+    /valor\s+total[^\d\-]{0,20}(-?\s?\d{1,3}(?:\.\d{3})*,\d{2})/i,
+  ];
+  try {
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      const joined = content.items.map(i => i.str).join(' ').replace(/\s+/g, ' ');
+      for (const re of patterns) {
+        const m = joined.match(re);
+        if (m) {
+          const v = parseFloat(m[1].replace(/\s/g,'').replace(/\./g,'').replace(',','.'));
+          if (!isNaN(v) && v > 0) return v;
+        }
+      }
+    }
+  } catch(e) { /* extração é best-effort — se falhar, auditoria cai no fallback */ }
+  return null;
+}
+
 // ── Santander PDF statement parser ──
 // "Extrato Consolidado Inteligente" — multi-column layout where each transaction
 // spans 2 text rows: row1 = date(optional) + type + doc + value, row2 = payee detail.
@@ -10071,6 +10476,7 @@ async function parseSantanderFaturaPDF(buffer) {
   }
 
   if (!result.length) throw new Error('Nenhuma transação encontrada na fatura Santander.');
+  result.declaredTotal = await extractFaturaDeclaredTotal(pdf);
   return result;
 }
 
@@ -10214,6 +10620,10 @@ async function parseItauFaturaPDF(buffer) {
     rows.push({ date: iso, desc: r.desc, memo, amount, saldo: null, category: '', cardHolder: r.holder });
   }
   if (!rows.length) throw new Error('Nenhuma transação encontrada na fatura Itaú.');
+  // Anexa o total declarado pela própria fatura (se encontrado) — usado pela
+  // auditoria de saldo pós-importação. Não afeta o uso de `rows` como array
+  // em nenhum outro lugar (propriedade nomeada extra, índices numéricos intactos).
+  rows.declaredTotal = await extractFaturaDeclaredTotal(pdf);
   return rows;
 }
 
