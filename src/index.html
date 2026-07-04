@@ -1251,7 +1251,7 @@ select.inp option{background:var(--bg2);}
           <button onclick="toggleImportDropdown('bank')" style="min-width:200px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:8px 14px;cursor:pointer;font-size:14px">
             🏦 Extrato bancário <span id="import-dd-bank-arrow">▾</span>
           </button>
-          <div id="import-dd-bank" style="display:none;position:fixed;min-width:220px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000;overflow:hidden">
+          <div id="import-dd-bank" style="display:none;position:fixed;min-width:220px;max-height:70vh;overflow-y:auto;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000">
             <div id="import-dd-bank-builtin"></div>
             <div id="import-dd-bank-custom"></div>
             <div class="import-dd-item import-dd-other" onclick="pickImport('outro_banco','bank')">➕ Outro banco…</div>
@@ -1264,7 +1264,7 @@ select.inp option{background:var(--bg2);}
           <button onclick="toggleImportDropdown('card')" style="min-width:200px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:linear-gradient(135deg,#b45309,#f59e0b);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(217,119,6,.3);padding:8px 14px;cursor:pointer;font-size:14px">
             💳 Fatura de cartão <span id="import-dd-card-arrow">▾</span>
           </button>
-          <div id="import-dd-card" style="display:none;position:fixed;min-width:220px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000;overflow:hidden">
+          <div id="import-dd-card" style="display:none;position:fixed;min-width:220px;max-height:70vh;overflow-y:auto;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000">
             <div id="import-dd-card-builtin"></div>
             <div id="import-dd-card-custom"></div>
             <div class="import-dd-item import-dd-other" onclick="pickImport('outro_cartao','card')">➕ Outro cartão…</div>
@@ -1277,7 +1277,7 @@ select.inp option{background:var(--bg2);}
           <button onclick="toggleBrokerDropdown()" style="min-width:200px;display:flex;align-items:center;justify-content:space-between;gap:8px;background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(124,58,237,.3);padding:8px 14px;cursor:pointer;font-size:14px">
             📊 Extrato de corretora <span id="import-dd-broker-arrow">▾</span>
           </button>
-          <div id="import-dd-broker" style="display:none;position:fixed;min-width:220px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000;overflow:hidden">
+          <div id="import-dd-broker" style="display:none;position:fixed;min-width:220px;max-height:70vh;overflow-y:auto;background:var(--bg2);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9000">
             <div id="import-dd-broker-builtin"></div>
             <div id="import-dd-broker-custom"></div>
             <div class="import-dd-item import-dd-other" onclick="pickBroker('outra_corretora')">➕ Outra corretora…</div>
