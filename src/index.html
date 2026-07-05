@@ -4026,6 +4026,25 @@ select.inp option{background:var(--bg2);}
     </div>
   </div>
 
+  <!-- ═══ MÊS/ANO MANUAL (fallback quando a detecção automática do extrato falha) ═══ -->
+  <div class="overlay" id="modal-monthyear" style="z-index:9999">
+    <div class="modal" style="width:380px;padding:0;overflow:hidden">
+      <div style="padding:20px 20px 12px">
+        <div style="font-size:15px;font-weight:600;margin-bottom:8px" id="modal-monthyear-title">Mês/ano não identificado</div>
+        <div style="font-size:13px;color:var(--text2);margin-bottom:12px" id="modal-monthyear-detail">
+          Não foi possível identificar automaticamente o mês/ano deste extrato. Informe abaixo.
+        </div>
+        <input type="month" class="inp" id="modal-monthyear-input" style="width:100%"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();monthYearDialogResolve(true)}">
+        <div id="modal-monthyear-error" style="display:none;margin-top:8px;font-size:12px;color:var(--red)"></div>
+      </div>
+      <div class="modal-footer" style="gap:8px">
+        <button class="btn" id="modal-monthyear-cancel" onclick="monthYearDialogResolve(false)">Cancelar</button>
+        <button class="btn primary" id="modal-monthyear-ok" onclick="monthYearDialogResolve(true)">Continuar</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ══ LICENSE GATE MODAL ══ -->
   <div class="overlay" id="modal-license" style="z-index:3000;display:none">
     <div class="modal" style="max-width:480px">

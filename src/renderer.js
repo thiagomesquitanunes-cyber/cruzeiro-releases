@@ -9829,6 +9829,30 @@ async function getPdfDocumentWithPassword(buffer) {
 }
 
 
+// ── Reconstrói o texto "denso" de uma linha do pdf.js, inserindo espaço só
+// onde há um vão real de largura entre itens ──
+// Esta fonte específica do extrato Santander fragmenta CADA GLIFO em um
+// item separado do pdf.js e intercala "espaços fantasma" de largura ~0 entre
+// letras de uma mesma palavra (artefato de kerning) — "PIX ENVIADO" chega
+// como itens tipo P/I/X/" "/E/" "/N/... com width quase zero nesses espaços
+// fantasma, mas width real (>0.15) nos espaços que separam palavras/colunas
+// de fato. Um simples `.join(' ')` (usado antes aqui) insere espaço extra em
+// TODOS os casos, quebrando datas ("02/03" virava "02   /   03"), valores
+// ("594,15-" virava "594 , 15 -") e a própria detecção do cabeçalho de
+// mês/ano ("março/2026" virava "m a r ç o / 2026") — por isso o app não
+// conseguia nem achar o mês/ano nem os lançamentos em si.
+function _santanderDenseRowText(items) {
+  let out = '';
+  for (const it of items) {
+    if (it.text.trim() === '') {
+      if ((it.w || 0) > 0.15 && out && !out.endsWith(' ')) out += ' ';
+    } else {
+      out += it.text;
+    }
+  }
+  return out.trim();
+}
+
 async function parseSantanderPDF(buffer) {
   await loadPdfJsLib();
 
@@ -9850,14 +9874,16 @@ async function parseSantanderPDF(buffer) {
     const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
 
-    // Group text items by row (rounded y position)
+    // Group text items by row (rounded y position), preservando a largura
+    // (`w`) de cada item — é ela que distingue um espaço real de um espaço
+    // fantasma de kerning (ver _santanderDenseRowText acima).
     const rows = {};
     for (const item of content.items) {
       const x = item.transform[4];
       const y = item.transform[5];
       const key = Math.round(y);
       if (!rows[key]) rows[key] = [];
-      rows[key].push({ x, text: item.str });
+      rows[key].push({ x, w: item.width, text: item.str });
     }
     // pdf.js y-axis is bottom-up; sort descending (top of page first)
     const sortedYs = Object.keys(rows).map(Number).sort((a,b) => b - a);
@@ -9865,7 +9891,8 @@ async function parseSantanderPDF(buffer) {
     // Detect month/year header on first page
     if (pageNum === 1) {
       for (const y of sortedYs) {
-        const line = rows[y].map(i => i.text).join(' ');
+        const items = rows[y].slice().sort((a,b) => a.x - b.x);
+        const line = _santanderDenseRowText(items).replace(/\s+/g, '');
         const m = line.match(/(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\/(\d{4})/i);
         if (m) {
           refMonth = MONTHS_PT[m[1].toLowerCase()];
@@ -9879,34 +9906,48 @@ async function parseSantanderPDF(buffer) {
 
     for (const y of sortedYs) {
       const items = rows[y].slice().sort((a,b) => a.x - b.x);
-      const dateParts = [], descParts = [], valParts = [];
-      for (const it of items) {
-        const t = it.text.trim();
-        if (!t) continue;
-        if (it.x < 50)       dateParts.push(t);
-        else if (it.x < 400) descParts.push(t);
-        else                 valParts.push(t);
-      }
+      const dateItems = items.filter(it => it.x < 50);
+      const descItems = items.filter(it => it.x >= 50 && it.x < 400);
+      const valItems  = items.filter(it => it.x >= 400);
 
-      const dateStr = dateParts.join(' ').trim();
-      const descStr = descParts.join(' ').trim();
+      const dateStr = _santanderDenseRowText(dateItems);
+      const descStr = _santanderDenseRowText(descItems);
+      const valStr  = _santanderDenseRowText(valItems);
       const fullLine = (dateStr + ' ' + descStr).trim();
       const fullLineNorm = fullLine.replace(/\s+/g, '');
 
-      // Skip footer/header noise
-      if (/Extrato_PF|BALP_UY|Pagina/i.test(fullLine)) continue;
+      // Skip footer/header noise. Comparamos sempre contra a versão SEM
+      // espaços (fullLineNorm) — mesmo com o dense-join, um espaço real
+      // ocasionalmente aparece dentro de um destes textos fixos (ex:
+      // "Extrato_PF..." virando "E xtrato_P F..."), e a versão sem espaços
+      // é imune a isso.
+      if (/Extrato_PF|BALP_UY|Pagina/i.test(fullLineNorm)) continue;
       if (/EXTRATOCONSOLIDADO/i.test(fullLineNorm)) continue;
       if (/^[a-zçãéô]+\/\d{4}$/i.test(fullLineNorm)) continue; // "maio/2026"
 
       // Stop at "Saldos por Período" — everything after is summary/index tables
       if (/SaldosporPer/i.test(fullLineNorm)) { stopAll = true; break; }
 
+      // Stop at the fixed legal disclaimer paragraph that always follows the
+      // last transaction ("Se você não tem Limite da Conta e a sua conta
+      // ficou com saldo devedor...") — sem isso, esse texto ficava colado
+      // na descrição do último lançamento da tabela.
+      if (/LimitedaContaeasuacontaficoucomsaldodevedor/i.test(fullLineNorm)) { stopAll = true; break; }
+
+      // Idem para a legenda "B - Bloqueado" — só aparece quando há algum
+      // lançamento marcado com "B" (valor bloqueado), entre a última linha
+      // da tabela e o parágrafo de aviso legal.
+      if (/^B-Bloqueado$/i.test(fullLineNorm)) { stopAll = true; break; }
+
       // Date column: "DD/MM"
       const dm = dateStr.match(/^(\d{2})\/(\d{2})$/);
       if (dm) currentDate = dateStr;
 
-      // Value tokens: Brazilian format with optional trailing '-' for negative
-      const valNums = valParts.filter(v => /^-?[\d.]+,\d{2}-?$/.test(v));
+      // Value tokens: a coluna de valor pode ter mais de um número na mesma
+      // linha (valor do lançamento + saldo acumulado) separados por um
+      // espaço real — dividimos a string densa por espaço pra separá-los.
+      const valTokens = valStr.split(' ').filter(Boolean);
+      const valNums = valTokens.filter(v => /^-?[\d.]+,\d{2}-?$/.test(v));
 
       if (valNums.length > 0 && descStr && currentDate) {
         transactions.push({ date: currentDate, desc: descStr, valueStr: valNums[0] });
@@ -9918,7 +9959,18 @@ async function parseSantanderPDF(buffer) {
     }
   }
 
-  if (!refMonth) throw new Error('Não foi possível identificar o mês/ano do extrato Santander.');
+  if (!refMonth) {
+    // Rede de segurança: se mesmo assim não achou o mês/ano (formato de
+    // extrato diferente do esperado), pede pro usuário informar manualmente
+    // em vez de simplesmente falhar a importação inteira.
+    const manual = await showMonthYearPrompt(
+      '📅 Mês/ano não identificado',
+      'Não foi possível identificar automaticamente o mês/ano deste extrato Santander. Informe abaixo a qual mês ele se refere para continuar a importação.'
+    );
+    if (!manual) throw new Error('Não foi possível identificar o mês/ano do extrato Santander.');
+    refMonth = manual.month;
+    refYear  = manual.year;
+  }
 
   // Convert to standard row format { date, desc, memo, amount, saldo, category }
   const result = [];
@@ -12122,6 +12174,50 @@ function passwordDialogResolve(confirmed) {
 document.addEventListener('keydown', e => {
   if (!G('modal-password')?.classList.contains('open')) return;
   if (e.key === 'Escape') { e.preventDefault(); passwordDialogResolve(false); }
+});
+
+// ── Pede pro usuário informar manualmente o mês/ano de um extrato quando a
+// detecção automática falha (ex: extrato PDF com mês/ano ilegível) ──
+// Retorna { month, year } ou null se o usuário cancelar.
+let _monthYearResolve = null;
+function showMonthYearPrompt(title, detail) {
+  return new Promise(resolve => {
+    _monthYearResolve = resolve;
+    const el = G('modal-monthyear');
+    if (!el) { resolve(null); return; }
+    G('modal-monthyear-title').textContent  = title;
+    G('modal-monthyear-detail').textContent = detail;
+    const inp = G('modal-monthyear-input');
+    inp.value = '';
+    const errEl = G('modal-monthyear-error');
+    errEl.style.display = 'none';
+    el.classList.add('open');
+    setTimeout(() => inp?.focus(), 50);
+  });
+}
+function monthYearDialogResolve(confirmed) {
+  if (!confirmed) {
+    closeModal('modal-monthyear');
+    if (_monthYearResolve) { _monthYearResolve(null); _monthYearResolve = null; }
+    return;
+  }
+  const raw = G('modal-monthyear-input')?.value || ''; // formato 'YYYY-MM' (input type=month)
+  const m = raw.match(/^(\d{4})-(\d{2})$/);
+  if (!m) {
+    const errEl = G('modal-monthyear-error');
+    errEl.textContent = '❌ Informe o mês/ano do extrato.';
+    errEl.style.display = 'block';
+    return;
+  }
+  closeModal('modal-monthyear');
+  if (_monthYearResolve) {
+    _monthYearResolve({ year: parseInt(m[1]), month: parseInt(m[2]) });
+    _monthYearResolve = null;
+  }
+}
+document.addEventListener('keydown', e => {
+  if (!G('modal-monthyear')?.classList.contains('open')) return;
+  if (e.key === 'Escape') { e.preventDefault(); monthYearDialogResolve(false); }
 });
 
 // ── Decrypt a password-protected XLSX/XLS buffer (e.g. BTG fatura) ──
