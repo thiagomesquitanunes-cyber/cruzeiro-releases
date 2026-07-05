@@ -2228,20 +2228,11 @@ function createLoginWindow() {
     hr{border:none;border-top:1px solid #1e293b;margin:16px 0}
     .hint{font-size:11px;color:#64748b;text-align:center;margin-bottom:12px}
     .code-input{text-align:center;letter-spacing:6px;font-size:22px;font-weight:700}
-    .lang-pill{background:#1e293b;border:1px solid #334155;color:#94a3b8;border-radius:20px;padding:4px 12px;font-size:12px;cursor:pointer}
-    .lang-pill.active{border-color:#3b82f6;color:#60a5fa;background:#1e3a5f}
   </style></head><body>
   <div class="card">
     <div class="logo">C$</div>
     <div class="appname">Cruzeiro</div>
     <div class="tagline" id="tagline">Gestao financeira pessoal</div>
-
-    <!-- Language selector -->
-    <div style="display:flex;gap:6px;justify-content:center;margin-bottom:16px">
-      <button class="lang-pill" id="lng-pt" onclick="setLoginLang('pt')">🇧🇷 PT</button>
-      <button class="lang-pill" id="lng-en" onclick="setLoginLang('en')">🇺🇸 EN</button>
-      <button class="lang-pill" id="lng-es" onclick="setLoginLang('es')">🇪🇸 ES</button>
-    </div>
 
     <!-- Panel 1: Login -->
     <div id="p-login" class="panel active">
@@ -2273,44 +2264,6 @@ function createLoginWindow() {
   </div>
 
   <script>
-  const LOGIN_STRINGS = {
-    pt: { tagline:'Gestao financeira pessoal', pw:'Senha', placeholder:'Digite sua senha', enter:'Entrar', forgot:'Esqueci minha senha', sendCode:'Enviar codigo por email', hint1:'Um codigo de 6 digitos sera enviado ao email cadastrado.', hint2:'Ja recebeu o codigo? Preencha abaixo:', codeLabel:'Codigo recebido', newPw:'Nova senha', confirmPw:'Confirmar nova senha', reset:'Redefinir senha', back:'Voltar ao login' },
-    en: { tagline:'Personal finance management', pw:'Password', placeholder:'Enter your password', enter:'Sign in', forgot:'Forgot password', sendCode:'Send code by email', hint1:'A 6-digit code will be sent to your registered email.', hint2:'Already have the code? Fill in below:', codeLabel:'Received code', newPw:'New password', confirmPw:'Confirm new password', reset:'Reset password', back:'Back to login' },
-    es: { tagline:'Gestion financiera personal', pw:'Contrasena', placeholder:'Ingrese su contrasena', enter:'Entrar', forgot:'Olvide mi contrasena', sendCode:'Enviar codigo por email', hint1:'Se enviara un codigo de 6 digitos al email registrado.', hint2:'Ya recibio el codigo? Complete a continuacion:', codeLabel:'Codigo recibido', newPw:'Nueva contrasena', confirmPw:'Confirmar contrasena', reset:'Restablecer contrasena', back:'Volver al login' },
-  };
-  let _loginLang = 'pt';
-  function setLoginLang(lang) {
-    _loginLang = lang;
-    const s = LOGIN_STRINGS[lang] || LOGIN_STRINGS.pt;
-    document.getElementById('tagline').textContent = s.tagline;
-    document.getElementById('lbl-pw').textContent  = s.pw;
-    document.getElementById('pw').placeholder       = s.placeholder;
-    document.getElementById('btn-enter').textContent = s.enter;
-    document.getElementById('btn-forgot').textContent = s.forgot;
-    const hints = document.querySelectorAll('.hint');
-    if (hints[0]) hints[0].textContent = s.hint1;
-    if (hints[1]) hints[1].textContent = s.hint2;
-    const labels = document.querySelectorAll('#p-forgot label');
-    if (labels[0]) labels[0].textContent = s.codeLabel;
-    if (labels[1]) labels[1].textContent = s.newPw;
-    if (labels[2]) labels[2].textContent = s.confirmPw;
-    document.getElementById('new-pw').placeholder  = s.newPw;
-    document.getElementById('new-pw2').placeholder = s.confirmPw;
-    document.querySelectorAll('[onclick*="sendCode"]')[0].textContent = s.sendCode;
-    document.querySelectorAll('[onclick*="doReset"]')[0].textContent  = s.reset;
-    document.querySelectorAll('[onclick*="p-login"]')[0].textContent  = s.back;
-    document.querySelectorAll('.lang-pill').forEach(b => b.classList.toggle('active', b.id === 'lng-'+lang));
-    // Persist language choice via IPC
-    window.ff?.saveLang?.(lang).catch(()=>{});
-  }
-  // Auto-detect on load
-  window.addEventListener('DOMContentLoaded', async () => {
-    try {
-      const s = await window.ff?.getSettings?.();
-      const lang = s?.language || navigator.language?.slice(0,2) || 'pt';
-      setLoginLang(['pt','en','es'].includes(lang) ? lang : 'pt');
-    } catch(e) { setLoginLang('pt'); }
-  });
     function showPanel(id) {
       ['p-login','p-forgot'].forEach(p => {
         const el = document.getElementById(p);
@@ -2503,11 +2456,15 @@ async function mainStartupFlow() {
     }
   }
 
-  // Mostra login se:
-  //   (a) DB criptografado — precisa de senha local para decriptar
-  //   (b) Não há sessão Supabase válida — primeira abertura ou após reinstalação
-  const needsLogin = settings.hasEncryptedDB || _dbPendingDecrypt || settings.passwordHash || !sessionRestored;
-  if (needsLogin) {
+  // Mostra a tela de login (senha) SÓ quando o arquivo estiver de fato
+  // protegido por senha — DB criptografado (precisa decriptar) ou senha
+  // local configurada (modo legado). A ausência de sessão Supabase válida
+  // NÃO deve, por si só, forçar essa tela: essa tela só tem campo de senha
+  // local, não tem como o usuário "resolver" a falta de sessão de sync por
+  // ali — o app entra direto e a sincronização é tratada normalmente nas
+  // telas de Configurações.
+  const isPasswordProtected = !!(settings.hasEncryptedDB || _dbPendingDecrypt || settings.passwordHash);
+  if (isPasswordProtected) {
     createLoginWindow();
     // Don't pre-create main window — create it AFTER login so it loads with real DB
   } else {

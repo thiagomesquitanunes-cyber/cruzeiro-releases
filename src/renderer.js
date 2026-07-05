@@ -10204,35 +10204,56 @@ async function parseItauInvestmentsPDF(buffer) {
   const pdf = await getPdfDocumentWithPassword(buffer);
   if (!pdf) throw new Error('__IMPORT_CANCELLED__');
 
-  const ITAU_CATEGORIES = [
-    'Fundos de Investimento', 'CDB, Renda Fixa e Estruturados', 'Tesouro Direto',
-    'Poupança', 'Investimentos Imobiliários', 'Previdência', 'Ações',
-  ];
   const norm = s => (s||'').toString().toLowerCase().normalize('NFD')
     .replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
-  const CAT_BY_NORM = {};
-  ITAU_CATEGORIES.forEach(c => { CAT_BY_NORM[norm(c)] = c; });
 
   function parseBRL(s) {
-    s = (s||'').trim();
-    if (s === '-' || s === '' || s === '—') return null;
-    s = s.replace(/R\$/g,'').replace(/\./g,'').replace(',','.').trim();
+    if (s == null) return null;
+    s = String(s).trim();
+    if (!s || s === '-' || s === '—') return null;
+    s = s.replace(/R\$/g,'').replace(/\./g,'').replace(',', '.').trim();
     const n = parseFloat(s);
     return isNaN(n) ? null : n;
   }
+  const MONEY_RE = /^-?[\d.]+,\d{2}$/;
+
+  // Normaliza o nome de uma seção "Investimentos | XXX" pro rótulo canônico
+  // usado nas linhas de resumo (percentual) da página 1 — os dois às vezes
+  // diferem ligeiramente (ex: "CDB, Renda Fixa e Estruturados" na pág.1 vs
+  // "CDB, Renda Fixa e Invest. Estruturados" no cabeçalho de detalhe).
+  function canonicalCategory(raw) {
+    const n = norm(raw);
+    if (n.startsWith('fundos de investimento'))        return 'Fundos de Investimento';
+    if (n.startsWith('cdb'))                            return 'CDB, Renda Fixa e Estruturados';
+    if (n.startsWith('tesouro'))                         return 'Tesouro Direto';
+    if (n.startsWith('poupanca'))                        return 'Poupança';
+    if (n.startsWith('investimentos imobiliarios'))      return 'Investimentos Imobiliários';
+    if (n.startsWith('previdencia'))                     return 'Previdência';
+    if (n.startsWith('acoes'))                           return 'Ações';
+    return null;
+  }
 
   // Classifica categoria/tipo interno do app a partir da categoria do Itaú +
-  // nome do ativo (a categoria do Itaú é o sinal principal; o nome refina o
-  // tipo dentro dela, igual ao critério já usado pra XP/BTG).
+  // nome do ativo — mesmo critério já usado pra XP/BTG. Títulos públicos
+  // (Tesouro) aparecem agrupados dentro da seção "CDB, Renda Fixa..." neste
+  // formato de extrato, então o nome do ativo é checado ANTES da categoria.
   function classifyItauAsset(itauCategory, name) {
     const n = (name||'').toUpperCase();
     if (/\bFIP\b/.test(n)) return { category:'private_equity', inv_type:'Private Equity' };
+    if (/^TIT\.?\s*P[UÚ]BLICO|TESOURO/.test(n)) {
+      if (/IPCA/.test(n))      return { category:'tesouro', inv_type:'Tesouro IPCA+' };
+      if (/PREFIXADO/.test(n)) return { category:'tesouro', inv_type:'Tesouro Prefixado' };
+      if (/SELIC/.test(n))     return { category:'tesouro', inv_type:'Tesouro SELIC' };
+      if (/RENDA\+/.test(n))   return { category:'tesouro', inv_type:'Renda+' };
+      if (/EDUCA\+/.test(n))   return { category:'tesouro', inv_type:'Tesouro Educa+' };
+      return { category:'tesouro', inv_type:'Tesouro SELIC' };
+    }
     switch (itauCategory) {
       case 'Fundos de Investimento': {
         if (n.includes('MULTIMERCADO')) return { category:'fundos', inv_type:'Fundo Multimercado' };
         if (n.includes('AÇÕES') || n.includes('ACOES')) return { category:'fundos', inv_type:'Fundo de Ações' };
         if (n.includes('CAMBIAL')) return { category:'fundos', inv_type:'Fundo Cambial' };
-        if (n.includes('RENDA FIXA')) return { category:'fundos', inv_type:'Fundo Renda Fixa' };
+        if (n.includes('RENDA FIXA') || n.includes('CRED')) return { category:'fundos', inv_type:'Fundo Renda Fixa' };
         if (/^[A-Z]{4}1[123]\b/.test(n)) return { category:'fundos', inv_type:'FII' };
         return { category:'fundos', inv_type:'Fundo Multimercado' };
       }
@@ -10245,14 +10266,6 @@ async function parseItauInvestmentsPDF(buffer) {
         if (/^LF\b/.test(n))  return { category:'renda_fixa', inv_type:'LF' };
         return { category:'renda_fixa', inv_type:'Debênture' };
       }
-      case 'Tesouro Direto': {
-        if (/IPCA/.test(n))       return { category:'tesouro', inv_type:'Tesouro IPCA+' };
-        if (/PREFIXADO/.test(n))  return { category:'tesouro', inv_type:'Tesouro Prefixado' };
-        if (/SELIC/.test(n))      return { category:'tesouro', inv_type:'Tesouro SELIC' };
-        if (/RENDA\+/.test(n))    return { category:'tesouro', inv_type:'Renda+' };
-        if (/EDUCA\+/.test(n))    return { category:'tesouro', inv_type:'Tesouro Educa+' };
-        return { category:'tesouro', inv_type:'Tesouro SELIC' };
-      }
       case 'Poupança': return { category:'renda_fixa', inv_type:'Poupança' };
       case 'Investimentos Imobiliários': return { category:'fundos', inv_type:'FII' };
       case 'Previdência': {
@@ -10264,116 +10277,168 @@ async function parseItauInvestmentsPDF(buffer) {
     }
   }
 
-  const GAP_THRESHOLD = 14.5; // pt — abaixo = continuação do nome; acima = novo ativo
+  // Classifica o tipo de fluxo de uma linha de "movimentação" do fundo —
+  // mesmo critério de sinal já usado nos parsers BTG/XP: resgate = entrada
+  // de caixa pro investidor (+), aplicação/aporte = saída de caixa (-),
+  // rendimento/juros = sempre positivo (+).
+  function classifyItauFlow(desc) {
+    const d = norm(desc);
+    const externalOut = ['resgate','venda','amortizacao'];
+    const externalIn  = ['aplicacao','aporte','compra'];
+    for (const t of externalOut) if (d.includes(t)) return { flow:'external', sign:+1 };
+    for (const t of externalIn)  if (d.includes(t)) return { flow:'external', sign:-1 };
+    const incomeTerms = ['rendimento','juros','cupom','dividendo','provento','jcp'];
+    for (const t of incomeTerms) if (d.includes(t)) return { flow:'income', sign:+1 };
+    return { flow:null, sign:+1 };
+  }
 
-  // ── Extrai todas as linhas (agrupadas por proximidade de Y), de todas as
-  // páginas, como um único fluxo contínuo — soma um deslocamento grande por
-  // página pra evitar que a reinicialização do eixo Y a cada página seja
-  // confundida com um "salto" dentro da mesma tabela.
+  // ── Reconstrói todas as linhas de todas as páginas num único fluxo,
+  // parando definitivamente ao alcançar "03. Crédito" (fora do escopo) ──
   const allRows = [];
-  let issuedMonth = null;
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+  let stopAll = false;
+  for (let pageNum = 1; pageNum <= pdf.numPages && !stopAll; pageNum++) {
     const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
     const viewport = page.getViewport({ scale: 1 });
-    if (issuedMonth === null) {
-      const pageText = content.items.map(it => it.str).join(' ');
-      const m = pageText.match(/emitido em\s*(\d{2})\/(\d{2})\/(\d{4})/i);
-      if (m) issuedMonth = `${m[3]}-${m[2]}`;
+    const rows = {};
+    content.items.filter(it => it.str.trim() !== '').forEach(it => {
+      const y = Math.round(viewport.height - it.transform[5]);
+      (rows[y] = rows[y] || []).push({ x: it.transform[4], text: it.str.trim() });
+    });
+    const ys = Object.keys(rows).map(Number).sort((a,b) => a - b);
+    for (const y of ys) {
+      const items = rows[y].sort((a,b) => a.x - b.x);
+      const lineText = items.map(i => i.text).join(' ');
+      const lineNorm = norm(lineText);
+      if (/^03\./.test(lineText.trim())) { stopAll = true; break; }
+      allRows.push({ items, lineText, lineNorm });
     }
-    const items = content.items
-      .filter(it => it.str.trim() !== '')
-      .map(it => ({ x: it.transform[4], y: (viewport.height - it.transform[5]) + pageNum * 2000, text: it.str.trim() }));
-    items.sort((a,b) => a.y - b.y || a.x - b.x);
-    let cur = [], curY = null;
-    for (const it of items) {
-      if (curY === null || Math.abs(it.y - curY) > 1.5) {
-        if (cur.length) allRows.push(cur);
-        cur = [it]; curY = it.y;
-      } else {
-        cur.push(it);
+  }
+
+  // ── 1. Página 1: saldo consolidado (mês + total) e composição por categoria ──
+  // Usados só para validar a importação (soma dos ativos deve bater) — ver
+  // instrução do usuário: "estes valores da primeira página podem servir
+  // para testar se tudo que precisava foi importado".
+  let stmtMonth = null;
+  let consolidatedTotal = null;
+  const categoryTargets = {};
+
+  for (let i = 0; i < allRows.length; i++) {
+    const { lineText, lineNorm } = allRows[i];
+    if (consolidatedTotal === null && lineNorm.startsWith('saldo consolidado em')) {
+      const dm = lineText.match(/em\s+(\d{2})\/(\d{2})\/(\d{2,4})/);
+      if (dm) {
+        const yy = dm[3].length === 2 ? '20' + dm[3] : dm[3];
+        stmtMonth = `${yy}-${dm[2]}`;
+      }
+      // O valor total pode estar na mesma linha ou numa das próximas 2 linhas
+      for (let j = i; j < Math.min(i + 3, allRows.length); j++) {
+        const mv = allRows[j].lineText.match(/R\$\s*([\d.]+,\d{2})/);
+        if (mv) { consolidatedTotal = parseBRL(mv[1]); break; }
       }
     }
-    if (cur.length) allRows.push(cur);
-  }
-  if (!issuedMonth) {
-    const now = new Date();
-    issuedMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-  }
-
-  const assets = [];
-  const categoryTargets = {};
-  let currentCategory = null;
-  let ready = false; // true = past the "produto/nome" header, collecting asset rows
-  let nameBuffer = [];
-  let pendingValue = null;
-  let lastNameY = null;
-
-  function finalizeAsset() {
-    const name = nameBuffer.join(' ').replace(/\s+/g,' ').trim();
-    if (name && pendingValue != null) {
-      const { category, inv_type } = classifyItauAsset(currentCategory, name);
-      assets.push({ name, category, inv_type, broker: 'Itaú', valor: pendingValue, movimentacoes: [] });
+    // Linha de composição: "<Categoria> <NN>% <valor>" (seção "Meu perfil")
+    const cm = lineText.trim().match(/^(.+?)\s+(\d{1,3})%\s+([\d.]+,\d{2})$/);
+    if (cm) {
+      const cat = canonicalCategory(cm[1]);
+      if (cat) categoryTargets[cat] = parseBRL(cm[3]);
     }
-    nameBuffer = [];
-    pendingValue = null;
+    if (lineNorm.startsWith('investimentos |')) break; // fim da pág. 1 relevante
   }
+
+  // ── 2. Páginas de detalhe: percorre linha a linha com uma máquina de
+  // estados simples (seção atual: Fundos de Investimento | CDB/Renda Fixa) ──
+  const assets = [];
+  let section = null; // categoria canônica atual
+  let curFund = null; // { name, category, inv_type, valor, movimentacoes } em coleta
+
+  function finalizeFund() {
+    if (curFund && curFund.name) assets.push(curFund);
+    curFund = null;
+  }
+
+  // Linha de cabeçalho de fundo/categoria: "<nome> saldo bruto DD/MM/AA saldo bruto DD/MM/AA saldo líquido DD/MM/AA"
+  const HEADER_3COL_RE = /^(.+?)\s+saldo bruto\s+\d{2}\/\d{2}\/\d{2,4}\s+saldo bruto\s+\d{2}\/\d{2}\/\d{2,4}\s+saldo l[ií]quido\s+\d{2}\/\d{2}\/\d{2,4}/i;
+  // Linha de produto de renda fixa: nome + 2 datas + valor aplicado + remuneração + 2 valores (bruto, líquido)
+  const CDB_ROW_RE = /^(.+?)\s+(\d{2}\/\d{2}\/\d{2,4})\s+(\d{2}\/\d{2}\/\d{2,4})\s+([\d.]+,\d{2})\s+(.+?)\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})\s*$/;
 
   for (const row of allRows) {
-    const rowText = row.map(w => w.text).join(' ');
-    const ntxt = norm(rowText);
+    const { items, lineText, lineNorm } = row;
+    const trimmed = lineText.trim();
 
-    if (ntxt.startsWith('total investido')) {
-      // Aparece no rodapé de TODA página — finaliza a seção atual, não para o parse inteiro.
-      finalizeAsset();
-      ready = false;
-      lastNameY = null;
+    // Cabeçalho de nova seção: "Investimentos | <Categoria> ..."
+    if (lineNorm.startsWith('investimentos |')) {
+      finalizeFund();
+      const catName = trimmed.replace(/^Investimentos\s*\|\s*/i, '');
+      section = canonicalCategory(catName) || (norm(catName).startsWith('indicadores') ? 'skip' : null);
       continue;
     }
+    if (section === 'skip' || section === null) continue;
 
-    let matchedCat = null;
-    for (const cn in CAT_BY_NORM) {
-      if (ntxt.startsWith(cn)) { matchedCat = CAT_BY_NORM[cn]; break; }
-    }
-    if (matchedCat) {
-      finalizeAsset();
-      currentCategory = matchedCat;
-      ready = false;
-      lastNameY = null;
-      // Valor da categoria = último número (com formato de moeda BR) na linha.
-      const nums = rowText.match(/[\d.]+,\d{2}/g);
-      categoryTargets[matchedCat] = nums && nums.length ? parseBRL(nums[nums.length-1]) : 0;
-      continue;
-    }
-
-    if (ntxt.includes('rentabilidade') && ntxt.includes('acumulada')) {
-      ready = false;
-      continue;
-    }
-
-    if (!ready) {
-      if (row.some(w => w.text.toLowerCase() === 'nome')) ready = true;
-      continue;
-    }
-
-    // Modo de coleta de ativos da categoria atual
-    const nameWords = row.filter(w => w.x < 100).map(w => w.text);
-    if (nameWords.length) {
-      if (lastNameY != null && (row[0].y - lastNameY) > GAP_THRESHOLD) finalizeAsset();
-      nameBuffer.push(...nameWords);
-      lastNameY = row[0].y;
-    }
-    for (const w of row) {
-      if (w.x > 460) {
-        const v = parseBRL(w.text);
-        if (v != null) pendingValue = v;
+    if (section === 'Fundos de Investimento') {
+      const hm = trimmed.match(HEADER_3COL_RE);
+      // Uma linha de cabeçalho "nome + saldo bruto/bruto/líquido" que NÃO seja
+      // o resumo da seção inteira (essa já foi tratada no bloco acima) marca
+      // o início de um novo fundo.
+      if (hm) {
+        finalizeFund();
+        const { category, inv_type } = classifyItauAsset(section, hm[1]);
+        curFund = { name: hm[1].trim(), category, inv_type, broker: 'Itaú', valor: null, movimentacoes: [] };
+        continue;
       }
+      if (!curFund) continue;
+
+      // Valor final líquido do fundo no mês
+      if (lineNorm.startsWith('total liquido p/resgate')) {
+        const nums = trimmed.match(/[\d.]+,\d{2}/g);
+        if (nums) curFund.valor = parseBRL(nums[0]);
+      }
+
+      // Linha de movimentação real (tabela da direita): precisa ter uma data
+      // (DD/MM) na coluna ~247pt — histórico entre ~260-355pt — valor entre
+      // ~355-405pt. "SALDO ANTERIOR"/"SALDO FINAL" são marcadores de saldo,
+      // não fluxos de caixa reais, e são ignorados.
+      const dateItem = items.find(it => it.x >= 235 && it.x <= 265 && /^\d{2}\/\d{2}$/.test(it.text));
+      if (dateItem) {
+        const histItems = items.filter(it => it.x > 265 && it.x < 355);
+        const valItems  = items.filter(it => it.x >= 355 && it.x < 405 && MONEY_RE.test(it.text));
+        const hist = histItems.map(i => i.text).join(' ').trim();
+        const histN = norm(hist);
+        if (hist && valItems.length && !histN.startsWith('saldo anterior') && !histN.startsWith('saldo final')) {
+          const val = parseBRL(valItems[0].text);
+          const { flow, sign } = classifyItauFlow(hist);
+          curFund.movimentacoes.push({ type: hist, amount: (val||0) * sign, flow_type: flow || undefined });
+        }
+      }
+      continue;
+    }
+
+    if (section === 'CDB, Renda Fixa e Estruturados') {
+      // Ignora a própria linha de resumo "Investimentos | CDB..." (já tratada)
+      // e o cabeçalho de colunas da tabela de produtos.
+      if (/^produto\s+aplica[cç][aã]o/i.test(trimmed) || trimmed === 'CDB e Renda Fixa') continue;
+      const pm = trimmed.match(CDB_ROW_RE);
+      if (!pm) continue;
+      const name = pm[1].trim();
+      if (norm(name).startsWith('total')) continue; // subtotal (ex: "TOTAL DI", "TOTAL IPCA")
+      const valorLiquido = parseBRL(pm[7]);
+      const { category, inv_type } = classifyItauAsset(section, name);
+      assets.push({ name, category, inv_type, broker: 'Itaú', valor: valorLiquido, movimentacoes: [] });
+      continue;
     }
   }
-  finalizeAsset();
+  finalizeFund();
+
+  if (!stmtMonth) {
+    const now = new Date();
+    stmtMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  }
 
   const totalLiquido = assets.reduce((s,a) => s + (a.valor||0), 0);
-  return { assets, categoryTargets, broker: 'Itaú', month: issuedMonth, totalLiquido };
+  return {
+    assets, categoryTargets, broker: 'Itaú', month: stmtMonth, totalLiquido,
+    consolidatedTotal, // total declarado na pág. 1 — usado para validar a importação
+  };
 }
 
 // ── Santander credit card invoice (Fatura) PDF parser ──
@@ -17448,7 +17513,9 @@ function refreshPatrimonioChart() {
 
   // Net out outstanding financing debt (saldo devedor) from each asset's value,
   // matching the "Total Bens e Direitos" row in the table — otherwise the chart
-  // overstates bens e direitos for financed assets.
+  // overstates bens e direitos for financed assets. Espelha EXATAMENTE a lógica
+  // da linha "Saldo devedor" da tabela de Patrimônio (entrada parcelada +
+  // saldo financiado + saldo nas chaves) — ver comentários lá para detalhes.
   _pat.assets.forEach(a => {
     if (!a.financed || !_pat.financing[a.id]?.length) return;
     const allFins = _pat.financing[a.id].slice().sort((x,y) => x.month.localeCompare(y.month));
@@ -17457,15 +17524,40 @@ function refreshPatrimonioChart() {
       const cid = r.contract_id ?? 'legacy';
       (finsByContract[cid] = finsByContract[cid] || []).push(r);
     });
-    Object.values(finsByContract).forEach(fins => {
+    const contractsForAsset = (_pat.financingContracts || {})[a.id] || [];
+    const entradaTxs = _pat.txAll.filter(t => t.asset_id === a.id && t.tx_type === 'parcela_compra');
+    const totalEntradaParcelada = entradaTxs.reduce((s,t) => s + t.total_value, 0);
+    const entradaRemaining = (m) => {
+      if (!totalEntradaParcelada) return 0;
+      const paidSoFar = entradaTxs.filter(t => t.month.slice(0,7) <= m).reduce((s,t) => s + t.total_value, 0);
+      return Math.max(0, totalEntradaParcelada - paidSoFar);
+    };
+    Object.entries(finsByContract).forEach(([cid, fins]) => {
       const firstInstMonth = fins[0].month;
+      const contract = contractsForAsset.find(c => String(c.id) === String(cid));
+      const historyStartMonth = (contract?.purchase_month || contract?.first_month || firstInstMonth).slice(0,7);
+      const keysBalMonth = (contract?.keys_balance_month || '').slice(0,7);
+      const keysBalRemaining = (m) => {
+        if (!contract?.keys_balance || !keysBalMonth) return 0;
+        return m <= keysBalMonth ? contract.keys_balance : 0;
+      };
       months.forEach(m => {
-        if (m < firstInstMonth) return;
-        const rowsUpTo = fins.filter(r => r.month.slice(0,7) <= m);
-        if (!rowsUpTo.length) return;
-        const lastRow = rowsUpTo[rowsUpTo.length - 1];
-        const balance = lastRow.balance_end != null ? lastRow.balance_end
-          : Math.max(0, (a.financing_total||0) - rowsUpTo.reduce((s,r) => s + r.installment, 0));
+        if (m < historyStartMonth) return;
+        const entradaBal = entradaRemaining(m);
+        const keysBal = keysBalRemaining(m);
+        let financingBal = 0;
+        if (m >= firstInstMonth.slice(0,7)) {
+          const rowsUpTo = fins.filter(r => r.month.slice(0,7) <= m);
+          if (rowsUpTo.length) {
+            const lastRow = rowsUpTo[rowsUpTo.length - 1];
+            financingBal = lastRow.balance_end != null ? lastRow.balance_end
+              : Math.max(0, (a.financing_total||0) - rowsUpTo.reduce((s,r) => s + r.installment, 0));
+          }
+        } else {
+          // Antes da 1ª parcela mensal — saldo financiado ainda é o principal cheio
+          financingBal = contract?.principal ?? (a.financing_total || 0);
+        }
+        const balance = entradaBal + financingBal + keysBal;
         if (balance > 0.01) imobByMonth[m] = (imobByMonth[m]||0) - balance;
       });
     });
@@ -18637,11 +18729,23 @@ function refreshPatrimonioTable() {
         const firstInstMonth = fins[0].month;
         const contract = contractsForAsset.find(c => String(c.id) === String(cid));
         const historyStartMonth = (contract?.purchase_month || contract?.first_month || firstInstMonth).slice(0,7);
+        // "Saldo nas chaves" (contrato com construtora): valor pago à vista na
+        // entrega das chaves, ADICIONAL ao valor financiado (parcelas mensais/
+        // anuais) e à entrada parcelada — é uma dívida própria, contratada
+        // desde a compra, que só é liquidada no mês da entrega. Antes disso
+        // precisa contar no saldo devedor total; sem isso, o saldo devedor
+        // ficava subestimado em todo o período de obra.
+        const keysBalMonth = (contract?.keys_balance_month || '').slice(0,7);
+        const keysBalRemaining = (m) => {
+          if (!contract?.keys_balance || !keysBalMonth) return 0;
+          return m <= keysBalMonth ? contract.keys_balance : 0;
+        };
         debtByAsset[a.id][cid]     = {};
         debtProjByAsset[a.id][cid] = {};
         months.forEach(m => {
           if (m < historyStartMonth) return;
           const entradaBal = entradaRemaining(m);
+          const keysBal = keysBalRemaining(m);
           let financingBal = 0;
           let isProjM = false;
           if (m >= firstInstMonth.slice(0,7)) {
@@ -18667,7 +18771,10 @@ function refreshPatrimonioTable() {
             // saldo financiado é o principal contratado por inteiro.
             financingBal = contract?.principal ?? (a.financing_total || 0);
           }
-          const balance = entradaBal + financingBal;
+          // O saldo nas chaves ainda não vencido é sempre uma projeção (só
+          // deixa de ser quando o mês da entrega já passou e some do saldo).
+          if (keysBal > 0 && m >= curM_debt) isProjM = true;
+          const balance = entradaBal + financingBal + keysBal;
           if (balance > 0.01) {
             debtByAsset[a.id][cid][m]     = -balance;
             debtProjByAsset[a.id][cid][m] = isProjM;
