@@ -686,18 +686,18 @@ async function goPage(name) {
   renderSidebar();
   clearSelection();
   if (name === 'overview')  refreshOverview();
-  if (name === 'ml')        refreshML();
+  if (name === 'ml')        { refreshML(); try { guideMark('visitedMl'); } catch(e) {} }
   if (name === 'recurring')  refreshRecurring();
   if (name === 'evolucao')   refreshEvolucao();
   if (name === 'patrimonio') { patSetView(_patView); refreshPatrimonio(); }
   if (name === 'import') initImportPage();
-  if (name === 'categories') refreshCategories();
+  if (name === 'categories') { refreshCategories(); try { guideMark('visitedCategories'); } catch(e) {} }
   if (name === 'search') initSearchPage();
   if (name === 'goals')  refreshGoals();
   if (name === 'budget') refreshBudget();
   if (name === 'import')    populateAccountSelects();
-  if (name === 'reports')   { await initReportFilters(); onReportTypeChange(); }
-  if (name === 'projecao')  refreshProjecao();
+  if (name === 'reports')   { await initReportFilters(); onReportTypeChange(); try { guideMark('visitedReports'); } catch(e) {} }
+  if (name === 'projecao')  { refreshProjecao(); try { guideMark('visitedProjecao'); } catch(e) {} }
   if (name === 'irpf' && !G('irpf-year').options.length) {
     const curY = new Date().getFullYear();
     const sel = G('irpf-year');
@@ -4996,6 +4996,7 @@ async function processBankFile(file) {
     _bankParsed = rows;
     renderCardHolderAccountSelectors(rows);
     renderBankPreview(rows);
+    _maybeShowPdfImportWarning('bank-result', file.name);
   } catch(e) {
     if (e.message === '__IMPORT_CANCELLED__') {
       G('bank-file-name').textContent = '';
@@ -5022,6 +5023,23 @@ async function parseBankFile(buffer) {
   if (selBank === 'santander_fatura') return parseSantanderFaturaPDF(buffer);
   if (selBank === 'santander') return parseSantanderPDF(buffer);
   return parseBankItauOrOfx(buffer);
+}
+
+// Aviso de destaque sempre que o arquivo importado for PDF — extrato
+// bancário, fatura de cartão ou extrato de corretora. PDF é o formato mais
+// sujeito a falhas de leitura (layout muda de banco pra banco, e às vezes
+// de mês pra mês do mesmo banco), então pedimos pro usuário conferir com
+// atenção o resultado antes de confirmar a importação.
+function _pdfImportWarningHtml() {
+  return `<div class="warn-box" style="margin-bottom:12px;font-size:13px;display:flex;gap:8px;align-items:flex-start">
+    <span style="font-size:18px;line-height:1">⚠️</span>
+    <span><strong>Importação em PDF é mais complexa e sujeita a falhas.</strong> Diferente de OFX/CSV/XLSX, o app precisa "ler" o texto do PDF, e o layout pode variar de banco pra banco (ou até de mês pra mês do mesmo banco). <strong>Confira com atenção</strong> se as datas, descrições e valores abaixo batem com o extrato original antes de confirmar.</span>
+  </div>`;
+}
+function _maybeShowPdfImportWarning(containerId, fileName) {
+  if (!/\.pdf$/i.test(fileName || '')) return;
+  const el = G(containerId);
+  if (el) el.insertAdjacentHTML('afterbegin', _pdfImportWarningHtml());
 }
 
 // Show a banner in the import preview asking the user to confirm sign direction.
@@ -7267,6 +7285,7 @@ async function processBrokerFile(file) {
 
     G('broker-result').innerHTML = '';
     renderBrokerPreview(parsed);
+    _maybeShowPdfImportWarning('broker-result', file.name);
   } catch(e) {
     G('broker-result').innerHTML = `<div class="warn-box">❌ Erro ao ler o extrato: ${esc(e.message)}</div>`;
     console.error(e);
@@ -13359,6 +13378,22 @@ const GUIDE_PAGES = {
         done: () => _guideState().visitedApos === true },
     ],
   },
+  projecao: {
+    title: 'Projeção',
+    intro: 'Veja a perspectiva de saldo futuro das suas contas, com base no que já está previsto no app. 🔮',
+    checks: [
+      { label: 'Escolher um horizonte', tip: 'Experimente alternar entre 3, 6 e 12 meses — prazos curtos costumam ser mais confiáveis.',
+        done: () => _guideState().visitedProjecao === true },
+    ],
+  },
+  reports: {
+    title: 'Relatórios',
+    intro: 'Resumos, comparações mensais e mapas de despesas — com filtros de conta, categoria e período. 📑',
+    checks: [
+      { label: 'Gerar um relatório', tip: 'Escolha o tipo, ajuste os filtros e clique em "Atualizar".',
+        done: () => _guideState().visitedReports === true },
+    ],
+  },
   import: {
     title: 'Importar',
     intro: 'Traga extratos de bancos, faturas de cartão e posições de corretoras. O app aprende com você! 🧠',
@@ -13377,6 +13412,499 @@ const GUIDE_PAGES = {
         done: () => _guideState().didBackup === true },
     ],
   },
+  categories: {
+    title: 'Categorias',
+    intro: 'Organize como suas transações são classificadas. 🏷',
+    checks: [
+      { label: 'Criar uma subcategoria', tip: 'Use "+ Nova subcategoria" pra detalhar uma categoria maior (ex: Carro:Combustível).',
+        done: () => _guideState().visitedCategories === true },
+    ],
+  },
+  ml: {
+    title: 'Aprendizado de Categorização',
+    intro: 'O Cruzeiro aprende a sugerir categorias com base no seu histórico. 🧠',
+    checks: [
+      { label: 'Treinar com o histórico', tip: 'Clique em "🧠 Treinar com histórico" pra adiantar o aprendizado a partir dos lançamentos já categorizados.',
+        done: () => _guideState().visitedMl === true },
+    ],
+  },
+};
+
+// ── Cardápio de dicas clicáveis ──────────────────────────────────────────
+// Diferente do checklist acima (que acompanha progresso), isto é um "menu"
+// de perguntas por tela — a pessoa clica numa pergunta e a Moedinha explica
+// o passo a passo, com bastante didática (sem pressupor que quem está lendo
+// entende de finanças). Mostrado aos poucos (ver guideRenderTipsSection).
+const GUIDE_TIPS = {
+  overview: [
+    { q: 'Como funciona o gráfico 📈 Receitas e Despesas?',
+      a: `<p>Esse é o gráfico principal da Visão Geral. Cada barra representa um mês: a parte de um lado mostra tudo que entrou (receitas) e a de outro tudo que saiu (despesas) naquele mês.</p>
+      <p><strong>Clique em qualquer mês do gráfico</strong> — os painéis logo abaixo (Orçado vs. Realizado, Participação por categoria, Cartões de crédito) atualizam para mostrar só os detalhes daquele mês específico. É a forma mais rápida de "entrar" num mês e investigar o que aconteceu.</p>
+      <p>No canto do gráfico tem três controles: o período (quantos meses aparecem), o botão IPCA e o botão MM 12m — cada um tem sua própria dica aqui embaixo, com mais detalhe.</p>` },
+
+    { q: 'O que muda quando eu troco o período (6, 12, 24, 36 meses ou "Desde o início")?',
+      a: `<p>Esse seletor controla quantos meses de histórico aparecem no gráfico de uma vez.</p>
+      <ol>
+        <li><strong>Períodos curtos (6-12 meses)</strong> são melhores pra ver o dia a dia recente com mais detalhe — cada barra ocupa mais espaço na tela.</li>
+        <li><strong>Períodos longos (24-36 meses, ou desde o início)</strong> são melhores pra enxergar tendências: sua renda está crescendo? Suas despesas estão subindo mês a mês? Isso só aparece claramente quando você olha de longe.</li>
+      </ol>
+      <p>Não tem período "certo" — vale alternar conforme a pergunta que você quer responder. O padrão do app é 12 meses porque costuma ser um bom equilíbrio entre detalhe e visão de tendência.</p>` },
+
+    { q: 'Para que serve o botão 📈 IPCA?',
+      a: `<p>O IPCA é o índice oficial de inflação no Brasil — ele mede o quanto os preços em geral sobem ao longo do tempo.</p>
+      <p><strong>O problema que ele resolve:</strong> R$ 100 gasto em 2020 "valiam" mais do que R$ 100 gastos hoje, porque a inflação corroeu o poder de compra do dinheiro nesse meio tempo. Se você simplesmente comparar os números crus, pode parecer que seus gastos "explodiram" quando, na real, boa parte do aumento é só a inflação normal do período — não necessariamente você gastando mais de verdade.</p>
+      <p>Quando o botão <strong>IPCA está ativado</strong>, o app corrige os valores antigos trazendo-os para o poder de compra de hoje — assim uma viagem de R$ 5.000 há 3 anos aparece com o valor equivalente em dinheiro de hoje, e fica comparável de verdade com uma viagem atual.</p>
+      <p>💡 <strong>Dica prática:</strong> deixe ativado quando for comparar meses distantes entre si; pode desativar se você só quer ver os valores exatamente como saíram da sua conta, sem ajuste.</p>` },
+
+    { q: 'O que é a Média Móvel de 12 meses (〜 MM 12m)?',
+      a: `<p>A Média Móvel de 12 meses (MM 12m) desenha, junto com as barras normais, uma linha suave que mostra a <strong>média dos últimos 12 meses</strong> em cada ponto — em vez do valor de um mês isolado.</p>
+      <p><strong>Por que isso ajuda:</strong> algumas categorias têm gastos "em picos", que acontecem poucas vezes por ano mas com valor alto — uma viagem de férias, uma revisão grande do carro na oficina, um conserto de emergência em casa. Olhando só o gráfico mês a mês, esses picos parecem "assustadores" e escondem o padrão real dos seus gastos regulares.</p>
+      <p>A linha de média móvel <strong>suaviza</strong> esses picos, misturando-os com os outros 11 meses — o que sobra é uma visão mais fiel de "quanto eu realmente costumo gastar por mês", sem se deixar levar por um mês fora da curva.</p>
+      <p>💡 <strong>Dica prática:</strong> ative a MM 12m quando quiser saber sua "velocidade de cruzeiro" financeira real; desative se quiser ver claramente em qual mês exato aconteceu um gasto grande.</p>` },
+
+    { q: 'O que fazem os botões dentro de "⊘ Categorias"?',
+      a: `<p>Esse menu (o botão "⊘ Categorias" acima do gráfico) tem três partes:</p>
+      <ol>
+        <li><strong>A lista de categorias com caixinhas</strong>, no topo do menu: marque uma categoria para <strong>excluí-la temporariamente</strong> dos gráficos da Visão Geral. Útil, por exemplo, pra tirar uma categoria atípica (tipo "Reforma da casa") e ver como ficam seus números "normais" sem ela.</li>
+        <li><strong>⚙ Tipos</strong>: abre uma tela onde você define se cada categoria conta como <strong>receita</strong> ou <strong>despesa</strong>. Isso importa porque o app tenta adivinhar sozinho (por exemplo, "Salário" vira receita automaticamente), mas você pode ter categorias específicas que precisam ser corrigidas manualmente.</li>
+        <li><strong>⚙ Configurar</strong>: abre a lista completa de categorias em formato de checklist, com um botão pra marcar de uma vez as sugeridas pelo app (contas que não são receita nem despesa de verdade). É a versão "completa" da exclusão rápida do item 1.</li>
+      </ol>` },
+
+    { q: 'O que mostra o gráfico ⛽ Despesas / Receita?',
+      a: `<p>Esse medidor (o "velocímetro") mostra, para o mês selecionado, <strong>que fração da sua receita já foi consumida pelas despesas</strong>.</p>
+      <p>Por exemplo: se o ponteiro está na metade, significa que suas despesas do mês somam cerca de 50% do que você recebeu — ou seja, sobrou a outra metade. Se o ponteiro passa do topo, suas despesas já superaram sua receita naquele mês (sinal de alerta).</p>
+      <p>É uma forma rápida de "sentir a temperatura" financeira do mês, sem precisar olhar números.</p>` },
+
+    { q: 'O que mostra 🎯 Orçado vs. Realizado?',
+      a: `<p>Esse painel compara, categoria por categoria, <strong>quanto você planejou gastar</strong> (a meta de orçamento) com <strong>quanto você realmente gastou</strong> no mês selecionado.</p>
+      <p>Cada barra é uma categoria — quanto mais a barra "realizado" ultrapassa a marca do "orçado", mais essa categoria estourou o planejado. Categorias sem meta cadastrada também aparecem, pra você não perder de vista onde está gastando sem ter definido um limite.</p>
+      <p>💡 <strong>Clique em uma categoria</strong> para ver a lista de lançamentos que compõem aquele valor.</p>
+      <p>Se você ainda não definiu metas, vale visitar a aba <strong>Orçamento</strong> e criar algumas — sem meta, não tem "orçado" pra comparar.</p>` },
+
+    { q: 'O que mostram os medidores de Receitas/Despesas vs. planejado?',
+      a: `<p>São dois medidores complementares ao painel "Orçado vs. Realizado": um soma <strong>todas as receitas</strong> do mês e compara com o total planejado de receitas; o outro faz o mesmo para o <strong>total de despesas</strong>.</p>
+      <p>Enquanto o "Orçado vs. Realizado" mostra o detalhe por categoria, esses dois medidores dão a visão consolidada: "no total, estou dentro do que planejei receber e gastar este mês?"</p>` },
+
+    { q: 'O que mostra 📊 Participação por categoria?',
+      a: `<p>Esse gráfico mostra como as suas despesas (ou receitas — dá pra trocar no botão Despesas/Receitas) do mês selecionado se dividem entre as diferentes categorias.</p>
+      <p>É útil pra responder "pra onde está indo a maior parte do meu dinheiro?" — geralmente aparecem primeiro as categorias com maior valor, então já dá pra ver de cara quais pesam mais no seu orçamento.</p>` },
+
+    { q: 'O que mostra 💳 Cartões de crédito, e por que definir o limite de cada cartão?',
+      a: `<p>Esse painel mostra, para cada cartão de crédito, o quanto já foi gasto na fatura do mês selecionado.</p>
+      <p><strong>Por que o limite do cartão importa:</strong> sem o limite cadastrado, o app só consegue mostrar "quanto você gastou" — mas não consegue desenhar a barra mostrando a <strong>distância entre o gasto atual e o limite total do cartão</strong>, que é a informação mais importante pra saber se você está perto de estourar o cartão.</p>
+      <p>💡 <strong>Como cadastrar:</strong> vá em <a onclick="goPage('patrimonio')">Patrimônio</a> (ou nas configurações da conta do cartão) e preencha o campo de limite. Depois disso, a barra aqui passa a mostrar claramente o quanto ainda "cabe" no cartão até o limite.</p>` },
+  ],
+
+  projecao: [
+    { q: 'Como funciona a aba Projeção?',
+      a: `<p>Essa aba responde a uma pergunta simples: <strong>"se nada de novo acontecer, como vai ficar o saldo das minhas contas correntes nos próximos meses?"</strong></p>
+      <p>O app pega o saldo de hoje e soma/subtrai todos os lançamentos <strong>futuros já previstos</strong> no sistema — contas recorrentes (aluguel, assinaturas, salário), lançamentos agendados manualmente e parcelas futuras de compras já lançadas — dia a dia, até o fim do horizonte escolhido.</p>
+      <p>O gráfico "Saldo projetado" mostra essa linha ao longo do tempo, e o app avisa em destaque <strong>se e quando o saldo ficaria negativo</strong>, pra você poder se antecipar (por exemplo, adiando um gasto ou resgatando um investimento antes da data).</p>
+      <p>Como toda projeção, ela só é tão boa quanto os dados que você já colocou no app — quanto mais completos seus lançamentos futuros e recorrências, mais confiável fica essa previsão.</p>` },
+
+    { q: 'O que significa o Horizonte (3, 6 ou 12 meses)?',
+      a: `<p>É até quando no futuro o app deve projetar o saldo. Escolher <strong>3 meses</strong> dá uma visão mais próxima e geralmente mais confiável (menos coisa pode "dar errado" na previsão em um prazo curto); escolher <strong>12 meses</strong> permite enxergar problemas de caixa mais distantes, mas com menos precisão, já que muita coisa pode mudar entre agora e daqui a um ano (novos gastos, mudanças de renda, etc. que o app ainda não sabe que vão acontecer).</p>
+      <p>💡 <strong>Dica prática:</strong> use um horizonte curto pro dia a dia ("vou conseguir pagar as contas dos próximos meses?") e um horizonte mais longo só como referência geral de tendência.</p>` },
+
+    { q: 'Por que Cartões de crédito não entram por padrão na projeção?',
+      a: `<p>Uma compra no cartão de crédito não tira dinheiro da sua conta corrente <strong>na hora</strong> — ela só afeta o saldo da conta quando a <strong>fatura vence e é paga</strong>. Até lá, o gasto está "represado" dentro do cartão, não na conta.</p>
+      <p>Por isso, por padrão, o app conta apenas o <strong>pagamento da fatura</strong> (na data de vencimento) como um evento que mexe no saldo da conta corrente — e não cada compra individual feita no cartão ao longo do mês, que já seria uma contagem redundante (contar a compra E depois a fatura seria contar o mesmo gasto duas vezes).</p>
+      <p>💡 Se você <strong>ativar</strong> o botão "💳 Cartões de crédito", o app passa a incluir também os gastos já feitos no cartão que ainda não viraram fatura — útil se você quer uma visão mais conservadora e antecipada do impacto que esses gastos vão ter quando a fatura chegar.</p>` },
+
+    { q: 'Por que Contas de investimento não entram por padrão na projeção?',
+      a: `<p>O saldo projetado desta aba é pensado para responder "terei dinheiro disponível pra pagar minhas contas?" — ou seja, é sobre <strong>liquidez imediata</strong>: dinheiro que já está literalmente disponível na conta corrente pra sacar ou pagar um boleto agora.</p>
+      <p>Investimentos, mesmo que tenham um valor alto, <strong>normalmente não são a mesma coisa que dinheiro na conta</strong>: alguns têm prazo de carência antes de poder resgatar, outros levam um ou dois dias úteis para cair na conta depois do pedido de resgate, e ainda pode haver desconto de Imposto de Renda no resgate. Somar esse valor direto ao saldo projetado passaria a falsa impressão de que esse dinheiro já está "pronto pra usar" hoje.</p>
+      <p>💡 Se você <strong>ativar</strong> o botão "📈 Contas de investimento", o app passa a somar também os saldos das contas de investimento na projeção — útil se você já sabe que pretende resgatar algo e quer ver o efeito no saldo total, mas lembre-se que na prática o resgate leva um tempo pra realmente "virar" saldo disponível.</p>` },
+
+    { q: 'Como funciona a sugestão de resgate de investimentos?',
+      a: `<p>Quando a projeção mostra que o saldo vai ficar <strong>negativo</strong> em alguma data futura, o app tenta automaticamente sugerir de qual investimento seria melhor resgatar dinheiro pra cobrir esse buraco — evitando, por exemplo, cair no cheque especial.</p>
+      <p>Para cada investimento elegível, o app olha:</p>
+      <ol>
+        <li><strong>Liquidez</strong>: o investimento consegue ser resgatado a tempo de cobrir o déficit na data em que ele acontece? Investimentos com carência que só liberam depois dessa data são descartados.</li>
+        <li><strong>Rentabilidade real</strong>: entre os elegíveis, o app prioriza resgatar primeiro os investimentos com <strong>menor rentabilidade</strong> (já descontada a inflação) — a lógica é: se você precisa mexer em algum investimento, é melhor abrir mão do que está rendendo menos e deixar intactos os que estão rendendo mais.</li>
+        <li><strong>Imposto de Renda</strong>: o app calcula o valor líquido (depois do IR, quando aplicável) que sobraria do resgate, pra sugerir um valor bruto que realmente cubra a necessidade depois do desconto do imposto.</li>
+      </ol>
+      <p>O app sugere até <strong>3 opções</strong>, indicando se cada uma sozinha já cobre o déficit (✅) ou se seria parcial, exigindo combinar com outro resgate (⚠️). Também mostra a data-limite pra fazer o resgate a tempo.</p>
+      <p>💡 Isso é só uma <strong>sugestão automática</strong> baseada nos dados que você cadastrou — vale sempre conferir as condições reais do investimento (carência, taxas, IR) antes de decidir.</p>` },
+  ],
+
+  reports: [
+    { q: 'Quais relatórios existem e o que cada um mostra?',
+      a: `<p>Hoje há três relatórios prontos, no menu "Relatório":</p>
+      <ol>
+        <li><strong>Resumo das receitas e despesas</strong>: soma tudo o que entrou e saiu em cada categoria, no período escolhido. É o relatório certo pra responder "quanto eu gastei em Mercado (ou Transporte, ou Lazer...) nesse período?".</li>
+        <li><strong>Comparação mensal</strong> (precisa de um período com mais de 1 mês selecionado): mostra, mês a mês, o total de receitas e despesas — ajuda a enxergar visualmente se o seu padrão financeiro está melhorando, piorando ou estável ao longo do tempo.</li>
+        <li><strong>Mapa de despesas</strong>: usa um esquema de cores (tipo um "mapa de calor") pra destacar rapidamente quais categorias tiveram mais despesas — quanto mais "quente" a cor, maior o gasto naquela categoria.</li>
+      </ol>` },
+
+    { q: 'Como escolher quais contas e categorias entram no relatório?',
+      a: `<p>No painel à direita da tela de Relatórios tem dois filtros:</p>
+      <ul>
+        <li><strong>Contas</strong>: marque quais contas devem entrar no cálculo. Deixar tudo desmarcado equivale a "todas as contas".</li>
+        <li><strong>Categorias</strong>: marque quais categorias devem entrar. Tem uma busca rápida pra achar uma categoria específica sem precisar rolar a lista toda. Deixar tudo desmarcado equivale a "todas as categorias".</li>
+      </ul>
+      <p>Isso é útil, por exemplo, pra gerar um relatório só da sua conta pessoal (ignorando uma conta conjunta), ou só das categorias de um determinado projeto/objetivo.</p>` },
+
+    { q: 'Por que as transferências entre contas não aparecem no relatório?',
+      a: `<p>Uma transferência (por exemplo, tirar dinheiro da conta corrente e colocar na poupança) <strong>não é uma receita nem uma despesa de verdade</strong> — é só o mesmo dinheiro seu mudando de lugar entre contas que também são suas. Contar isso como "gasto" ou "receita" inflaria os relatórios com um movimento que não representa nem ganho nem perda real.</p>
+      <p>Por isso, o app automaticamente <strong>tira as transferências entre contas</strong> do cálculo — sempre que o botão "↔️ Excluir transferências" (no painel de filtros) estiver ativado, que é o padrão.</p>
+      <p>💡 Se por algum motivo você quiser ver as transferências junto com o resto (por exemplo, pra conferir todo o movimento bruto de uma conta), é só desativar esse botão.</p>` },
+
+    { q: 'Preciso fazer algo depois de mudar os filtros de categorias ou contas?',
+      a: `<p>Sim — depois de marcar/desmarcar contas ou categorias no painel de filtros, <strong>clique no botão "Atualizar"</strong> (o botão verde no topo) para o relatório ser recalculado com os novos filtros.</p>
+      <p>Mudar um filtro sozinho não atualiza o relatório na hora — isso é proposital, pra você poder ajustar vários filtros de uma vez (contas, categorias, período) antes de disparar o recálculo, em vez do relatório ficar recalculando a cada clique.</p>` },
+
+    { q: 'Posso salvar meus relatórios preferidos?',
+      a: `<p>Sim! Depois de montar um relatório do jeito que você gosta — tipo de relatório, período, contas e categorias selecionadas — clique em <strong>"💾 Salvar"</strong>. Da próxima vez, ele aparece na lista suspensa "Relatório", dentro do grupo "Relatórios salvos", e um clique já recarrega tudo exatamente como você configurou.</p>
+      <p>Use o botão <strong>"🗂 Salvos"</strong> pra ver, renomear ou apagar os relatórios que você já salvou.</p>` },
+
+    { q: 'Como exporto um relatório?',
+      a: `<p>Depois de gerar o relatório, use os botões ao lado do "Atualizar":</p>
+      <ul>
+        <li><strong>📋 CSV</strong>: formato de texto simples, compatível com outros programas de finanças (como o Moneyspire).</li>
+        <li><strong>📊 Excel</strong>: gera uma planilha .xlsx pronta pra abrir no Excel ou Google Planilhas.</li>
+        <li><strong>📄 PDF</strong>: gera um arquivo PDF formatado, bom pra imprimir ou compartilhar.</li>
+      </ul>
+      <p>Todas as opções de exportação respeitam os filtros (contas, categorias, período) que estavam aplicados quando você clicou em "Atualizar" pela última vez.</p>` },
+  ],
+
+  import: [
+    { q: 'Como escolho meu banco pra importar o extrato?',
+      a: `<p>Na aba Importar, seção "Importar extrato / fatura", clique em <strong>"🏦 Extrato bancário"</strong> (ou "💳 Fatura de cartão", ou "📊 Extrato de corretora", dependendo do que você quer importar). Escolha seu banco na lista que abre.</p>
+      <p>⚠️ <strong>Fique atento ao formato de arquivo</strong> esperado por cada banco — alguns aceitam apenas um formato específico (OFX, CSV, XLSX ou PDF), indicado junto ao nome do banco. Baixe o extrato no site/app do seu banco exatamente nesse formato antes de importar.</p>
+      <p>Depois de escolher o banco, clique em "Selecionar arquivo" e escolha o arquivo baixado. O app mostra uma prévia dos lançamentos antes de importar de verdade — sempre dá pra conferir e cancelar se algo parecer errado.</p>` },
+
+    { q: 'Meu banco não está na lista — como configuro "Outro banco"?',
+      a: `<p>Clique em <strong>"➕ Outro banco…"</strong> (ou "➕ Outro cartão…") no fim da lista de bancos. O app abre um assistente que tenta reconhecer sozinho o formato do seu arquivo:</p>
+      <ol>
+        <li><strong>Selecione o arquivo</strong> do seu banco (CSV, XLSX, XLS, OFX ou PDF).</li>
+        <li>O app tenta <strong>detectar automaticamente</strong> as colunas (data, descrição, valor) e mostra uma prévia. Se dedetectar direito, é só confirmar.</li>
+        <li>Se não conseguir detectar sozinho, você vai precisar indicar manualmente <strong>qual coluna é a data, qual é a descrição e qual é o valor</strong> (e, se o arquivo tiver colunas separadas de entrada e saída em vez de uma só com o sinal, isso também dá pra configurar).</li>
+        <li>Dá pra marcar <strong>"Inverter sinal"</strong> se o app importar tudo com o sinal trocado (despesas aparecendo como receita, ou vice-versa) — é um erro comum de configuração fácil de corrigir aqui.</li>
+      </ol>
+      <p>⚠️ <strong>Prefira sempre OFX, CSV ou XLSX</strong> na hora de configurar um banco novo — esses formatos têm os dados organizados em colunas de verdade, então a configuração costuma funcionar de primeira e com muito mais confiabilidade. <strong>Só use PDF em último caso</strong>, quando o banco realmente não oferecer nenhum outro formato de exportação — PDF é só texto "desenhado" na página, sem estrutura de colunas, e por isso é o formato mais sujeito a erros de leitura.</p>` },
+
+    { q: 'Que formato de arquivo eu devo preferir?',
+      a: `<p>Na seguinte ordem de preferência: <strong>1) OFX, 2) CSV ou XLSX, 3) PDF</strong> — só como último recurso.</p>
+      <p>OFX, CSV e XLSX guardam os dados <strong>organizados em campos/colunas</strong> (uma coluna pra data, uma pra descrição, uma pro valor) — o app lê exatamente o valor de cada campo, sem chance de confusão.</p>
+      <p>PDF, por outro lado, guarda só o <strong>desenho visual</strong> do texto na página — o app precisa "adivinhar" onde termina uma informação e começa outra, reconstruindo a tabela a partir da posição de cada palavra. Isso funciona bem na maioria das vezes, mas é inerentemente mais frágil: qualquer mudança sutil no layout do banco pode confundir a leitura.</p>
+      <p>💡 Antes de importar, veja se seu banco oferece a opção de baixar o extrato em CSV, XLSX ou OFX (às vezes fica escondida em "Exportar" ou "Outros formatos") — vale a pena procurar antes de recorrer ao PDF.</p>` },
+
+    { q: 'Mesmo com meu banco pré-configurado, a importação em PDF é confiável?',
+      a: `<p>Mesmo quando seu banco já está pronto na lista (pré-configurado), se o arquivo que você importa é um <strong>PDF</strong>, a leitura continua sendo mais complexa e sujeita a falhas do que OFX/CSV/XLSX — o app precisa reconstruir a tabela de lançamentos a partir da posição do texto na página, e isso pode variar de mês para mês, mesmo dentro do mesmo banco.</p>
+      <p>Por isso, sempre que você importar um PDF, o app mostra um <strong>aviso em destaque</strong> logo acima da prévia dos lançamentos, lembrando de conferir tudo com atenção.</p>
+      <p>💡 <strong>Antes de confirmar a importação</strong>, compare a prévia com o extrato original: confira se o saldo final bate, se não faltou nenhum lançamento e se os valores e datas estão corretos. Encontrou algo errado? Cancele a importação e me avise (ou avise o desenvolvedor) — PDFs problemáticos ajudam a melhorar o parser pra todo mundo.</p>` },
+
+    { q: 'O que acontece depois que eu envio o arquivo? (passo a passo das telas)',
+      a: `<p>Depois de escolher o arquivo, o fluxo típico é:</p>
+      <ol>
+        <li><strong>Prévia dos lançamentos</strong>: o app mostra a lista de tudo que encontrou no arquivo, já com categoria sugerida (quando o app já "aprendeu" o padrão daquela descrição antes) e a conta de destino.</li>
+        <li><strong>Tela de duplicatas</strong> (se aparecer): quando o app desconfia que algum lançamento já foi importado antes, mostra uma tela separada pra você decidir o que fazer com cada um — mais detalhes na próxima dica sobre as cores.</li>
+        <li><strong>Edição manual</strong>: antes de confirmar, você ainda pode ajustar categoria, conta ou até apagar uma linha que não deveria entrar.</li>
+        <li><strong>Confirmação</strong>: ao confirmar, os lançamentos são gravados de vez nas suas contas.</li>
+        <li><strong>Auditoria de saldo</strong> (quando disponível): depois de importar uma fatura, o app confere sozinho se o total dos lançamentos bate com o total declarado na fatura — se não bater, mostra um aviso com sugestões pra investigar a diferença.</li>
+      </ol>` },
+
+    { q: 'Como o app identifica lançamentos duplicados?',
+      a: `<p>Quando o app desconfia que um lançamento do arquivo já existe nas suas contas, ele te mostra numa tela separada, colorido conforme o nível de confiança:</p>
+      <ul>
+        <li>🔴 <strong>Vermelho</strong> — "quase certeza": mesmo dia, mesmo valor, e a descrição bate (ou é muito parecida). O padrão aqui é <strong>Pular</strong> (não importar de novo), porque na prática isso quase sempre já foi importado antes.</li>
+        <li>🟡 <strong>Amarelo</strong> — caso ambíguo: mesmo dia e valor, mas descrição diferente (ou mesmo valor num dia próximo). Vale sua atenção antes de decidir — pode ser mesmo uma duplicata, ou pode ser só uma coincidência de valor.</li>
+        <li>🔵 <strong>Azul</strong> — provisão de recorrência: o lançamento do arquivo bate com uma conta recorrente que o app já tinha previsto (ex: aluguel do mês, ainda não conferido). Nesse caso, o app pode <strong>substituir a provisão</strong> pelo lançamento real, mantendo a categoria e o apelido que você já tinha ensinado — sem perguntar de novo.</li>
+      </ul>
+      <p>Você sempre pode <strong>revisar cada caso individualmente</strong> antes de confirmar — as cores são só uma sugestão pra te ajudar a decidir mais rápido, não uma decisão automática e definitiva (exceto a substituição de provisão, que já acontece na hora).</p>` },
+
+    { q: 'Como funciona o aprendizado (machine learning) de categorização?',
+      a: `<p>Toda vez que você categoriza manualmente um lançamento, o app guarda esse "aprendizado" — a próxima vez que aparecer uma descrição parecida (mesmo texto, valor parecido), ele já sugere a mesma categoria sozinho, sem você precisar repetir o trabalho.</p>
+      <p>Isso funciona comparando o texto da nova descrição com as que você já categorizou antes (ignorando datas, códigos e outras partes que mudam a cada lançamento mas não ajudam a identificar do que se trata), junto com o valor e a frequência de cada padrão. Quando a confiança não é alta o suficiente, o app <strong>prefere não sugerir nada</strong> a arriscar uma sugestão errada.</p>
+      <p>💡 Na tela de edição da importação, tem o botão <strong>"✨ Categorizar com IA"</strong> — ele usa um modelo de linguagem (se você tiver configurado um) só nas linhas que esse aprendizado local não conseguiu resolver sozinho, cobrindo os casos mais difíceis.</p>
+      <p>Quanto mais você usa o app e categoriza manualmente, mais precisas ficam as sugestões automáticas com o tempo.</p>` },
+
+    { q: 'Extrato de corretora — onde acho o arquivo certo no site do banco?',
+      a: `<p>Ao lado do nome de cada corretora, na lista de "📊 Extrato de corretora", tem um ícone <strong>"?"</strong> — clique nele para ver uma explicação detalhada de exatamente onde encontrar, dentro do site ou app daquele banco/corretora, o arquivo com os dados de investimentos (às vezes é um menu escondido, ou tem mais de um arquivo necessário).</p>
+      <p>💡 Cada corretora organiza essa informação de um jeito diferente, então vale sempre conferir essa dica específica antes de sair procurando no site — economiza tempo.</p>` },
+  ],
+
+  account: [
+    { q: 'Quais tipos de lançamento existem, e quando usar cada um?',
+      a: `<p>Dentro de uma conta, você pode registrar quatro "tipos" de coisa — cada um pensado pra uma situação diferente:</p>
+      <ol>
+        <li><strong>Lançamento comum</strong>: uma despesa ou receita normal (uma compra, uma conta paga, um salário recebido). É o mais usado no dia a dia.</li>
+        <li><strong>Transferência</strong>: quando o dinheiro só muda de uma conta sua pra outra conta sua (ex: da conta corrente pra poupança) — não é ganho nem gasto de verdade.</li>
+        <li><strong>Recorrência</strong>: um lançamento que se repete automaticamente (aluguel, assinatura, salário) — você cadastra uma vez e o app lança sozinho todo período.</li>
+        <li><strong>Vínculo a um bem/direito ou a uma dívida</strong>: quando o lançamento também representa um evento de um investimento/imóvel (ex: pagar uma parcela de financiamento) ou de uma dívida pessoal cadastrada — o app usa essa informação pra manter a aba Patrimônio atualizada sozinha.</li>
+      </ol>
+      <p>As próximas dicas mostram o passo a passo de cada um.</p>` },
+
+    { q: 'Como registrar um lançamento comum (uma compra, conta ou recebimento)?',
+      a: `<p>Clique em <strong>"+ Lançamento"</strong> no topo da tela. Preencha:</p>
+      <ol>
+        <li><strong>Conta</strong> (já vem preenchida com a conta que você está vendo)</li>
+        <li><strong>Data</strong></li>
+        <li><strong>Categoria</strong> (comece a digitar e escolha da lista, ou crie uma nova)</li>
+        <li><strong>Memorando</strong> (uma descrição livre, tipo "Supermercado" ou "Aluguel de maio")</li>
+        <li><strong>Valor</strong> — preencha no campo <strong>Despesa</strong> (se saiu dinheiro) ou <strong>Receita</strong> (se entrou), nunca os dois ao mesmo tempo</li>
+      </ol>
+      <p>💡 Prefere digitar em vez de preencher campo por campo? Use o <strong>"✨ Lançar com IA"</strong> — descreva em uma frase (ex.: "almoço 45 reais ontem no cartão") e o app já monta o lançamento pra você confirmar.</p>` },
+
+    { q: 'Como fazer uma transferência entre contas?',
+      a: `<p>Clique em <strong>"⇄ Transferência"</strong> no topo da tela (ou use o atalho <kbd>Ctrl+T</kbd>). Escolha a <strong>conta de origem</strong>, a <strong>conta de destino</strong>, o valor e a data — o app cria automaticamente os dois lados do movimento (a saída de uma conta e a entrada na outra), sempre vinculados um ao outro.</p>
+      <p>💡 Por que isso importa: transferências feitas dessa forma (em vez de dois lançamentos comuns separados) são reconhecidas automaticamente pelos Relatórios e pela Evolução como "não são receita nem despesa de verdade" — então não distorcem seus totais.</p>
+      <p>Se você editar ou apagar um lado da transferência, o outro lado é atualizado/removido junto, pra nunca ficar um "lado solto".</p>` },
+
+    { q: 'Como criar uma recorrência a partir de um lançamento que já existe?',
+      a: `<p>Se você já lançou algo manualmente (ex: o aluguel deste mês) e quer que ele se repita sozinho dali pra frente, não precisa recriar do zero:</p>
+      <ol>
+        <li><strong>Clique com o botão direito</strong> em cima do lançamento na tabela.</li>
+        <li>Escolha <strong>"🔄 Criar recorrência"</strong> no menu que aparece.</li>
+        <li>O app abre o formulário de recorrência já com conta, categoria, memorando e valor <strong>preenchidos automaticamente</strong> a partir desse lançamento — você só precisa confirmar a frequência (mensal, semanal, etc.) e a data da próxima ocorrência.</li>
+      </ol>
+      <p>💡 Esse mesmo menu de botão direito também tem atalhos pra duplicar o lançamento, marcar/desmarcar como conferido, e excluir.</p>` },
+
+    { q: 'Como vincular um lançamento a um bem/direito ou a uma dívida?',
+      a: `<p>Ao criar ou editar um lançamento (ou uma recorrência), tem duas opções no fim do formulário:</p>
+      <ul>
+        <li><strong>"Vincular a bem/direito"</strong>: marque quando o lançamento é sobre um investimento, imóvel ou outro ativo cadastrado no Patrimônio — escolha o ativo e o <strong>tipo de movimentação</strong> (aluguel recebido, dividendo, aporte, parcela de financiamento, venda, etc.). Isso faz o lançamento refletir automaticamente na aba Patrimônio, sem você precisar atualizar as duas telas separadamente.</li>
+        <li><strong>"Vincular a dívida pessoal"</strong>: marque quando o lançamento é o pagamento de uma dívida cadastrada (empréstimo, financiamento sem bem em garantia) — escolha qual dívida. Isso abate o valor pago do saldo devedor dela automaticamente.</li>
+      </ul>
+      <p>💡 Vincular é opcional — lançamentos comuns funcionam normalmente sem isso. Mas pra quem tem financiamentos ou investimentos, vincular economiza trabalho duplicado (lançar na conta E atualizar o Patrimônio manualmente).</p>` },
+
+    { q: 'Tabela ou Gráfico — o que muda na visualização da conta?',
+      a: `<p>No topo da tela de uma conta, dois botões alternam entre:</p>
+      <ul>
+        <li><strong>📋 Tabela</strong>: a lista detalhada de lançamentos, com filtros de período e ordenação.</li>
+        <li><strong>📈 Gráfico</strong>: mostra a evolução do saldo da conta ao longo do tempo, com a opção de <strong>projetar o saldo futuro</strong> (+1 a +24 meses), incluindo ou não recorrências e lançamentos futuros já agendados — parecido com a aba Projeção, só que focado nesta conta específica.</li>
+      </ul>` },
+
+    { q: 'O que fazem os seletores de período e ordenação da tabela?',
+      a: `<p><strong>Período</strong> (30 dias até "Tudo") controla quantos lançamentos aparecem na tabela de uma vez — períodos maiores mostram mais histórico, mas a tabela fica mais longa pra rolar.</p>
+      <p><strong>Ordenar por</strong> muda a ordem de exibição: data (mais recentes ou mais antigas primeiro), <strong>futuras primeiro</strong> (útil pra ver rapidamente o que ainda vai acontecer), por categoria, ou por valor.</p>` },
+
+    { q: 'O que é o "C" (conciliado) na tabela de lançamentos?',
+      a: `<p>É a marcação de <strong>conciliação</strong> — um jeito de confirmar "eu já conferi que este lançamento bate exatamente com o extrato oficial do banco". Clique no ✓ pra marcar ou desmarcar.</p>
+      <p>💡 Conciliar regularmente (pelo menos uma vez por mês, comparando com o extrato do banco) ajuda a pegar erros de digitação, lançamentos duplicados ou esquecidos — é o hábito mais simples pra manter os dados confiáveis.</p>` },
+  ],
+
+  budget: [
+    { q: 'Tabela ou Gráficos — o que muda no Orçamento?',
+      a: `<p>Os dois botões no topo alternam entre:</p>
+      <ul>
+        <li><strong>📋 Tabela</strong>: cada categoria numa linha, comparando o planejado com o realizado mês a mês.</li>
+        <li><strong>🍩 Gráficos</strong>: visual, em dois modos — <strong>Mês único</strong> (rosca mostrando a distribuição do mês selecionado) ou <strong>Evolução temporal</strong> (como o orçado vs. realizado mudou ao longo de vários meses).</li>
+      </ul>` },
+
+    { q: 'Como criar uma meta de orçamento?',
+      a: `<p>Clique em <strong>"+ Orçamento"</strong>. Escolha:</p>
+      <ol>
+        <li><strong>Tipo</strong>: Despesa (quanto você planeja gastar) ou Receita (quanto planeja receber)</li>
+        <li><strong>Categoria</strong></li>
+        <li><strong>Valor planejado por mês</strong> — o app mostra, como referência, a sua média dos últimos 12 meses nessa categoria, pra ajudar a definir um número realista</li>
+      </ol>
+      <p>Depois disso, todo mês o app compara automaticamente o que você realmente gastou/recebeu contra esse planejado.</p>` },
+
+    { q: 'O que é "Consolidar subcategorias"?',
+      a: `<p>Quando uma categoria tem subcategorias (ex: "Carro" com "Carro:Combustível" e "Carro:Manutenção"), esta opção decide se o orçamento da categoria-mãe ("Carro") <strong>soma junto o que foi gasto nas subcategorias</strong>, ou se acompanha <strong>só o que foi lançado diretamente</strong> em "Carro" (sem entrar nas subcategorias).</p>
+      <p>💡 Deixe marcado se você quer uma meta única cobrindo tudo relacionado ao carro; desmarque se prefere ter metas separadas e independentes para cada subcategoria.</p>` },
+
+    { q: 'O que é o alerta em % ao atingir?',
+      a: `<p>Define a partir de qual porcentagem do valor planejado a categoria muda de cor na tabela, te avisando visualmente que você está chegando perto do limite (ou já passou dele). O padrão é 80% — ou seja, ao atingir 80% do planejado, a categoria já sinaliza alerta antes de estourar de vez.</p>` },
+
+    { q: 'Como funciona "Acumular saldo (rollover)"?',
+      a: `<p>É o estilo "envelope": se em um mês você gastou menos que o planejado, a <strong>diferença que sobrou</strong> soma ao limite do mês seguinte (dando mais folga); se gastou mais, o excesso é <strong>descontado</strong> do limite do mês seguinte (menos folga).</p>
+      <p>O campo <strong>"Acumular no máximo (meses)"</strong> limita quantos meses anteriores entram nessa conta — por exemplo, com o valor 3, só os últimos 3 meses contam pro acúmulo, em vez do histórico inteiro.</p>
+      <p>💡 Útil para categorias como "Presentes" ou "Manutenção da casa", onde é normal um mês gastar pouco e outro gastar mais — o rollover deixa o orçamento acompanhar essa variação natural em vez de travar num valor fixo mês a mês.</p>` },
+
+    { q: 'O que é o painel de "categorias com gasto mas sem planejamento"?',
+      a: `<p>Lista as categorias em que você teve despesa no mês, mas <strong>ainda não criou uma meta de orçamento</strong> pra elas — pra você não perder de vista um gasto relevante só porque esqueceu de planejar aquela categoria.</p>
+      <p>💡 Se uma categoria aparece ali com frequência e valor relevante, é um bom sinal de que vale criar uma meta pra ela.</p>` },
+  ],
+
+  evolucao: [
+    { q: 'Diferença entre "Resumo" e "Por categoria"',
+      a: `<p><strong>Resumo</strong> mostra os totais gerais mês a mês: receita total, despesa total e o resultado (lucro/déficit) — a visão "de cima" da sua vida financeira ao longo do tempo.</p>
+      <p><strong>Por categoria</strong> quebra isso categoria por categoria, mês a mês — útil pra ver a evolução de uma categoria específica (ex: "meus gastos com Mercado estão subindo?").</p>` },
+
+    { q: 'Os botões "Corrigir por IPCA" e "Média móvel 12m"',
+      a: `<p>Funcionam exatamente como na Visão Geral: <strong>IPCA</strong> corrige valores antigos pelo poder de compra de hoje, pra comparar meses distantes de forma justa (sem o efeito da inflação atrapalhando a comparação); <strong>Média móvel 12m</strong> suaviza picos pontuais (uma viagem, um conserto caro) mostrando a média dos últimos 12 meses em vez do valor de cada mês isolado.</p>
+      <p>💡 Use os dois juntos quando quiser ver a tendência real de longo prazo, sem ruído de inflação nem de gastos atípicos.</p>` },
+
+    { q: 'Como usar o painel de filtros (Anos e Categorias)?',
+      a: `<p>À direita da tela, dois painéis deixam você isolar exatamente o que quer analisar:</p>
+      <ul>
+        <li><strong>Anos</strong>: clique nos anos que quer incluir na tabela/gráfico — os outros ficam de fora.</li>
+        <li><strong>Categorias</strong>: cada categoria tem um "pill" clicável — clique pra incluir/excluir. Categorias com subcategoria têm um botãozinho extra ao lado pra alternar entre os modos de exibição (explicado na próxima dica).</li>
+      </ul>` },
+
+    { q: 'O que significam os modos de exibição de categoria e subcategoria?',
+      a: `<p>Clique em <strong>"⚙ Configurar"</strong>, ao lado do título "Categorias" no painel de filtros, pra ver e ajustar tudo de uma vez. As opções são:</p>
+      <p><strong>Para a categoria-mãe</strong> (quando ela tem subcategorias):</p>
+      <ul>
+        <li>📊 <strong>Total consolidado</strong> — a categoria-mãe soma tudo o que foi lançado nela E em todas as suas subcategorias.</li>
+        <li>📋 <strong>Só coluna própria</strong> — mostra só o que foi lançado diretamente na categoria-mãe, sem somar as subcategorias.</li>
+      </ul>
+      <p><strong>Para cada subcategoria</strong>, três opções independentes:</p>
+      <ul>
+        <li>📋 <strong>Coluna própria + no total</strong> — a subcategoria aparece com sua própria linha/coluna E entra na soma da categoria-mãe (se a mãe estiver no modo consolidado).</li>
+        <li>⊂ <strong>Só no total</strong> — a subcategoria não tem linha própria visível, mas seu valor ainda entra somado no total da categoria-mãe.</li>
+        <li>✗ <strong>Excluir de tudo</strong> — a subcategoria não aparece em lugar nenhum, nem soma no total da mãe. Use isso pra gastos muito pontuais que distorceriam a leitura do resto (ex: uma subcategoria "Carro:Troca de carro" ou "Casa:Decoração" — um valor alto e raro que, se contasse no total de "Carro" ou "Casa" mês a mês, atrapalharia enxergar o padrão normal de gastos daquela categoria).</li>
+      </ul>
+      <p>💡 As mesmas opções também aparecem como atalho rápido nos "pills" do painel lateral — clique no pill pra incluir/excluir, e no botãozinho menor ao lado pra alternar entre os outros modos.</p>` },
+
+    { q: 'Tabela ou Gráficos na Evolução?',
+      a: `<p>Os dois modos mostram os mesmos dados, só a apresentação muda: <strong>Tabela</strong> é melhor pra conferir números exatos mês a mês; <strong>Gráficos</strong> é melhor pra enxergar tendências e picos visualmente de forma mais rápida.</p>` },
+  ],
+
+  patrimonio: [
+    { q: 'O que são os 5 cards do topo?',
+      a: `<p>Cada card resume uma parte do seu patrimônio, sempre referente ao mês atual:</p>
+      <ul>
+        <li><strong>🏠 Bens e Direitos</strong>: soma de imóveis, veículos e outros bens — já descontado o saldo devedor de financiamentos (veja a próxima dica pra entender esse desconto).</li>
+        <li><strong>🏦 Contas</strong>: soma dos saldos das contas bancárias incluídas no patrimônio.</li>
+        <li><strong>📈 Investimentos</strong>: soma de tudo que está em corretoras/aplicações.</li>
+        <li><strong>💳 Cartões e Dívidas</strong>: outras dívidas pessoais (não ligadas a um bem específico) — cartão de crédito, empréstimo pessoal.</li>
+        <li><strong>📊 Total Patrimônio</strong>: a soma final de tudo — sua "riqueza líquida" real.</li>
+      </ul>
+      <p>💡 Esses mesmos números aparecem, mês a mês, nas linhas de totalização da tabela logo abaixo — os cards são só um resumo do mês atual pra não precisar rolar até achar a coluna certa.</p>` },
+
+    { q: 'Por que um bem financiado aparece com valor cheio, mas o total desconta o saldo devedor?',
+      a: `<p>Isso é intencional, e mostra duas informações diferentes ao mesmo tempo:</p>
+      <ul>
+        <li>A linha do próprio bem (ex: "Apartamento") mostra o <strong>valor de mercado cheio</strong> do imóvel — quanto ele vale hoje, independente de quanto já foi pago.</li>
+        <li>Logo abaixo, a linha <strong>"🏦 Saldo devedor"</strong> mostra, com sinal negativo, quanto ainda falta pagar do financiamento daquele bem.</li>
+        <li>Quando o app soma tudo na linha <strong>"Total Bens e Direitos"</strong>, ele já desconta esse saldo devedor — mostrando sua <strong>parte líquida real</strong> no bem (o que sobraria se você vendesse o imóvel e quitasse o financiamento hoje).</li>
+      </ul>
+      <p>💡 Assim você enxerga as duas coisas ao mesmo tempo: o valor cheio do bem (linha do ativo) e sua "fatia" líquida dele (no total) — sem precisar escolher entre mostrar um ou outro.</p>` },
+
+    { q: 'Quais são os tipos de financiamento, e o que muda entre eles?',
+      a: `<p>Ao cadastrar um bem, o campo "Forma de aquisição" tem 4 opções, cada uma com campos próprios:</p>
+      <ol>
+        <li><strong>💵 À vista</strong>: sem parcelamento, você só informa o valor pago.</li>
+        <li><strong>📋 Parcelado com o vendedor</strong>: um parcelamento simples, direto com quem vendeu (sem entrada separada de banco/construtora) — você monta o cronograma de parcelas manualmente, uma a uma, com correção monetária opcional.</li>
+        <li><strong>🏗️ Financiamento com a construtora</strong>: típico de imóvel na planta. Tem entrada (à vista ou parcelada), depois parcelas mensais corrigidas geralmente pelo <strong>INCC</strong> (índice da construção civil, sem juros — só correção monetária) até a entrega das chaves, um <strong>saldo nas chaves</strong> opcional (valor extra pago na entrega) e, opcionalmente, uma parcela anual extra.</li>
+        <li><strong>🏦 Financiamento bancário</strong>: o clássico financiamento com banco. Tem entrada, e o contrato em si já usa <strong>sistema de amortização</strong> (SAC, PRICE ou SAM), <strong>taxa de juros</strong> e índice de correção (TR, IPCA, IGP-M) — bem diferente do financiamento com construtora, que normalmente não cobra juros, só correção.</li>
+      </ol>
+      <p>💡 Um mesmo imóvel pode ter <strong>os dois</strong> ao longo do tempo — por exemplo, financiamento com a construtora durante a obra, e depois financiamento bancário depois da entrega das chaves. O app permite cadastrar mais de um contrato para o mesmo bem, um após o outro.</p>` },
+
+    { q: 'O que faz o botão "Mostrar ocultos"?',
+      a: `<p>Contas, bens ou investimentos marcados como <strong>ocultos</strong> ficam fora da lista visível por padrão — é só uma forma de "arrumar a mesa" e não poluir a tela com itens que você não quer ver toda hora (ex: uma conta antiga já encerrada, mas que você quer manter no histórico).</p>
+      <p>⚠️ <strong>Importante:</strong> ocultar um item <strong>não</strong> tira ele das totalizações nem dos gráficos — ele continua contando normalmente no "Total Patrimônio" e em todos os cálculos, só não aparece na lista enquanto "Mostrar ocultos" estiver desmarcado. É uma questão só de visualização, não de cálculo.</p>` },
+
+    { q: 'O que faz o botão "📡 Atualizar IPCA mensal"?',
+      a: `<p>Busca automaticamente, direto do Banco Central, os valores mensais do IPCA — o índice usado para corrigir valores antigos ao poder de compra de hoje em vários lugares do app (Patrimônio, Evolução, Aposentadoria). Vale rodar de vez em quando pra manter os dados de inflação em dia.</p>` },
+
+    { q: 'Como funcionam os filtros e a ordenação da tabela?',
+      a: `<p>Clique em <strong>"🔍 Filtros e ordenação"</strong> pra abrir um painel onde dá pra filtrar bens por tipo (imóvel, veículo, barco, etc.) e escolher a ordem de exibição (nome, valor atual, tipo) — tanto para os bens quanto para as contas, cada um com seu próprio critério de ordenação.</p>` },
+
+    { q: 'Dívida com garantia (financiamento) x dívida sem garantia — qual a diferença?',
+      a: `<p>Um financiamento com alienação fiduciária ou hipoteca (o bem fica em garantia do banco/construtora) já aparece automaticamente na seção de <strong>Bens e Direitos</strong>, na linha "Saldo devedor" do próprio bem — não precisa cadastrar de novo.</p>
+      <p>A seção separada de <strong>dívidas</strong> ("💳 Cartões e Dívidas") é só para empréstimos <strong>sem</strong> um bem específico dado como garantia — por exemplo, um empréstimo pessoal ou um cartão de crédito parcelado. Cadastrar o mesmo financiamento nos dois lugares contaria a dívida em dobro no seu patrimônio.</p>` },
+  ],
+
+  goals: [
+    { q: 'Como o app calcula o progresso de cada tipo de meta?',
+      a: `<p>Cada um dos 3 tipos de meta usa uma fonte de dados diferente pra calcular o progresso:</p>
+      <ul>
+        <li><strong>💰 Valor-alvo</strong>: o progresso é o <strong>saldo atual da conta vinculada</strong> à meta, dividido pelo valor-alvo. A previsão de quando você vai atingir a meta usa sua <strong>média de poupança mensal</strong> (receitas menos despesas, calculada com base no seu histórico) para estimar quantos meses faltam.</li>
+        <li><strong>📅 Economia mensal</strong>: o progresso compara sua <strong>média real de poupança mensal</strong> (histórico recente de receitas menos despesas) com o valor mensal que você definiu como meta.</li>
+        <li><strong>🛡️ Reserva de emergência</strong>: a meta em reais é calculada automaticamente como sua <strong>média de despesas mensais recentes multiplicada pelo número de meses</strong> que você escolheu (ex: 6 meses de gastos). O progresso é o saldo da conta vinculada dividido por essa meta.</li>
+      </ul>
+      <p>⚠️ <strong>Importante:</strong> nas metas de "Valor-alvo" e "Reserva de emergência", se você <strong>não vincular uma conta</strong> à meta, o progresso fica travado em 0% — o app não tem de onde puxar o "quanto já tenho guardado" sem essa vinculação. Sempre vincule uma conta pra acompanhamento automático.</p>` },
+
+    { q: 'Por que vincular uma conta à meta?',
+      a: `<p>Quando você vincula uma conta (ex: uma poupança específica) a uma meta de Valor-alvo ou Reserva de emergência, o app usa o <strong>saldo dessa conta</strong> como "quanto já foi guardado" — o progresso atualiza sozinho conforme o saldo muda, sem você precisar informar manualmente.</p>
+      <p>💡 Se você guarda o dinheiro de uma meta espalhado em vários lugares, considere separar numa conta dedicada só pra ela — fica mais fácil acompanhar o progresso automaticamente.</p>` },
+  ],
+
+  recurring: [
+    { q: 'Para que servem as recorrências?',
+      a: `<p>São lançamentos que se repetem periodicamente — aluguel, assinaturas de streaming, salário, mensalidade da escola. Em vez de lançar manualmente todo mês, você cadastra uma vez e o app lança sozinho, na data certa, a cada período.</p>` },
+
+    { q: 'Como criar uma recorrência do zero?',
+      a: `<p>Clique em <strong>"+ Nova recorrência"</strong> e preencha conta, memorando, categoria, valor (despesa ou receita) e a <strong>frequência</strong> (semanal, quinzenal, mensal, bimestral, trimestral ou anual), além da data da primeira ocorrência.</p>
+      <p>O campo <strong>"Data final"</strong> é opcional — deixando em branco, a recorrência continua indefinidamente (o app projeta até 5 anos à frente automaticamente).</p>
+      <p>💡 Já tem um lançamento parecido registrado? É mais rápido criar a recorrência a partir dele — veja a dica correspondente na aba Extrato da Conta.</p>` },
+
+    { q: 'Recorrência de transferência entre contas',
+      a: `<p>Ao escolher a categoria <strong>"Transferência"</strong> numa recorrência, aparece um campo extra pra escolher a <strong>conta de destino</strong> — assim dá pra automatizar, por exemplo, uma transferência mensal fixa da conta corrente pra poupança.</p>` },
+
+    { q: 'Como vincular uma recorrência a um bem/direito?',
+      a: `<p>Marque a opção <strong>"Vincular a bem/direito"</strong> no formulário da recorrência — útil, por exemplo, pra uma parcela de financiamento que se repete todo mês: além de lançar o valor na conta automaticamente, o app também atualiza o saldo devedor daquele bem na aba Patrimônio.</p>` },
+  ],
+
+  aposentadoria: [
+    { q: 'Qual é o objetivo desta aba?',
+      a: `<p>O objetivo final aqui não é só "juntar dinheiro" — é chegar a um <strong>patrimônio grande o suficiente para que o próprio rendimento dele sustente seu padrão de vida</strong>, sem precisar de nenhuma outra fonte de renda.</p>
+      <p>Ou seja: a "aposentadoria financeira" acontece quando o dinheiro que seu patrimônio gera sozinho (juros, aluguéis, dividendos) já é suficiente pra cobrir suas despesas — nesse ponto, você pode, se quiser, parar de trabalhar e/ou de poupar, e viver do rendimento do que já foi acumulado.</p>
+      <p>Essa aba projeta quanto você precisa acumular, e quanto precisa poupar por mês até lá, pra chegar nesse ponto na idade que você escolher.</p>` },
+
+    { q: 'Os 2 tipos de meta: Patrimônio-alvo vs. Renda mensal desejada',
+      a: `<p>São duas formas de definir a mesma coisa, uma em função da outra:</p>
+      <ul>
+        <li><strong>💰 Patrimônio-alvo</strong>: você informa diretamente quanto quer ter acumulado (ex: R$ 5.000.000).</li>
+        <li><strong>💸 Renda mensal desejada</strong>: você informa quanto quer poder gastar por mês depois de aposentado, em dinheiro de hoje — e o app calcula o patrimônio necessário pra sustentar essa renda indefinidamente, usando a taxa de retorno real que você configurou (regra dos juros reais: patrimônio × taxa real ÷ 12 = renda mensal sustentável, sem consumir o principal).</li>
+      </ul>
+      <p>Escolha o que for mais fácil de pensar pra você — os dois levam à mesma conta por baixo dos panos.</p>` },
+
+    { q: 'De onde vêm os números de "Patrimônio atual" e "Poupança realizada/mês"?',
+      a: `<p><strong>Patrimônio atual</strong> é puxado automaticamente do <strong>Total Patrimônio</strong> da aba Patrimônio (o mesmo valor mostrado lá, já líquido de dívidas) — não precisa preencher manualmente, e atualiza sozinho conforme seu patrimônio muda.</p>
+      <p><strong>Poupança realizada/mês</strong> (que aparece na tabela de anos passados) vem da <strong>média móvel de 12 meses do seu resultado (receitas menos despesas)</strong>, calculada na aba Evolução, já corrigida pela inflação — ou seja, é quanto você realmente conseguiu guardar por mês, na prática, segundo seu histórico de lançamentos, e não uma estimativa teórica.</p>` },
+
+    { q: 'Como ler a tabela de projeção anual: rendimento do patrimônio vs. aporte externo',
+      a: `<p>Nos anos futuros, a coluna de poupança necessária se divide conceitualmente em duas partes, que juntas fazem seu patrimônio crescer até a meta:</p>
+      <ul>
+        <li><strong>Rendimento do patrimônio</strong>: é o dinheiro que o que você <strong>já acumulou</strong> gera sozinho, todo mês, pela taxa de retorno real configurada — ninguém precisa fazer nada pra esse dinheiro aparecer, ele é fruto do patrimônio trabalhando por conta própria. Esse valor <strong>cresce ao longo do tempo</strong>, conforme o patrimônio acumulado também cresce.</li>
+        <li><strong>Aporte externo</strong>: é o valor <strong>fixo</strong> que você mesmo precisa continuar colocando todo mês, do seu bolso/renda, pra complementar o rendimento do patrimônio e garantir que a meta seja atingida no prazo. Esse número não muda mês a mês — é calculado uma vez, como um valor constante, no começo do plano.</li>
+      </ul>
+      <p>💡 Com o tempo, a parte do "rendimento do patrimônio" cresce e passa a fazer a maior parte do trabalho — é exatamente esse ponto de virada, quando o rendimento sozinho já cobre tudo que você precisa (inclusive suas despesas, depois de aposentado), que marca a "aposentadoria financeira" de verdade.</p>
+      <p>A coluna <strong>"% da meta"</strong> mostra o quanto do patrimônio-alvo você já atingiu (real, nos anos passados; projetado, nos futuros) em cada ano.</p>` },
+  ],
+
+  categories: [
+    { q: 'Qual a diferença entre categoria e subcategoria?',
+      a: `<p>Uma <strong>subcategoria</strong> é uma divisão mais específica dentro de uma categoria — por exemplo, "Carro" (categoria) pode ter "Carro:Combustível" e "Carro:Manutenção" (subcategorias). No app, o formato é sempre <strong>Categoria:Subcategoria</strong>, com dois-pontos separando os dois níveis.</p>
+      <p>💡 Use subcategorias quando quiser acompanhar o detalhe de uma categoria maior (útil no Orçamento e na Evolução, onde dá pra escolher se o total da categoria-mãe soma ou não as subcategorias).</p>` },
+
+    { q: 'Onde as categorias são usadas no app?',
+      a: `<p>As mesmas categorias aparecem em <strong>lançamentos</strong>, na <strong>importação</strong> de extratos (o app tenta adivinhar a categoria certa sozinho) e nos <strong>relatórios</strong> — mudar o nome ou apagar uma categoria aqui afeta tudo o que já está classificado com ela em qualquer parte do app.</p>` },
+
+    { q: 'Como criar uma categoria ou subcategoria nova?',
+      a: `<p>Clique em <strong>"+ Nova categoria"</strong> (nível principal) ou <strong>"+ Nova subcategoria"</strong> (vinculada a uma categoria já existente) e dê um nome. Você também pode criar uma categoria nova "na hora", direto no campo de categoria de qualquer lançamento — não precisa vir até esta tela toda vez.</p>` },
+  ],
+
+  ml: [
+    { q: 'Como o app aprende a categorizar sozinho?',
+      a: `<p>Toda vez que você categoriza manualmente um lançamento, o app guarda esse padrão — comparando o texto da descrição (ignorando datas, códigos e outras partes que mudam a cada lançamento), o valor e a frequência de casos parecidos. Na próxima vez que aparecer algo semelhante (numa importação, por exemplo), ele já sugere a mesma categoria sozinho.</p>
+      <p>Quando a confiança não é alta o suficiente, o app <strong>prefere não sugerir nada</strong> a arriscar uma sugestão errada — por isso nem todo lançamento vem com sugestão automática, mesmo depois de bastante uso.</p>` },
+
+    { q: 'O que faz o botão "Treinar com histórico"?',
+      a: `<p>Reprocessa todos os seus lançamentos <strong>já categorizados</strong> no passado de uma vez, extraindo os padrões deles pro aprendizado — útil principalmente depois de importar um grande volume de histórico antigo, ou se você acabou de começar a usar o app e quer "adiantar" o aprendizado em vez de esperar ele se acumular aos poucos.</p>` },
+
+    { q: 'Para que servem "Exportar" e "Importar" aqui?',
+      a: `<p>Exportar salva tudo o que o app aprendeu num arquivo. Importar carrega esse arquivo de volta — útil ao trocar de computador, reinstalar o app, ou simplesmente ter um backup separado do aprendizado (que é diferente do backup normal dos seus dados financeiros).</p>` },
+
+    { q: 'O que acontece se eu clicar em "Apagar aprendizado"?',
+      a: `<p>⚠️ Isso apaga <strong>todo</strong> o histórico de aprendizado acumulado até agora — as sugestões automáticas de categoria vão parar de aparecer até o app reaprender do zero (categorizando manualmente de novo, ou usando "Treinar com histórico"). É uma ação <strong>irreversível</strong> (a não ser que você tenha exportado um backup antes) — use com cautela.</p>` },
+  ],
+
+  backup: [
+    { q: 'O que a pasta de dados / sincronização realmente sincroniza?',
+      a: `<p>Ao apontar a pasta de dados para uma pasta do Dropbox, OneDrive ou similar, o <strong>arquivo do banco de dados inteiro</strong> (todas as suas contas, lançamentos, orçamentos, patrimônio etc.) passa a ficar salvo ali — se você usa o Cruzeiro em mais de um computador com a mesma pasta sincronizada, os dados ficam iguais nos dois.</p>
+      <p>⚠️ Isso não é sincronização em tempo real feita pelo app — quem sincroniza de fato é o Dropbox/OneDrive por conta própria. Evite abrir o app em dois computadores <strong>ao mesmo tempo</strong> apontando pra mesma pasta, pra não haver conflito de gravação.</p>` },
+
+    { q: 'Qual a diferença entre "Backups automáticos" e "Exportar dados"?',
+      a: `<p><strong>Backups automáticos</strong> rodam sozinhos, em intervalos regulares, sem você precisar lembrar — é a proteção "de fundo" contra perda de dados.</p>
+      <p><strong>Exportar dados</strong> é uma ação manual, sob demanda — útil antes de fazer uma mudança grande no app, ou pra guardar uma cópia extra em outro lugar (um pen drive, por exemplo) além dos backups automáticos.</p>
+      <p>💡 As duas coisas se complementam — vale manter os backups automáticos ativos E fazer uma exportação manual de vez em quando, especialmente antes de atualizações grandes.</p>` },
+
+    { q: 'Para que serve a senha de acesso?',
+      a: `<p>Protege a abertura do app com uma senha — útil se você compartilha o computador com outras pessoas, ou guarda o arquivo de dados num serviço de nuvem e quer uma camada extra de proteção caso alguém tenha acesso ao arquivo em si.</p>` },
+
+    { q: 'Para que serve a seção de Usuários?',
+      a: `<p>Permite ter mais de um perfil cadastrado no mesmo app — por exemplo, você e seu cônjuge, cada um com seu próprio conjunto de contas e dados, sem misturar as informações de um com as do outro.</p>` },
+
+    { q: 'O que preciso configurar pra usar "Lançar com IA" e "Categorizar com IA"?',
+      a: `<p>Essas funções (que interpretam linguagem natural pra criar lançamentos, ou sugerem categoria usando um modelo de linguagem) precisam de uma <strong>chave de API de IA</strong> configurada no card "🤖 Assistente IA" — sem isso, essas funções específicas não funcionam (o app continua funcionando normalmente pra tudo o mais, incluindo o aprendizado local de categorização, que não depende disso).</p>` },
+  ],
 };
 
 // ── Núcleo ───────────────────────────────────────────────────────────────
@@ -13482,7 +14010,52 @@ async function guideRefresh(page) {
     <p>${cfg.intro}</p>
     <div class="guide-progressbar"><div style="width:${pct}%"></div></div>
     ${checksHtml}
-    ${cheer}`;
+    ${cheer}
+    ${guideRenderTipsSection(page)}`;
+}
+
+// ── Cardápio de dicas: renderização, revelação gradual e detalhe ──────────
+const _guideTipsRevealed = {}; // quantas dicas já reveladas por página (reseta ao reabrir o app)
+const GUIDE_TIPS_BATCH = 4;
+
+function guideRenderTipsSection(page) {
+  const tips = GUIDE_TIPS[page];
+  if (!tips || !tips.length) return '';
+  if (_guideTipsRevealed[page] === undefined) {
+    _guideTipsRevealed[page] = Math.min(GUIDE_TIPS_BATCH, tips.length);
+  }
+  const shown = _guideTipsRevealed[page];
+  const itemsHtml = tips.slice(0, shown).map((t,i) => `
+    <div class="guide-tip" onclick="guideShowTipDetail('${page}',${i})">
+      <span>💬 ${esc(t.q)}</span><span class="gt-arrow">›</span>
+    </div>`).join('');
+  const remaining = tips.length - shown;
+  const moreBtn = remaining > 0
+    ? `<button class="btn xs" style="width:100%;margin-top:2px" onclick="guideRevealMoreTips('${page}')">➕ Mais dicas (${remaining})</button>`
+    : '';
+  return `
+    <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:10px">
+      <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">💡 Dicas desta tela</div>
+      ${itemsHtml}
+      ${moreBtn}
+    </div>`;
+}
+
+function guideRevealMoreTips(page) {
+  const tips = GUIDE_TIPS[page] || [];
+  _guideTipsRevealed[page] = Math.min((_guideTipsRevealed[page]||0) + GUIDE_TIPS_BATCH, tips.length);
+  guideRefresh(page);
+}
+
+function guideShowTipDetail(page, idx) {
+  const t = (GUIDE_TIPS[page] || [])[idx];
+  const body = G('guide-bubble-body');
+  if (!body || !t) return;
+  body.innerHTML = `
+    <button class="guide-tip-back" onclick="guideRefresh('${page}')">← Voltar às dicas</button>
+    <h4>${esc(t.q)}</h4>
+    <div class="guide-tip-detail">${t.a}</div>`;
+  body.scrollTop = 0;
 }
 
 // Chamado pelo goPage — mostra badge se há pendências na nova página
@@ -14910,7 +15483,7 @@ function renderBudgetUncategorized({ incomeBudgets, expenseBudgets, byMonth, cur
   const mo = byMonth[curMonthStr] || {};
   const unbudgeted = Object.entries(mo)
     .filter(([cat,d]) => cat && !budgetedCats.has(cat) && !budgetedCats.has(cat.split(':')[0]) &&
-      cat !== 'Transferência' && cat !== 'Transferências' && d.expenses > 0)
+      !isTransferCategory(cat) && d.expenses > 0)
     .map(([cat,d]) => ({ category: cat, spent: d.expenses }))
     .sort((a,b) => b.spent - a.spent)
     .slice(0, 8);
@@ -16012,6 +16585,10 @@ function fmtBRLshort(v){ const abs=Math.abs(v||0),sign=v<0?'-':''; if(abs>=1e6) 
 function fmtDate(s){ if(!s) return ''; const [y,m,d]=s.split('-'); return `${d}/${m}/${y}`; }
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 function norm(s){ return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }
+// Categorias de transferência entre contas usam o formato "⇄ Transferência:
+// [conta destino]" (com emoji e sufixo) — um Set de comparação EXATA (como
+// havia antes em 3 lugares) nunca bate com isso; precisa ser substring.
+function isTransferCategory(cat) { return norm(cat).includes('transfer'); }
 function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function esc2(s){ return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
 function G(id){ return document.getElementById(id); }
@@ -16359,9 +16936,8 @@ function evToggleMaPill() {
 // em vez de continuar visível, só "colorida e tachada".
 async function evLoadAllCatsStable() {
   const rows = await ff.reportSummary({ excludeTransfers: false }).catch(() => []);
-  const transferCats = new Set(['Transferência','Transferências','Transferencia','Transferencias']);
   const accountNames = new Set((accounts||[]).map(a=>a.name));
-  _ev.allCatsStable = [...new Set(rows.map(r=>r.category).filter(c => c && !transferCats.has(c) && !accountNames.has(c)))]
+  _ev.allCatsStable = [...new Set(rows.map(r=>r.category).filter(c => c && !isTransferCategory(c) && !accountNames.has(c)))]
     .sort((a,b)=>a.localeCompare(b,'pt-BR'));
 }
 function _evCatHasSubs(parent) {
@@ -17301,8 +17877,7 @@ async function openCatTypesConfig() {
   await loadCatTypes();
   const rows = await ff.reportSummary({ excludeTransfers: false });
   const accountNames = new Set((accounts||[]).map(a=>a.name));
-  const transferCats = new Set(['Transferência','Transferências','Transferencia','Transferencias']);
-  const allCats = [...new Set(rows.map(r=>r.category).filter(c=>c&&c.trim()&&!accountNames.has(c)&&!transferCats.has(c)))].sort();
+  const allCats = [...new Set(rows.map(r=>r.category).filter(c=>c&&c.trim()&&!accountNames.has(c)&&!isTransferCategory(c)))].sort();
   let html='<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">';
   allCats.forEach(cat=>{
     const type=_catTypes[cat]||getCatType(cat);
@@ -18667,7 +19242,7 @@ function refreshPatrimonioTable() {
   // (placeholder — will be overwritten after full calculation)
   const grandTotal_placeholder = totalAssets + totalAccounts;
   G('pat-cards').innerHTML = `
-    <div class="stat-card"><div class="stat-lbl">🏠 Bens e Direitos</div><div class="stat-val green">${fmtBRL(totalAssets)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
+    <div class="stat-card" id="pat-card-assets"><div class="stat-lbl">🏠 Bens e Direitos</div><div class="stat-val green">${fmtBRL(totalAssets)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card"><div class="stat-lbl">🏦 Contas</div><div class="stat-val green">${fmtBRL(totalAccounts)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card" id="pat-card-inv"><div class="stat-lbl">📈 Investimentos</div><div class="stat-val green">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card" id="pat-card-debt"><div class="stat-lbl">💳 Cartões e Dívidas</div><div class="stat-val red">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
@@ -18860,7 +19435,7 @@ function refreshPatrimonioTable() {
           if (v == null) return `<td class="right" style="color:var(--text3);font-size:11px;padding:4px 10px;background:${cellBg}">—</td>`;
           const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
           const projTip   = isProj ? ' title="Projeção (valor constante, sem correção futura)"' : '';
-          return `<td class="amt-exp right"${projTip} style="font-size:11px;padding:4px 10px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">${fmtBRL(v)}${isProj ? '<span style="font-size:8px;margin-left:2px;color:#f59e0b">~</span>' : ''}</td>`;
+          return `<td class="amt-exp right"${projTip} style="font-size:11px;padding:4px 10px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">${fmtBRL(v)}${isProj ? '<span style="font-size:8px;margin-left:2px;color:#f59e0b;vertical-align:middle">~</span>' : ''}</td>`;
         }).join('');
         // Build installment flow cells — shows BOTH projected (unpaid) and paid
         // installments, styled differently. Paid ones used to be hidden here
@@ -18884,7 +19459,7 @@ function refreshPatrimonioTable() {
           if (!v) return `<td class="right" ${clickable} style="color:var(--text3);font-size:11px;padding:3px 8px;background:${cellBg}">—</td>`;
           const projStyle = isProj ? ';opacity:.65;font-style:italic' : '';
           const projTip   = isProj ? ' title="Projeção — clique para editar"' : ' title="Parcela paga — clique para editar"';
-          const marker    = isProj ? '<span style="font-size:8px;color:#f59e0b;margin-left:1px">~</span>' : '<span style="font-size:8px;color:var(--green);margin-left:1px">✓</span>';
+          const marker    = isProj ? '<span style="font-size:8px;color:#f59e0b;margin-left:1px;vertical-align:middle">~</span>' : '<span style="font-size:8px;color:var(--green);margin-left:1px;vertical-align:middle">✓</span>';
           return `<td class="amt-exp right"${projTip} ${clickable} style="font-size:11px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">-${fmtBRL(v)}${marker}</td>`;
         }).join('');
 
@@ -19206,16 +19781,12 @@ function refreshPatrimonioTable() {
     <td style="${STICKY4};right:0;min-width:60px"></td>
   </tr>`;
 
-  // ── Total geral ──
-  const grandTotalRow = `<tr style="font-weight:700;font-size:14px;background:var(--accent-bg);border-top:2px solid var(--accent)">
-    <td style="${STICKY4.replace('bg3','accent-bg')};left:0;min-width:350px;padding:10px 12px;color:var(--accent)" colspan="4">📊 Total Patrimônio</td>
-    ${months.map(m => {
-      const v = assetTotalByMonth[m] + accTotalByMonth[m];
-      const isCur = m === curM;
-      return `<td class="right" style="font-family:'DM Mono',monospace;padding:8px 10px;color:var(--accent)${isCur?';background:var(--accent-lt)':''}">${fmtBRL(v)}</td>`;
-    }).join('')}
-    <td style="${STICKY4.replace('bg3','accent-bg')};right:0;min-width:60px"></td>
-  </tr>`;
+  // Nota: o total geral de fato usado no HTML é `grandTotalRow2`, montado mais
+  // abaixo (depois que invTotalByMonth/debtTotalByMonth ficam prontos) — ele
+  // soma Bens e Direitos (já líquido de financiamento) + Contas + Investimentos
+  // + Dívidas pessoais. Havia aqui uma primeira versão (`grandTotalRow`) com
+  // fórmula incompleta (sem investimentos/dívidas) que nunca chegou a ser
+  // usada no HTML final — removida para não confundir uma futura edição.
 
   // ── Render all in single container ──
   const container = G('pat-all-tables');
@@ -19237,7 +19808,16 @@ function refreshPatrimonioTable() {
   });
 
   // Update investment and total cards with correct values
-  const grandTotal = totalAssets + totalAccounts + totalInv - totalDebt;
+  // "Bens e Direitos" e o Total Patrimônio precisam usar assetTotalByMonth[curM]
+  // (valor líquido, já descontado o saldo devedor de financiamentos — mesmo
+  // número que aparece na linha "Total Bens e Direitos" da tabela abaixo) e
+  // NÃO a variável `totalAssets` (bruta, sem desconto), calculada mais cedo
+  // só como estimativa rápida pro card aparecer algo antes da tabela inteira
+  // ser montada. Usar a bruta aqui fazia o card mostrar um valor diferente
+  // do que a própria tabela mostrava logo abaixo dele.
+  const netAssets = assetTotalByMonth[curM] || 0;
+  const grandTotal = netAssets + totalAccounts + totalInv - totalDebt;
+  if (G('pat-card-assets')) G('pat-card-assets').innerHTML = `<div class="stat-lbl">🏠 Bens e Direitos</div><div class="stat-val green">${fmtBRL(netAssets)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
   if (G('pat-card-inv'))   G('pat-card-inv').innerHTML   = `<div class="stat-lbl">📈 Investimentos</div><div class="stat-val green">${fmtBRL(totalInv)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
   if (G('pat-card-debt'))  G('pat-card-debt').innerHTML  = `<div class="stat-lbl">💳 Cartões e Dívidas</div><div class="stat-val red">${fmtBRL(-totalDebt)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
   if (G('pat-card-total')) G('pat-card-total').innerHTML = `<div class="stat-lbl">📊 Total Patrimônio</div><div class="stat-val accent" style="font-size:22px">${fmtBRL(grandTotal)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;

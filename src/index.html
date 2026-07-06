@@ -688,6 +688,18 @@ select.inp option{background:var(--bg2);}
 .guide-check a{color:var(--accent);cursor:pointer;text-decoration:underline;}
 .guide-progressbar{height:7px;border-radius:4px;background:var(--bg3);overflow:hidden;margin:8px 0 12px;}
 .guide-progressbar>div{height:100%;border-radius:4px;background:linear-gradient(90deg,#ffd54f,#66bb6a);transition:width .5s;}
+/* Cardápio de dicas clicáveis */
+.guide-tip{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:9px;margin-bottom:6px;
+  background:var(--bg3);border:1px solid var(--border);cursor:pointer;font-size:12.5px;transition:background .15s,border-color .15s;}
+.guide-tip:hover{background:var(--accent-bg);border-color:var(--accent);}
+.guide-tip .gt-arrow{margin-left:auto;color:var(--text3);flex-shrink:0;}
+.guide-tip-detail p{margin:0 0 10px;}
+.guide-tip-detail strong{color:var(--text);}
+.guide-tip-detail ol,.guide-tip-detail ul{margin:0 0 10px;padding-left:20px}
+.guide-tip-detail li{margin-bottom:5px}
+.guide-tip-back{background:none;border:1px solid var(--border);color:var(--text2);font-size:11.5px;cursor:pointer;
+  padding:5px 10px;border-radius:8px;margin-bottom:10px;}
+.guide-tip-back:hover{background:var(--bg3);}
 #tour-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0);transition:background .4s;z-index:19001;}
 #tour-spotlight{position:fixed;border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.55);transition:all .45s cubic-bezier(.4,0,.2,1);z-index:19002;pointer-events:none;}
 #tour-card{position:fixed;z-index:19003;background:var(--bg2);border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,.28);padding:0;width:360px;max-width:calc(100vw - 32px);pointer-events:all;transition:all .3s;}
@@ -3355,7 +3367,10 @@ select.inp option{background:var(--bg2);}
           <div class="ev-year-grid" id="ev-year-pills"></div>
         </div>
         <div class="ev-filter-section">
-          <div class="ev-filter-section-hdr">Categorias</div>
+          <div class="ev-filter-section-hdr" style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+            <span>Categorias</span>
+            <button class="btn xs" style="font-size:10px;padding:2px 7px" onclick="openEvCatSelector(G('ev-view-categories')?.classList.contains('primary')?'categories':'summary')" title="Configurar categorias e subcategorias (colunas, totais, exclusões)">⚙ Configurar</button>
+          </div>
           <div class="ev-cat-list" id="ev-cat-pills"></div>
         </div>
       </div>
