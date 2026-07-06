@@ -13736,19 +13736,16 @@ const GUIDE_TIPS = {
       </ul>` },
 
     { q: 'O que significam os modos de exibição de categoria e subcategoria?',
-      a: `<p>Clique em <strong>"⚙ Configurar"</strong>, ao lado do título "Categorias" no painel de filtros, pra ver e ajustar tudo de uma vez. As opções são:</p>
-      <p><strong>Para a categoria-mãe</strong> (quando ela tem subcategorias):</p>
-      <ul>
-        <li>📊 <strong>Total consolidado</strong> — a categoria-mãe soma tudo o que foi lançado nela E em todas as suas subcategorias.</li>
-        <li>📋 <strong>Só coluna própria</strong> — mostra só o que foi lançado diretamente na categoria-mãe, sem somar as subcategorias.</li>
-      </ul>
-      <p><strong>Para cada subcategoria</strong>, três opções independentes:</p>
+      a: `<p>No painel de filtros lateral, cada subcategoria tem um <strong>botãozinho ao lado do nome</strong> — clique nele pra alternar, em ciclo, entre 3 opções:</p>
       <ul>
         <li>📋 <strong>Coluna própria + no total</strong> — a subcategoria aparece com sua própria linha/coluna E entra na soma da categoria-mãe (se a mãe estiver no modo consolidado).</li>
         <li>⊂ <strong>Só no total</strong> — a subcategoria não tem linha própria visível, mas seu valor ainda entra somado no total da categoria-mãe.</li>
-        <li>✗ <strong>Excluir de tudo</strong> — a subcategoria não aparece em lugar nenhum, nem soma no total da mãe. Use isso pra gastos muito pontuais que distorceriam a leitura do resto (ex: uma subcategoria "Carro:Troca de carro" ou "Casa:Decoração" — um valor alto e raro que, se contasse no total de "Carro" ou "Casa" mês a mês, atrapalharia enxergar o padrão normal de gastos daquela categoria).</li>
+        <li>✗ <strong>Excluída de tudo</strong> — a subcategoria não aparece em lugar nenhum, nem soma no total da mãe. Use isso pra gastos muito pontuais que distorceriam a leitura do resto (ex: uma subcategoria "Carro:Troca de carro" ou "Casa:Decoração" — um valor alto e raro que, se contasse no total de "Carro" ou "Casa" mês a mês, atrapalharia enxergar o padrão normal de gastos daquela categoria).</li>
       </ul>
-      <p>💡 As mesmas opções também aparecem como atalho rápido nos "pills" do painel lateral — clique no pill pra incluir/excluir, e no botãozinho menor ao lado pra alternar entre os outros modos.</p>` },
+      <p>Clicar no botão de novo continua o ciclo e volta pra "Coluna própria" — é só ir clicando até achar a opção certa.</p>
+      <p>Já a <strong>categoria-mãe</strong> (quando tem subcategorias) tem seu próprio botãozinho, alternando só entre duas opções: 📊 <strong>Total consolidado</strong> (soma tudo dela + subcategorias) ou 📋 <strong>Só coluna própria</strong> (sem somar as subcategorias).</p>
+      <p>💡 Clicar diretamente no "pill" da categoria/subcategoria (não no botãozinho) inclui/exclui ela por inteiro dos gráficos — um atalho rápido, alternativo ao ciclo do botãozinho.</p>
+      <p>Prefere ajustar várias categorias de uma vez, numa lista só? Clique em <strong>"⚙ Configurar"</strong> ao lado do título "Categorias" pra ver e editar tudo junto, em um só lugar.</p>` },
 
     { q: 'Tabela ou Gráficos na Evolução?',
       a: `<p>Os dois modos mostram os mesmos dados, só a apresentação muda: <strong>Tabela</strong> é melhor pra conferir números exatos mês a mês; <strong>Gráficos</strong> é melhor pra enxergar tendências e picos visualmente de forma mais rápida.</p>` },
@@ -16991,9 +16988,13 @@ function evRenderCatPills() {
       const sMode = modeOf[sub] || 'self';
       const sExcluded = sMode === 'excluded';
       const subLabel = sub.split(':').slice(1).join(':');
+      const sTitle = sMode === 'excluded' ? 'Excluída de tudo (não conta em nada) — clique p/ mudar'
+                   : sMode === 'in-total' ? 'Só conta no total da categoria-mãe — clique p/ mudar'
+                   : 'Coluna própria + conta no total — clique p/ mudar';
+      const sIcon  = sMode === 'excluded' ? '✗' : sMode === 'in-total' ? '⊂' : '📋';
       html += `<div class="ev-pill-row ev-pill-row-sub">
         <button class="ev-cat-pill ev-cat-pill-sub ${sExcluded?'excluded':''}" data-cat="${esc(sub)}" data-key="${configKey}" onclick="evToggleCatPillMode(this)">${esc(subLabel)}</button>
-        ${(!sExcluded && isCategories) ? `<button class="ev-pill-mode-btn" data-cat="${esc(sub)}" data-key="${configKey}" data-modes="self,in-total" onclick="evCycleCatPillMode(this,event)" title="${sMode==='in-total'?'Só conta no total — clique p/ mudar':'Coluna própria + total — clique p/ mudar'}">${sMode==='in-total'?'⊂':'📋'}</button>` : ''}
+        ${isCategories ? `<button class="ev-pill-mode-btn" data-cat="${esc(sub)}" data-key="${configKey}" data-modes="self,in-total,excluded" onclick="evCycleCatPillMode(this,event)" title="${sTitle}">${sIcon}</button>` : ''}
       </div>`;
     });
   });
@@ -19220,7 +19221,12 @@ function refreshPatrimonioTable() {
   _inv.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
   _pat.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
   const months = [...monthSet].sort();
-  const COL_W = 130;
+  // 130px já não sobrava espaço pro "✎" (marcador de valor editado
+  // manualmente) quando o valor da célula chega em dezenas de milhões (ex:
+  // "R$ 15.237.924,00 ✎") — o texto extrapolava a largura fixa da coluna
+  // (definida via <colgroup>, que não se ajusta ao conteúdo como uma célula
+  // normal) e ficava visualmente desalinhado com as colunas vizinhas.
+  const COL_W = 165;
 
   // histMap
   const histMap = {};
@@ -20039,7 +20045,7 @@ function refreshPatrimonioTable() {
   // "Snap" do scroll: ao parar de rolar manualmente, ajusta pro início do
   // mês mais próximo. As colunas fixas (Ativo+Código+Cat.+Tipo/Tend.)
   // ocupam ESPAÇO REAL na tabela (460px), então os pontos de snap no eixo
-  // de scrollLeft são simplesmente múltiplos de COL_W (0, 130, 260, …).
+  // de scrollLeft são simplesmente múltiplos de COL_W (0, 165, 330, …).
   // Incluir STICKY_TOTAL (460) na fórmula introduziria um desvio de
   // 460 mod 130 = 70px — que é exatamente "antes do ponto do milhar"
   // nos valores monetários com alinhamento à direita.
