@@ -4568,6 +4568,7 @@ const BROKER_HELP_TEXT = {
   btg_broker: 'Como conseguir o extrato do BTG: acesse btgpactual.com, entre na sua conta, vá em "Documentos" → "Extrato de Investimentos". Clique em "Solicitar", escolha o período "Mês específico", tipo de documento "Consolidado" e formato "Excel (.xlsx)".',
   xp_broker: 'Como conseguir os documentos da XP (são dois arquivos): (1) Posição — menu "Minha Conta" → "Histórico de Carteira", selecione o mês e baixe em "XLS". (2) Movimentações — menu "Minha Conta" → "Saldo/Extrato" (da Conta Investimento), selecione um período acima de 30 dias e clique no botão com um X (exportar).',
   itau_broker: 'Como conseguir o extrato do Itaú: acesse itau.com.br, entre na sua conta, vá em Menu → Investimentos. No campo "Posição consolidada", clique em "Imprimir" e salve como PDF.',
+  santander_broker: 'Este é o mesmo PDF do "Extrato Consolidado Inteligente" usado para importar a conta corrente — a seção "Investimentos" já vem incluída nele, não precisa de um extrato separado da corretora.',
 };
 
 function ddItemHtml(p, type, isBuiltin) {
@@ -7062,6 +7063,8 @@ const BUILTIN_BROKERS = [
     logoUrl:'data:image/png;base64,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', logoBg:'#111111', logoFallback:'XP' },
   { id:'itau_broker', type:'broker', name:'Itaú', fileType:'PDF',
     logoUrl:'data:image/png;base64,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', logoBg:'#EC7000', logoFallback:'IT' },
+  { id:'santander_broker', type:'broker', name:'Santander', fileType:'PDF',
+    logoUrl:'data:image/png;base64,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', logoBg:'#fff', logoFallback:'SA' },
 ];
 
 let _customBrokerParsers = [];
@@ -7249,6 +7252,9 @@ async function processBrokerFile(file) {
       G('broker-result').innerHTML = '<div class="info-box">⏳ Lendo posição consolidada…</div>';
       const { assets, month, totalLiquido } = await parseItauInvestmentsPDF(_brokerBuffer);
       parsed = { month, assets, caixaValue: null, broker: 'Itaú', unresolvedMovements: [], totalLiquido };
+    } else if (_selectedBroker === 'santander_broker') {
+      G('broker-result').innerHTML = '<div class="info-box">⏳ Lendo posição consolidada…</div>';
+      parsed = await parseSantanderBroker(_brokerBuffer);
     } else {
       const custom = _customBrokerParsers.find(p => p.id === _selectedBroker);
       if (custom) {
@@ -10005,18 +10011,43 @@ async function parseSantanderPDF(buffer) {
 
 // ── Santander — investment position (PDF, embedded in the same "Extrato
 // Consolidado Inteligente" used for the checking-account parser) ──
-// Real quirks this works around (confirmed against an actual statement with
-// two different PDF text-extraction libraries):
+// Real quirks this works around (confirmed against real statements with two
+// different PDF text-extraction libraries):
 // 1) The per-asset "Movimentação" sub-tables (with literal SALDO ANTERIOR /
-//    SALDO ATUAL rows) are NOT present in the PDF's text layer at all — only
-//    visually, likely rendered as an image. The "Resumo" table (for CDB/LCA)
-//    and the numeric rows right after "Conta Fundo N" (for funds) ARE real
-//    text, and land on the exact same current-value numbers, so those are
-//    used instead.
-// 2) Column HEADER rows ("Produto", "Data da Aplicação" etc.) also don't
-//    extract — only the data row below them does. The asset's name is
-//    recovered by scanning that data row for the first date-like token
-//    ("DD/MM/YY") and taking everything before it.
+//    SALDO ATUAL rows, and their column headers) are NOT present in the
+//    PDF's text layer at all — only visually, rendered as an image. The
+//    "Resumo" table (for CDB/LCA/RDB) and the numeric rows right after
+//    "Conta Fundo N" (for funds) ARE real text and land on the exact same
+//    current-value numbers, so those are used instead.
+// 2) Like the checking-account statement (parseSantanderPDF), this PDF
+//    fragments every glyph into its own pdf.js text item and intercalates
+//    zero-width "space" artifacts between letters of the same word — a
+//    naive `.join(' ')` breaks every single marker this parser looks for
+//    ("CNPJ do Fundo" becomes "C N P J d o F u n d o", etc). Rows are
+//    reconstructed with _santanderDenseRowText (shared with the checking
+//    account parser), which only inserts a space where there's a real
+//    width gap between items.
+// A página de "Investimentos" deste mesmo extrato tem uma peculiaridade
+// AINDA PIOR que a do extrato de conta corrente: não existe NENHUM item de
+// espaço entre os glifos (nem os "fantasmas" de largura zero) — os
+// caracteres ficam simplesmente colados uns nos outros, e a única pista de
+// onde há um espaço de verdade é o VÃO de posição X entre o fim de um item
+// e o começo do próximo. Dentro de uma palavra/número esse vão é ~0-0.2pt
+// (kerning); entre palavras/colunas é sempre bem maior (~1.9pt pra cima) —
+// por isso um limiar de 0.5pt separa os dois casos com folga.
+function _santanderGapJoinRowText(items, gapThreshold = 0.5) {
+  let out = '';
+  let prevEnd = null;
+  for (const it of items) {
+    const t = it.text;
+    if (t.trim() === '') continue; // esta página não usa itens de espaço, mas ignora se aparecerem
+    if (prevEnd != null && (it.x - prevEnd) > gapThreshold && out && !out.endsWith(' ')) out += ' ';
+    out += t;
+    prevEnd = it.x + (it.w || 0);
+  }
+  return out.trim();
+}
+
 async function parseSantanderBroker(buffer) {
   await loadPdfJsLib();
   const pdf = await getPdfDocumentWithPassword(buffer);
@@ -10025,163 +10056,155 @@ async function parseSantanderBroker(buffer) {
   const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
   const MONTHS_PT = { janeiro:1, fevereiro:2, marco:3, abril:4, maio:5, junho:6,
     julho:7, agosto:8, setembro:9, outubro:10, novembro:11, dezembro:12 };
-  let statementMonth = null;
-  const isFooterRow = ntxt => ntxt.startsWith('extrato_pf') || ntxt.startsWith('balp_') || ntxt.startsWith('pagina') || /^extrato consolidado/.test(ntxt) || /^[a-z]+\/\d{4}$/.test(ntxt);
   function parseBRL(s) {
-    s = (s||'').trim();
-    if (s === '-' || s === '' || s === '—') return null;
-    const neg = s.endsWith('-');
-    s = s.replace(/-$/,'').replace(/[R$\s]/g,'').replace(/\./g,'').replace(',','.');
+    if (s == null) return null;
+    s = String(s).trim();
+    if (!s || s === '-' || s === '—') return null;
+    s = s.replace(/R\$/g,'').replace(/\./g,'').replace(',', '.').trim();
     const n = parseFloat(s);
-    if (isNaN(n)) return null;
-    return neg ? -n : n;
+    return isNaN(n) ? null : n;
   }
-  const DATE_RE = /^\d{2}\/\d{2}\/\d{2,4}$/;
-  const RF_SUBTYPES = ['CDB/RDB', 'LCA/LCI/LIG', 'CRI/CRA', 'DEBENTURES', 'TESOURO DIRETO'];
-  const compact = s => s.replace(/\s+/g,'').replace(/\//g,'');
+  const MONEY_RE = /^-?[\d.]+,\d{2}$/;
 
-  // Classifica categoria/tipo do app a partir do subtipo da Renda Fixa (ou
-  // de "fundos") + nome do ativo — mesmo critério já usado pra XP/Itaú/BTG.
-  function classifySantanderAsset(subtype, name) {
+  // Classifica categoria/tipo do app a partir do nome do ativo — mesmo
+  // critério já usado pra XP/Itaú/BTG.
+  function classifySantanderAsset(name, isFund) {
     const n = (name||'').toUpperCase();
-    if (subtype === 'CDB/RDB') return { category:'renda_fixa', inv_type: n.includes('RDB') ? 'RDB' : 'CDB' };
-    if (subtype === 'LCA/LCI/LIG') {
-      if (n.includes('LCI')) return { category:'renda_fixa', inv_type:'LCI' };
-      if (n.includes('LIG')) return { category:'renda_fixa', inv_type:'LCI' };
-      return { category:'renda_fixa', inv_type:'LCA' };
+    if (isFund) {
+      if (n.includes('MULTIMERCADO')) return { category:'fundos', inv_type:'Fundo Multimercado' };
+      if (n.includes('AÇÕES') || n.includes('ACOES')) return { category:'fundos', inv_type:'Fundo de Ações' };
+      if (n.includes('CAMBIAL')) return { category:'fundos', inv_type:'Fundo Cambial' };
+      if (n.includes('RENDA FIXA')) return { category:'fundos', inv_type:'Fundo Renda Fixa' };
+      return { category:'fundos', inv_type:'Fundo Multimercado' };
     }
-    if (subtype === 'CRI/CRA') return { category:'renda_fixa', inv_type: n.includes('CRA') ? 'CRA' : 'CRI' };
-    if (subtype === 'DEBENTURES') return { category:'renda_fixa', inv_type:'Debênture' };
-    if (subtype === 'TESOURO DIRETO') {
-      if (/IPCA/.test(n)) return { category:'tesouro', inv_type:'Tesouro IPCA+' };
-      if (/PREFIXADO/.test(n)) return { category:'tesouro', inv_type:'Tesouro Prefixado' };
-      return { category:'tesouro', inv_type:'Tesouro SELIC' };
-    }
-    // Fundos
-    if (n.includes('MULTIMERCADO')) return { category:'fundos', inv_type:'Fundo Multimercado' };
-    if (n.includes('AÇÕES') || n.includes('ACOES')) return { category:'fundos', inv_type:'Fundo de Ações' };
-    if (n.includes('CAMBIAL')) return { category:'fundos', inv_type:'Fundo Cambial' };
-    return { category:'fundos', inv_type:'Fundo Renda Fixa' };
+    if (/^CDB\b/.test(n)) return { category:'renda_fixa', inv_type:'CDB' };
+    if (/^RDB\b/.test(n)) return { category:'renda_fixa', inv_type:'RDB' };
+    if (/^LCI\b/.test(n)) return { category:'renda_fixa', inv_type:'LCI' };
+    if (/^LCA\b/.test(n)) return { category:'renda_fixa', inv_type:'LCA' };
+    if (/^LC\b/.test(n))  return { category:'renda_fixa', inv_type:'LC' };
+    if (/^CRI\b/.test(n)) return { category:'renda_fixa', inv_type:'CRI' };
+    if (/^CRA\b/.test(n)) return { category:'renda_fixa', inv_type:'CRA' };
+    return { category:'renda_fixa', inv_type:'CDB' };
   }
 
-  // ── Extrai todas as linhas (Y agrupado), de todas as páginas, em fluxo
-  // contínuo, com deslocamento por página.
+  // Fluxo (aplicação/resgate) só existe, neste extrato, como AGREGADO
+  // mensal do fundo (colunas "Aplicações"/"Resgates" da Posição Consolidada
+  // em Reais) — não há como saber a data exata de cada lançamento individual,
+  // já que a tabela granular é a que está faltando no PDF (ver comentário
+  // acima). Mesma convenção de sinal do BTG/Itaú: aplicação = saída de caixa
+  // do investidor (-), resgate = entrada de caixa pro investidor (+).
+
+  // ── Reconstrói todas as linhas de todas as páginas, num fluxo único,
+  // parando ao alcançar o início do "Pacote de Serviços" ──
   const allRows = [];
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+  let stmtMonth = null;
+  let stopAll = false;
+  for (let pageNum = 1; pageNum <= pdf.numPages && !stopAll; pageNum++) {
     const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
     const viewport = page.getViewport({ scale: 1 });
-    const items = content.items
-      .filter(it => it.str.trim() !== '')
-      .map(it => ({ x: it.transform[4], y: (viewport.height - it.transform[5]) + pageNum * 2000, text: it.str.trim() }));
-    items.sort((a,b) => a.y - b.y || a.x - b.x);
-    let cur = [], curY = null;
-    for (const it of items) {
-      if (curY === null || Math.abs(it.y - curY) > 2.5) {
-        if (cur.length) allRows.push(cur);
-        cur = [it]; curY = it.y;
-      } else {
-        cur.push(it);
+    const rows = {};
+    content.items.filter(it => it.str.trim() !== '').forEach(it => {
+      const y = Math.round(viewport.height - it.transform[5]);
+      (rows[y] = rows[y] || []).push({ x: it.transform[4], w: it.width, text: it.str.trim() });
+    });
+    const ys = Object.keys(rows).map(Number).sort((a,b) => a - b);
+    for (const y of ys) {
+      const items = rows[y].sort((a,b) => a.x - b.x);
+      const lineText = _santanderGapJoinRowText(items);
+      const lineNormNoSpace = norm(lineText).replace(/\s+/g, '');
+      if (!stmtMonth) {
+        const m = lineNormNoSpace.match(/(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\/(\d{4})/i);
+        if (m) stmtMonth = `${m[2]}-${String(MONTHS_PT[norm(m[1])]).padStart(2,'0')}`;
       }
-    }
-    if (cur.length) allRows.push(cur);
-
-    if (pageNum === 1 && !statementMonth) {
-      for (const it of items) {
-        const m = norm(it.text).match(/(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\/(\d{4})/);
-        if (m) { statementMonth = `${m[2]}-${String(MONTHS_PT[m[1]]).padStart(2,'0')}`; break; }
-      }
+      if (lineNormNoSpace.startsWith('movimentacoesdeconta')) { stopAll = true; break; } // início do "Pacote de Serviços"
+      allRows.push(lineText);
     }
   }
 
   const assets = [];
-  const pendingApps = []; // [{ subtype, name }]
-  let currentSubtype = null;
-  let awaitingAppRow = false;
+
+  // Renda fixa: "<nome> DD/MM/AA <valor aplicado> <indexador> DD/MM/AA <pagamento de juros>"
+  const PRODUCT_ROW_RE = /^(.+?)\s+(\d{2}\/\d{2}\/\d{2,4})\s+([\d.]+,\d{2})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{2,4})\s+(.+)$/;
+  // Resumo: "<rótulo> <rendimento> <valor bruto> <valor líquido>"
+  const RESUMO_ROW_RE = /^(.+?)\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})$/;
+
+  const rendaFixaPending = []; // [{name}] na ordem de aparição
+  const resumoRows = [];       // [{valorLiquido}] na ordem de aparição
   let inResumo = false;
-  let currentFundName = null;
-  let fundNumRows = [];
-
-  const rowText = row => row.map(w => w.text).join(' ');
-
-  function finalizeFund() {
-    if (currentFundName && fundNumRows.length >= 2) {
-      const valor = fundNumRows[1][0];
-      const { category, inv_type } = classifySantanderAsset(null, currentFundName);
-      assets.push({ name: currentFundName, category, inv_type, broker: 'Santander', valor, movimentacoes: [] });
-    }
-    currentFundName = null;
-    fundNumRows = [];
-  }
 
   for (let i = 0; i < allRows.length; i++) {
-    const row = allRows[i];
-    const txt = rowText(row);
-    const ntxt = norm(txt);
+    const line = allRows[i].trim();
+    if (!line) continue;
+    const lineNorm = norm(line);
 
-    if (isFooterRow(ntxt)) continue;
-    if (ntxt.startsWith('movimentacoes de conta')) break; // início do "Pacote de Serviços" — acabou a parte que interessa
-
-    let matchedSub = null;
-    for (const sub of RF_SUBTYPES) {
-      if (compact(ntxt) === compact(norm(sub))) { matchedSub = sub; break; }
-    }
-    if (matchedSub) { currentSubtype = matchedSub; continue; }
-
-    if (ntxt.startsWith('aplicacao n')) { awaitingAppRow = true; continue; }
-
-    if (awaitingAppRow) {
-      const dateIdx = row.findIndex(w => DATE_RE.test(w.text));
-      if (dateIdx > 0) {
-        const name = row.slice(0, dateIdx).map(w => w.text).join(' ');
-        pendingApps.push({ subtype: currentSubtype, name });
-      }
-      awaitingAppRow = false;
-      continue;
-    }
-
-    if (ntxt === 'resumo') { inResumo = true; continue; }
-
+    if (lineNorm === 'resumo') { inResumo = true; continue; }
     if (inResumo) {
-      if (ntxt.startsWith('total')) { inResumo = false; continue; }
-      const numIdx = [];
-      row.forEach((w, j) => { if (parseBRL(w.text) != null) numIdx.push(j); });
-      if (numIdx.length >= 3) {
-        // Pareamento por ORDEM (não por semelhança de palavras): o Resumo
-        // lista os tipos na mesma ordem em que as aplicações apareceram, e o
-        // vocabulário do rótulo (ex: "LCA/LCI/LIG CDI") não bate com o nome
-        // da aplicação específica (ex: "LCA DI SANTANDER").
-        const valorLiquido = parseBRL(row[numIdx[numIdx.length-1]].text);
-        const best = pendingApps.find(ap => !ap._assigned);
-        if (best) {
-          best._assigned = true;
-          const { category, inv_type } = classifySantanderAsset(best.subtype, best.name);
-          assets.push({ name: best.name, category, inv_type, broker: 'Santander', valor: valorLiquido, movimentacoes: [] });
+      if (lineNorm.startsWith('total')) { inResumo = false; continue; }
+      const rm = line.match(RESUMO_ROW_RE);
+      if (rm) { resumoRows.push({ valorLiquido: parseBRL(rm[4]) }); continue; }
+    }
+
+    // Produto de renda fixa (CDB/RDB, LCA/LCI/LIG, etc.) — o nome do ativo
+    // fica na coluna "Produto" dessa mesma linha de dados.
+    const pm = line.match(PRODUCT_ROW_RE);
+    if (pm) { rendaFixaPending.push({ name: pm[1].trim() }); continue; }
+
+    // Fundo de investimento — nome fica na linha ACIMA de "CNPJ do Fundo".
+    if (lineNorm.startsWith('cnpj do fundo')) {
+      let j = i - 1;
+      while (j >= 0 && !allRows[j].trim()) j--;
+      const fundName = j >= 0 ? allRows[j].trim() : null;
+      if (!fundName) continue;
+
+      // Posição Consolidada em Reais (R$): Saldo Anterior, Aplicações,
+      // Resgates, Transferências, Rendimento no mês, Saldo Bruto Final — 6
+      // valores monetários na mesma linha (o cabeçalho da tabela é imagem,
+      // só a linha de dados sobrevive como texto).
+      let posReais = null, saldoLiquido = null;
+      for (let k = i + 1; k < Math.min(i + 40, allRows.length); k++) {
+        const toks = allRows[k].trim().split(/\s+/).filter(Boolean);
+        if (!posReais && toks.length === 6 && toks.every(t => MONEY_RE.test(t))) {
+          posReais = toks.map(parseBRL);
+          continue;
+        }
+        // Saldo Líquido Disponível, Rendimento Bruto Base IR, Perdas
+        // Compensadas — 3 valores, na primeira linha de 3 números após a de 6.
+        if (posReais && toks.length === 3 && toks.every(t => MONEY_RE.test(t))) {
+          saldoLiquido = toks.map(parseBRL);
+          break;
         }
       }
+      if (saldoLiquido) {
+        const { category, inv_type } = classifySantanderAsset(fundName, true);
+        const movimentacoes = [];
+        const aplicacoes = posReais ? posReais[1] : 0;
+        const resgates    = posReais ? posReais[2] : 0;
+        // Só a soma mensal está disponível (ver comentário no topo) — usa a
+        // data de fechamento do extrato como data do lançamento agregado.
+        const dueDate = stmtMonth ? `${stmtMonth}-28` : null;
+        if (aplicacoes > 0.005) movimentacoes.push({ type: 'Aplicação', amount: -aplicacoes, flow_type: 'external', date: dueDate });
+        if (resgates   > 0.005) movimentacoes.push({ type: 'Resgate',   amount:  resgates,   flow_type: 'external', date: dueDate });
+        assets.push({ name: fundName, category, inv_type, broker: 'Santander', valor: saldoLiquido[0], movimentacoes });
+      }
       continue;
-    }
-
-    if (ntxt.startsWith('cnpj do fundo')) {
-      finalizeFund();
-      let j = i - 1;
-      while (j >= 0 && isFooterRow(norm(rowText(allRows[j])))) j--;
-      currentFundName = j >= 0 ? rowText(allRows[j]).trim() : null;
-      fundNumRows = [];
-      continue;
-    }
-
-    if (ntxt.startsWith('conta fundo')) continue;
-
-    if (currentFundName) {
-      const nums = row.map(w => parseBRL(w.text)).filter(n => n != null);
-      if (nums.length >= 2) fundNumRows.push(nums);
     }
   }
-  finalizeFund();
 
-  return { month: statementMonth, assets, caixaValue: null, broker: 'Santander', unresolvedMovements: [] };
+  // Combina cada produto de renda fixa com sua linha do "Resumo",
+  // POSICIONALMENTE (na ordem de aparição) — o rótulo do Resumo (ex: "LCA/
+  // LCI/LIG CDI") não bate com o nome do produto (ex: "LCA DI SANTANDER"),
+  // mas a ordem de listagem é sempre a mesma.
+  rendaFixaPending.forEach((p, idx) => {
+    const r = resumoRows[idx];
+    if (!r) return;
+    const { category, inv_type } = classifySantanderAsset(p.name, false);
+    assets.push({ name: p.name, category, inv_type, broker: 'Santander', valor: r.valorLiquido, movimentacoes: [] });
+  });
+
+  return { month: stmtMonth, assets, caixaValue: null, broker: 'Santander', unresolvedMovements: [] };
 }
+
 
 // ── Itaú Corretora — investment position statement (PDF) ──
 // Layout: each category ("Fundos de Investimento", "Tesouro Direto" etc.) is
