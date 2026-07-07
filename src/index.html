@@ -3525,7 +3525,7 @@ select.inp option{background:var(--bg2);}
 
 <!-- Transfer -->
 <div class="overlay" id="modal-transfer">
-  <div class="modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'&&event.target.tagName!=='BUTTON'){event.preventDefault();saveTransfer();}">
     <div class="modal-hdr">
       <h3 data-i18n="transfer_title">Transferência entre contas</h3>
       <button class="btn-icon" onclick="closeModal('modal-transfer')">✕</button>

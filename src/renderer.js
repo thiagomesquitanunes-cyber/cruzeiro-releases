@@ -4866,13 +4866,10 @@ function toggleImportDropdown(type) {
   }
 
   if (!isOpen && type !== '__close__') {
-    // Position below the trigger button using fixed coords
+    // Position below the trigger button using fixed coords — mas nunca
+    // ultrapassando o limite inferior da tela (positionDropdownAvoidingOverflow).
     const btn = G(`import-dd-${type}-wrap`)?.querySelector('button');
-    if (btn) {
-      const rect = btn.getBoundingClientRect();
-      dd.style.top  = (rect.bottom + 4) + 'px';
-      dd.style.left = rect.left + 'px';
-    }
+    if (btn) positionDropdownAvoidingOverflow(dd, btn.getBoundingClientRect(), window.innerHeight * 0.7, 150);
     dd.style.display = 'block';
     if (arrow) arrow.textContent = '▴';
   }
@@ -7130,6 +7127,30 @@ function renderBrokerDropdown() {
   }
 }
 
+// Posiciona um dropdown (position:fixed) logo abaixo de `rect` (a
+// getBoundingClientRect do elemento-gatilho), sem nunca ultrapassar o limite
+// inferior da tela — se não houver espaço suficiente embaixo, abre pra cima;
+// senão, limita a altura máxima ao espaço realmente disponível (mantendo o
+// scroll interno do próprio dropdown pra sobra de itens). Usado por todos os
+// dropdowns "soltos" do app (categoria, banco/cartão/corretora na importação)
+// — sem isso, em monitores mais baixos ou com o campo perto do fim da tela,
+// o dropdown ficava parcialmente inacessível (sem como rolar até o fim).
+function positionDropdownAvoidingOverflow(dd, rect, maxHeightPx, minHeightPx = 120) {
+  const MARGIN = 8;
+  const spaceBelow = window.innerHeight - rect.bottom - MARGIN;
+  const spaceAbove = rect.top - MARGIN;
+  if (spaceBelow < minHeightPx && spaceAbove > spaceBelow) {
+    dd.style.maxHeight = Math.min(maxHeightPx, spaceAbove) + 'px';
+    dd.style.top = 'auto';
+    dd.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+  } else {
+    dd.style.maxHeight = Math.min(maxHeightPx, Math.max(minHeightPx, spaceBelow)) + 'px';
+    dd.style.bottom = 'auto';
+    dd.style.top = (rect.bottom + 4) + 'px';
+  }
+  dd.style.left = rect.left + 'px';
+}
+
 function toggleBrokerDropdown() {
   const dd = G('import-dd-broker');
   if (!dd) return;
@@ -7146,11 +7167,7 @@ function toggleBrokerDropdown() {
   if (bankFieldRow) bankFieldRow.style.display = 'none';
   if (!isOpen) {
     const btn = G('import-dd-broker-wrap')?.querySelector('button');
-    if (btn) {
-      const rect = btn.getBoundingClientRect();
-      dd.style.top  = (rect.bottom + 4) + 'px';
-      dd.style.left = rect.left + 'px';
-    }
+    if (btn) positionDropdownAvoidingOverflow(dd, btn.getBoundingClientRect(), window.innerHeight * 0.7, 150);
     dd.style.display = 'block';
     const ar = G('import-dd-broker-arrow'); if (ar) ar.textContent = '▴';
   }
@@ -9022,8 +9039,7 @@ function renderBrokerPreview(parsed) {
       ? hits.map(n => `<div class="cat-opt" onmousedown="window._pickBrokerName('${esc2(n)}')">${esc(n)}</div>`).join('')
       : '<div class="cat-opt" style="color:var(--text3)">Nenhum ativo cadastrado</div>';
     const rect = inp.getBoundingClientRect();
-    drop.style.top   = (rect.bottom + 2) + 'px';
-    drop.style.left  = rect.left + 'px';
+    positionDropdownAvoidingOverflow(drop, rect, 280, 120);
     drop.style.width = Math.max(rect.width, 240) + 'px';
     drop.style.display = 'block';
   };
@@ -12151,8 +12167,12 @@ function openGlobalCatDrop(inputEl) {
   }
   drop.innerHTML = html;
   const rect = inputEl.getBoundingClientRect();
-  drop.style.top  = (rect.bottom + 2) + 'px';
-  drop.style.left = rect.left + 'px';
+  // Evita o dropdown ultrapassar o limite inferior da tela (ficando
+  // parcialmente inacessível, sem como rolar até as últimas categorias) —
+  // acontecia em monitores mais baixos/janelas menores, quando o campo de
+  // categoria está perto do fim da tela (comum na tabela de importação,
+  // com muitas linhas).
+  positionDropdownAvoidingOverflow(drop, rect, 280, 120);
   drop.style.width = Math.max(rect.width, 260) + 'px';
   drop.style.display = 'block';
 
@@ -15631,11 +15651,22 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   // bug visto: meses viravam barras finíssimas, ilegíveis).
   const STICKY_W = [170, 120, 80, 80];
   const MONTH_W  = [120, 60]; // realizado, %
-  const totalWidth = STICKY_W.reduce((a,b)=>a+b,0) + months.length * MONTH_W.reduce((a,b)=>a+b,0);
+  // Coluna extra, em branco, ao final da tabela — existe só pra "absorver"
+  // o corte quando a largura da tela não é um múltiplo exato da largura das
+  // colunas de mês. Sem ela, ao rolar até o mês atual (o mais importante de
+  // ver por inteiro), o navegador limita o scroll ao espaço realmente
+  // disponível (scrollWidth - clientWidth) — e como esse limite depende do
+  // tamanho do monitor/janela, quase nunca cai exatamente no início de uma
+  // coluna, cortando o próprio mês atual ao meio. O tamanho inicial aqui é
+  // só um placeholder; é ajustado pra cobrir a tela real logo abaixo, depois
+  // que a tabela já está no DOM (precisa medir o clientWidth de verdade).
+  const TRAIL_W_INITIAL = 60;
+  const totalWidth = STICKY_W.reduce((a,b)=>a+b,0) + months.length * MONTH_W.reduce((a,b)=>a+b,0) + TRAIL_W_INITIAL;
   liveTable.style.tableLayout = 'fixed';
   liveTable.style.width = totalWidth + 'px';
   let colgroup = '<colgroup>' + STICKY_W.map(w => `<col style="width:${w}px">`).join('');
   months.forEach(() => { colgroup += `<col style="width:${MONTH_W[0]}px"><col style="width:${MONTH_W[1]}px">`; });
+  colgroup += `<col id="budget-trail-col" style="width:${TRAIL_W_INITIAL}px">`;
   colgroup += '</colgroup>';
 
   const monthHeaderBg = m => m === curMonthStr ? 'background:#f1f8e9' : '';
@@ -15650,6 +15681,7 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
       <th class="budget-sticky budget-sticky-3 center" rowspan="2">% atual</th>
       <th class="budget-sticky budget-sticky-4 center" rowspan="2" title="Soma do realizado dividida pela soma do planejado nos últimos 12 meses (inclui o mês atual)">% 12 meses</th>
       ${months.map(m => `<th colspan="2" style="${monthHeaderBg(m)};padding:0"><div style="display:flex;align-items:center;justify-content:center;padding:8px 12px">${monthLabelShort(m)}</div></th>`).join('')}
+      <th rowspan="2" style="border:none"></th>
     </tr>
     <tr>
       ${months.map(m => `<th class="right budget-month-col" style="font-weight:500;${monthHeaderBg(m)}">Realizado</th><th class="center budget-pct-col" style="font-weight:500;${monthHeaderBg(m)}">%</th>`).join('')}
@@ -15676,6 +15708,7 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
       row += `<td class="right" style="background:${bg};color:#fff;font-weight:700;font-family:'DM Mono',monospace">${fmtBRL(actual)}</td>`;
       row += `<td class="center" style="background:${bg};color:#fff;font-weight:700">${actual !== 0 ? pct.toFixed(0)+'%' : ''}</td>`;
     });
+    row += `<td style="background:${bg}"></td>`;
     return row + '</tr>';
   }
 
@@ -15727,6 +15760,7 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
       row += `<td class="right"${clickable} style="background:${stripe};font-family:'DM Mono',monospace">${actual !== 0 ? fmtBRL(actual) : '—'}</td>`;
       row += `<td class="center" style="background:${stripe};color:${cellColor}">${actual !== 0 ? pct.toFixed(0)+'%' : ''}</td>`;
     });
+    row += `<td style="background:${stripe}"></td>`;
     return row + '</tr>';
   }
 
@@ -15759,9 +15793,25 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   // da largura de uma coluna de mês, cortando o mês atual ao meio).
   const STICKY_TOTAL = STICKY_W.reduce((a,b)=>a+b,0); // 170+120+80+80=450 — onde as colunas de mês de fato começam
   const MONTH_COL_WIDTH = MONTH_W[0] + MONTH_W[1]; // realizado + %
-  if (scroll && curMonthIdx >= 0) {
+  // Redimensiona a coluna em branco final pra garantir que sempre sobre
+  // scrollWidth suficiente pra rolar até o mês atual sem o navegador
+  // limitar (clamping) o scrollLeft à posição máxima disponível. Sem isso,
+  // em telas largas o navegador reduz sozinho o scrollLeft pedido pra caber
+  // no espaço rolável real — e como esse limite depende do tamanho da
+  // janela/monitor, quase nunca cai exatamente no início de uma coluna,
+  // cortando o próprio mês atual ao meio. Precisa medir o clientWidth DEPOIS
+  // que a tabela já está no DOM (por isso o setTimeout) — window.innerWidth
+  // sozinho não reflete o espaço realmente visível dentro do scroll-container.
+  setTimeout(() => {
+    if (!scroll || curMonthIdx < 0) return;
+    const trailCol = document.getElementById('budget-trail-col');
+    const neededTrail = Math.max(TRAIL_W_INITIAL, Math.ceil(scroll.clientWidth - STICKY_TOTAL - MONTH_COL_WIDTH) + 40);
+    if (trailCol && neededTrail > TRAIL_W_INITIAL) {
+      trailCol.style.width = neededTrail + 'px';
+      liveTable.style.width = (totalWidth - TRAIL_W_INITIAL + neededTrail) + 'px';
+    }
     scroll.scrollLeft = curMonthIdx * MONTH_COL_WIDTH;
-  }
+  }, 30);
 
   // "Snap" do scroll: ao parar de rolar, ajusta pro início do mês mais
   // próximo — sem isso, o usuário precisa "mirar" pra não cortar uma
@@ -15772,9 +15822,10 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   if (scroll && !scroll._snapBound) {
     scroll._snapBound = true;
     let isSnapping = false;
+    const maxValidLeft = Math.max(0, (months.length - 1) * MONTH_COL_WIDTH); // nunca "snapar" pra dentro da coluna em branco final
     const doSnap = () => {
       if (isSnapping) return;
-      const nearest = Math.round(scroll.scrollLeft / MONTH_COL_WIDTH) * MONTH_COL_WIDTH;
+      const nearest = Math.min(maxValidLeft, Math.round(scroll.scrollLeft / MONTH_COL_WIDTH) * MONTH_COL_WIDTH);
       if (Math.abs(scroll.scrollLeft - nearest) > 1) {
         isSnapping = true;
         scroll.scrollTo({ left: nearest, behavior: 'smooth' });
