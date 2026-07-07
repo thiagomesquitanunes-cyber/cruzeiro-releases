@@ -4580,7 +4580,7 @@ function bankLogoHtml(p, size=24) {
 const BROKER_HELP_TEXT = {
   btg_broker: 'Como conseguir o extrato do BTG: acesse btgpactual.com, entre na sua conta, vá em "Documentos" → "Extrato de Investimentos". Clique em "Solicitar", escolha o período "Mês específico", tipo de documento "Consolidado" e formato "Excel (.xlsx)".',
   xp_broker: 'Como conseguir os documentos da XP (são dois arquivos): (1) Posição — menu "Minha Conta" → "Histórico de Carteira", selecione o mês e baixe em "XLS". (2) Movimentações — menu "Minha Conta" → "Saldo/Extrato" (da Conta Investimento), selecione um período acima de 30 dias e clique no botão com um X (exportar).',
-  itau_broker: 'Como conseguir o extrato do Itaú: no app/site do Itaú Personnalité, vá no menu no canto superior esquerdo, clique em "Investimentos", e no link "Carteira de investimentos" (dentro do quadro de Posição Consolidada, logo abaixo da linha com o total investido) — esse é o formato mais completo e recomendado. Alternativamente, o extrato mensal comum ("Extrato Consolidado Inteligente") também traz a seção "02. Investimentos" com os dados necessários.',
+  itau_broker: 'Como conseguir o extrato do Itaú: no app/site do Itaú Personnalité, vá no menu no canto superior esquerdo, clique em "Investimentos", e no link "Carteira de investimentos" (dentro do quadro de Posição Consolidada, logo abaixo da linha com o total investido) — esse é o formato mais completo e recomendado. Alternativamente, o extrato mensal comum ("Extrato Consolidado Inteligente") também traz a seção "02. Investimentos" com os dados necessários. ⚠️ Nenhum dos dois formatos traz o detalhe das movimentações do investimento (resgates, aportes, rendimentos etc.) — eles só mostram a posição (o saldo) de cada mês. Depois de importar, você precisa lançar essas movimentações manualmente na aba Patrimônio, se quiser esse detalhamento.',
   santander_broker: 'Este é o mesmo PDF do "Extrato Consolidado Inteligente" usado para importar a conta corrente — a seção "Investimentos" já vem incluída nele, não precisa de um extrato separado da corretora.',
 };
 
@@ -6668,7 +6668,16 @@ function parseBankItau(buffer) {
     const date = pDate(row[di]);
     if (!date) continue;
     const amount = pVal(row[vi]);
-    const saldo  = si >= 0 ? pVal(row[si]) : null;
+    // O Itaú só preenche a coluna "Saldo" em ALGUMAS linhas (normalmente a
+    // última movimentação de cada dia) — a maioria fica em branco. pVal('')
+    // retorna 0 (célula vazia ≠ "saldo zero de verdade"), então usar pVal
+    // direto fazia quase toda linha sem saldo aparente virar saldo:0 — que,
+    // numa conta recém-criada/zerada (saldo real também 0), batia com TODAS
+    // as datas na conferência por saldo diário e fazia o app presumir o
+    // extrato inteiro como já importado. Célula vazia precisa virar null
+    // ("sem informação"), não 0.
+    const rawSaldo = si >= 0 ? row[si] : null;
+    const saldo = (rawSaldo === null || rawSaldo === undefined || String(rawSaldo).trim() === '') ? null : pVal(rawSaldo);
     res.push({ date, desc: rawDesc, memo: rawDesc, amount, saldo, category: '' });
   }
   return res;
@@ -13952,7 +13961,16 @@ const GUIDE_TIPS = {
     { q: 'Como funciona "Acumular saldo (rollover)"?',
       a: `<p>É o estilo "envelope": se em um mês você gastou menos que o planejado, a <strong>diferença que sobrou</strong> soma ao limite do mês seguinte (dando mais folga); se gastou mais, o excesso é <strong>descontado</strong> do limite do mês seguinte (menos folga).</p>
       <p>O campo <strong>"Acumular no máximo (meses)"</strong> limita quantos meses anteriores entram nessa conta — por exemplo, com o valor 3, só os últimos 3 meses contam pro acúmulo, em vez do histórico inteiro.</p>
-      <p>💡 Útil para categorias como "Presentes" ou "Manutenção da casa", onde é normal um mês gastar pouco e outro gastar mais — o rollover deixa o orçamento acompanhar essa variação natural em vez de travar num valor fixo mês a mês.</p>` },
+      <p>💡 Útil para categorias como "Presentes" ou "Manutenção da casa", onde é normal um mês gastar pouco e outro gastar mais — o rollover deixa o orçamento acompanhar essa variação natural em vez de travar num valor fixo mês a mês.</p>
+      <p>O card <strong>"💰 Poupança planejada"</strong>, no topo da tela, usa só o planejamento puro do mês atual (sem somar o rollover) — mas mostra, numa linha menor abaixo do valor, quanto de folga extra você tem disponível vindo de sobras de meses anteriores, caso queira usar.</p>` },
+
+    { q: 'Como ver o que está sendo considerado no "Realizado"?',
+      a: `<p>Clique em cima de qualquer valor de <strong>Realizado</strong> na tabela — abre o detalhamento de todas as transações daquele mês que entraram na conta, categoria por categoria (incluindo subcategorias, se a categoria estiver consolidada).</p>
+      <p>💡 O valor de Realizado é sempre o <strong>saldo líquido</strong> da categoria: para uma categoria de despesa, é a despesa menos qualquer receita/estorno lançado na mesma categoria (ex: um reembolso) — e vice-versa para categorias de receita. Assim, um reembolso não some "escondido"; ele reduz corretamente o quanto você gastou de verdade.</p>` },
+
+    { q: 'O que é a coluna "% 12 meses"?',
+      a: `<p>Ao lado de "% atual" (que compara só o mês selecionado), essa coluna mostra o <strong>cumprimento acumulado da meta nos últimos 12 meses</strong>: soma tudo que foi realizado nesses 12 meses e divide pela soma do planejado no mesmo período.</p>
+      <p>💡 Útil pra enxergar um padrão mais estável — um único mês fora da curva (bom ou ruim) pesa menos aqui do que na coluna "% atual".</p>` },
 
     { q: 'O que é o painel de "categorias com gasto mas sem planejamento"?',
       a: `<p>Lista as categorias em que você teve despesa no mês, mas <strong>ainda não criou uma meta de orçamento</strong> pra elas — pra você não perder de vista um gasto relevante só porque esqueceu de planejar aquela categoria.</p>
@@ -14025,6 +14043,11 @@ const GUIDE_TIPS = {
     { q: 'O que faz o botão "Mostrar ocultos"?',
       a: `<p>Contas, bens ou investimentos marcados como <strong>ocultos</strong> ficam fora da lista visível por padrão — é só uma forma de "arrumar a mesa" e não poluir a tela com itens que você não quer ver toda hora (ex: uma conta antiga já encerrada, mas que você quer manter no histórico).</p>
       <p>⚠️ <strong>Importante:</strong> ocultar um item <strong>não</strong> tira ele das totalizações nem dos gráficos — ele continua contando normalmente no "Total Patrimônio" e em todos os cálculos, só não aparece na lista enquanto "Mostrar ocultos" estiver desmarcado. É uma questão só de visualização, não de cálculo.</p>` },
+
+    { q: 'Para que serve o seletor de "Período" no topo da tabela?',
+      a: `<p>Controla quantos meses de colunas aparecem na tabela por vez — 3 meses, 6 meses (padrão), 12 meses, 2 anos ou todo o histórico.</p>
+      <p>💡 Se você já tem bastante histórico acumulado, mostrar tudo de uma vez deixa a tabela pesada e lenta pra rolar. Reduzir o período mostra só os meses mais recentes, o que deixa a tela bem mais rápida — sem perder nada: os totais, o saldo devedor, o ganho/perda e todos os outros cálculos continuam considerando o histórico <strong>completo</strong> por baixo dos panos, só a quantidade de colunas exibidas muda.</p>
+      <p>Quer conferir um mês específico mais antigo? Basta aumentar o período (ou escolher "Todo o histórico") temporariamente.</p>` },
 
     { q: 'Como excluir vários itens de uma vez (em lote)?',
       a: `<p>Além do ✕ que exclui um item individualmente, cada linha de <strong>bem/direito</strong>, <strong>investimento</strong> e <strong>dívida</strong> tem uma <strong>caixinha de seleção</strong> na coluna de ações (à direita).</p>
@@ -15436,13 +15459,12 @@ async function refreshBudget() {
     byMonth[r.month][r.category] = { income: r.income||0, expenses: r.expenses||0 };
   });
 
-  // Todo o histórico disponível, do primeiro mês com dados até 3 meses no
-  // futuro (pra dar visibilidade do planejamento à frente) — sem seletor
-  // de ano: tudo num único scroll horizontal contínuo.
+  // Todo o histórico disponível, do primeiro mês com dados até o mês atual
+  // (sem meses futuros) — sem seletor de ano: tudo num único scroll
+  // horizontal contínuo.
   const dataMonths = Object.keys(byMonth).sort();
   const firstMonth = dataMonths.length ? dataMonths[0] : curMonthStr;
-  const lastDate = new Date(curMonthStr + '-02'); lastDate.setMonth(lastDate.getMonth() + 12);
-  const lastMonth = `${lastDate.getFullYear()}-${String(lastDate.getMonth()+1).padStart(2,'0')}`;
+  const lastMonth = curMonthStr;
   const months = [];
   { let cur = firstMonth;
     while (cur <= lastMonth) {
@@ -15453,18 +15475,23 @@ async function refreshBudget() {
   }
   const curMonthIdx = months.indexOf(curMonthStr);
 
-  // Soma bruta (não líquida) da categoria e de suas subcategorias — pra
-  // orçamento, cada lado (receita/despesa) é olhado separadamente, sem
-  // misturar com a classificação "redutora de despesa" usada nos relatórios.
+  // Saldo LÍQUIDO da categoria e de suas subcategorias — para uma categoria
+  // de despesa, isso é despesas menos qualquer receita/estorno lançado na
+  // mesma categoria (ex: um reembolso); para uma categoria de receita, é
+  // receita menos qualquer despesa lançada nela. Antes, uma categoria de
+  // despesa só somava o lado "despesas", ignorando por completo receitas
+  // registradas na mesma categoria (ex: reembolsos) — o que superestimava
+  // o quanto foi de fato gasto.
   const actualFor = (category, month, type, consolidate = true) => {
     const mo = byMonth[month] || {};
-    let total = 0;
+    let income = 0, expenses = 0;
     Object.entries(mo).forEach(([rawCat, d]) => {
       if (rawCat === category || (consolidate && rawCat.startsWith(category + ':'))) {
-        total += type === 'income' ? (d.income||0) : (d.expenses||0);
+        income += d.income || 0;
+        expenses += d.expenses || 0;
       }
     });
-    return total;
+    return type === 'income' ? (income - expenses) : (expenses - income);
   };
 
   const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: curMonthStr }).catch(() => ({}));
@@ -15473,7 +15500,18 @@ async function refreshBudget() {
   // ── Resumo: disponível, orçado, poupança planejada vs necessária ──
   const totalIncomePlanned  = incomeBudgets.reduce((s,b) => s + b.monthly_limit, 0);
   const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + effLimitOf(b), 0);
-  const plannedSavings = totalIncomePlanned - totalExpensePlanned;
+  // "Poupança planejada" usa só o limite PURO do mês (sem rollover) — o
+  // rollover é uma folga adicional de meses passados, não faz sentido somar
+  // ele na meta de poupança do MÊS ATUAL (senão um rollover grande faria a
+  // poupança planejada parecer artificialmente menor/negativa, mesmo que a
+  // pessoa nunca pretenda de fato gastar aquele acumulado este mês).
+  const totalExpensePlannedPure = expenseBudgets.reduce((s,b) => s + b.monthly_limit, 0);
+  const plannedSavings = totalIncomePlanned - totalExpensePlannedPure;
+  // Total de "sobra" de rollover disponível (só a parte positiva — rollover
+  // negativo é dívida a descontar do limite deste mês, não uma folga extra)
+  const rolloverSurplusTotal = expenseBudgets
+    .filter(b => b.rollover)
+    .reduce((s,b) => s + Math.max(0, rolloverMap[b.category] || 0), 0);
   const totalIncomeActual  = incomeBudgets.reduce((s,b) => s + actualFor(b.category, curMonthStr, 'income', b.consolidate_subs !== 0), 0);
   const totalExpenseActual = expenseBudgets.reduce((s,b) => s + actualFor(b.category, curMonthStr, 'expense', b.consolidate_subs !== 0), 0);
 
@@ -15485,7 +15523,7 @@ async function refreshBudget() {
   } catch(e) {}
 
   renderBudgetSummary({ totalIncomePlanned, totalExpensePlanned, plannedSavings, neededSavings,
-    totalIncomeActual, totalExpenseActual });
+    totalIncomeActual, totalExpenseActual, rolloverSurplusTotal });
 
   const ctx = { incomeBudgets, expenseBudgets, months, curMonthStr, curMonthIdx, actualFor, effLimitOf, byMonth };
   if (_budgetView === 'table') {
@@ -15497,11 +15535,12 @@ async function refreshBudget() {
 }
 
 let _budgetSummaryGaugeCharts = {};
-function renderBudgetSummary({ totalIncomePlanned, totalExpensePlanned, plannedSavings, neededSavings, totalIncomeActual, totalExpenseActual }) {
+function renderBudgetSummary({ totalIncomePlanned, totalExpensePlanned, plannedSavings, neededSavings, totalIncomeActual, totalExpenseActual, rolloverSurplusTotal }) {
   const cards = [
     { icon:'📈', label:'Total disponível (receitas)', value: fmtBRL(totalIncomePlanned), color:'#2e7d32' },
     { icon:'📉', label:'Total orçado (despesas)', value: fmtBRL(totalExpensePlanned), color:'#d97706' },
-    { icon:'💰', label:'Poupança planejada', value: fmtBRL(plannedSavings), color: plannedSavings>=0 ? '#43a047' : '#ef5350' },
+    { icon:'💰', label:'Poupança planejada', value: fmtBRL(plannedSavings), color: plannedSavings>=0 ? '#43a047' : '#ef5350',
+      sub: rolloverSurplusTotal > 0.005 ? `+ ${fmtBRL(rolloverSurplusTotal)} possíveis por sobras de meses anteriores` : null },
   ];
   if (neededSavings != null) {
     const diff = plannedSavings - neededSavings;
@@ -15590,7 +15629,7 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   // isso, o navegador usa auto-layout e colapsa colunas vazias/com pouco
   // conteúdo para quase 0px quando há muitas colunas (era exatamente o
   // bug visto: meses viravam barras finíssimas, ilegíveis).
-  const STICKY_W = [170, 120, 80];
+  const STICKY_W = [170, 120, 80, 80];
   const MONTH_W  = [120, 60]; // realizado, %
   const totalWidth = STICKY_W.reduce((a,b)=>a+b,0) + months.length * MONTH_W.reduce((a,b)=>a+b,0);
   liveTable.style.tableLayout = 'fixed';
@@ -15600,12 +15639,16 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   colgroup += '</colgroup>';
 
   const monthHeaderBg = m => m === curMonthStr ? 'background:#f1f8e9' : '';
+  // Janela dos últimos 12 meses (até o mês atual, inclusive) — usada na
+  // coluna "% 12 meses" (cumprimento da meta acumulada, não só do mês atual).
+  const last12Months = curMonthIdx >= 0 ? months.slice(Math.max(0, curMonthIdx - 11), curMonthIdx + 1) : months.slice(-12);
 
   let html = colgroup + `<thead>
     <tr>
       <th class="budget-sticky budget-sticky-1" rowspan="2">Categorias</th>
       <th class="budget-sticky budget-sticky-2 right" rowspan="2">Planejamento</th>
       <th class="budget-sticky budget-sticky-3 center" rowspan="2">% atual</th>
+      <th class="budget-sticky budget-sticky-4 center" rowspan="2" title="Soma do realizado dividida pela soma do planejado nos últimos 12 meses (inclui o mês atual)">% 12 meses</th>
       ${months.map(m => `<th colspan="2" style="${monthHeaderBg(m)};padding:0"><div style="display:flex;align-items:center;justify-content:center;padding:8px 12px">${monthLabelShort(m)}</div></th>`).join('')}
     </tr>
     <tr>
@@ -15613,13 +15656,20 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
     </tr>
   </thead><tbody>`;
 
-  function groupRow(label, bg, planned, monthTotals, type) {
+  function groupRow(label, bg, planned, monthTotals, type, plannedPure) {
     const curActual = monthTotals[curMonthStr] || 0;
     const curPct = planned > 0 ? (curActual / planned * 100) : 0;
+    const actual12m = last12Months.reduce((s,m) => s + (monthTotals[m]||0), 0);
+    // Mesma correção do catRow: usa o planejado PURO (sem rollover) como
+    // base do acumulado de 12 meses, nunca o `planned` do mês atual (que,
+    // para despesas, já pode estar distorcido pelo rollover).
+    const planned12m = (plannedPure ?? planned) * last12Months.length;
+    const pct12m = planned12m > 0 ? (actual12m / planned12m * 100) : 0;
     let row = `<tr>
       <td class="budget-sticky budget-sticky-1" style="background:${bg};color:#fff;font-weight:700">${label}</td>
       <td class="budget-sticky budget-sticky-2 right" style="background:${bg};color:#fff;font-weight:700;font-family:'DM Mono',monospace">${fmtBRL(planned)}</td>
-      <td class="budget-sticky budget-sticky-3 center" style="background:${bg};color:#fff;font-weight:700">${curPct.toFixed(0)}%</td>`;
+      <td class="budget-sticky budget-sticky-3 center" style="background:${bg};color:#fff;font-weight:700">${curPct.toFixed(0)}%</td>
+      <td class="budget-sticky budget-sticky-4 center" style="background:${bg};color:#fff;font-weight:700">${pct12m.toFixed(0)}%</td>`;
     months.forEach(m => {
       const actual = monthTotals[m]||0;
       const pct = planned > 0 ? (actual / planned * 100) : 0;
@@ -15636,6 +15686,23 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
     const curPctColor = type === 'income'
       ? (curPct >= 100 ? 'var(--green)' : curPct >= 80 ? '#d97706' : 'var(--red)')
       : (curPct > 100 ? 'var(--red)' : curPct >= 80 ? '#d97706' : 'var(--green)');
+    // % 12 meses: soma do realizado líquido dividida pela soma do planejado
+    // nesses mesmos 12 meses — cumprimento acumulado da meta, não só do mês
+    // atual. IMPORTANTE: usa o limite mensal PURO (sem rollover) como base,
+    // não `planned` (que, com rollover, já é o valor impactado pelo
+    // acumulado de meses anteriores) — usar `planned` aqui criava uma
+    // referência circular: se a pessoa estourasse muito o orçamento, o
+    // rollover ficava bem negativo, effLimit também ficava negativo/muito
+    // baixo, e a divisão por um denominador negativo/quase-zero dava um
+    // resultado sem sentido (0% mesmo tendo gastado bem mais que o
+    // planejado). A comparação certa é sempre gasto acumulado ÷ (limite
+    // mensal × número de meses), independente do rollover.
+    const actual12m = last12Months.reduce((s,m) => s + actualFor(b.category, m, type, b.consolidate_subs !== 0), 0);
+    const planned12m = b.monthly_limit * last12Months.length;
+    const pct12m = planned12m > 0 ? (actual12m / planned12m * 100) : 0;
+    const pct12mColor = type === 'income'
+      ? (pct12m >= 100 ? 'var(--green)' : pct12m >= 80 ? '#d97706' : 'var(--red)')
+      : (pct12m > 100 ? 'var(--red)' : pct12m >= 80 ? '#d97706' : 'var(--green)');
     const stripe = i % 2 === 1 ? 'var(--bg3)' : 'var(--bg2)';
     const rollTag = (type !== 'income' && b.rollover) ? ' <span title="Rollover ativo" style="font-size:10px">🔄</span>' : '';
 
@@ -15645,14 +15712,19 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
         <button class="btn-icon" style="color:var(--red);font-size:10px;margin-left:2px;vertical-align:middle" title="Excluir" onclick="deleteBudget(${b.id})">✕</button>
       </td>
       <td class="budget-sticky budget-sticky-2 right" style="background:${stripe};font-family:'DM Mono',monospace">${fmtBRL(planned)}</td>
-      <td class="budget-sticky budget-sticky-3 center" style="background:${stripe};color:${curPctColor};font-weight:700">${curPct.toFixed(0)}%</td>`;
+      <td class="budget-sticky budget-sticky-3 center" style="background:${stripe};color:${curPctColor};font-weight:700">${curPct.toFixed(0)}%</td>
+      <td class="budget-sticky budget-sticky-4 center" style="background:${stripe};color:${pct12mColor};font-weight:700" title="Realizado líquido dos últimos ${last12Months.length} meses ÷ planejado no mesmo período">${pct12m.toFixed(0)}%</td>`;
     months.forEach(m => {
       const actual = actualFor(b.category, m, type, b.consolidate_subs !== 0);
       const pct = planned > 0 ? (actual / planned * 100) : 0;
       const cellColor = actual === 0 ? 'var(--text3)' : type === 'income'
         ? (pct >= 100 ? 'inherit' : pct >= 80 ? '#d97706' : 'var(--red)')
         : (pct > 100 ? 'var(--red)' : pct >= 80 ? '#d97706' : 'inherit');
-      row += `<td class="right" style="background:${stripe};font-family:'DM Mono',monospace">${actual !== 0 ? fmtBRL(actual) : '—'}</td>`;
+      const [yy, mo] = m.split('-').map(Number);
+      const lastDay = new Date(yy, mo, 0).getDate();
+      const mFrom = `${m}-01`, mTo = `${m}-${String(lastDay).padStart(2,'0')}`;
+      const clickable = actual !== 0 ? ` onclick="openCatDetail('${esc2(b.category)}','${mFrom}','${mTo}')" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" title="Clique para ver o que está sendo considerado"` : '';
+      row += `<td class="right"${clickable} style="background:${stripe};font-family:'DM Mono',monospace">${actual !== 0 ? fmtBRL(actual) : '—'}</td>`;
       row += `<td class="center" style="background:${stripe};color:${cellColor}">${actual !== 0 ? pct.toFixed(0)+'%' : ''}</td>`;
     });
     return row + '</tr>';
@@ -15667,29 +15739,35 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   }
   if (expenseBudgets.length) {
     const totalExpensePlanned = expenseBudgets.reduce((s,b) => s+effLimitOf(b), 0);
+    const totalExpensePlannedPureGroup = expenseBudgets.reduce((s,b) => s+b.monthly_limit, 0);
     const expenseMonthTotals = {};
     months.forEach(m => { expenseMonthTotals[m] = expenseBudgets.reduce((s,b) => s+actualFor(b.category,m,'expense', b.consolidate_subs !== 0), 0); });
-    html += groupRow('Despesas', '#ef5350', totalExpensePlanned, expenseMonthTotals, 'expense');
+    html += groupRow('Despesas', '#ef5350', totalExpensePlanned, expenseMonthTotals, 'expense', totalExpensePlannedPureGroup);
     expenseBudgets.forEach((b,i) => html += catRow(b, 'expense', i));
   }
   html += '</tbody>';
   liveTable.innerHTML = html;
 
   // Posiciona o scroll horizontal de modo que o mês atual apareça
-  // imediatamente após as colunas fixas (Categorias/Planejamento/% atual).
-  const STICKY_TOTAL = STICKY_W.reduce((a,b)=>a+b,0); // 170+120+80=370 — onde as colunas de mês de fato começam
+  // imediatamente após as colunas fixas (Categorias/Planejamento/% atual/%
+  // 12 meses). Assim como no Patrimônio, o scrollLeft deve ser um múltiplo
+  // PURO da largura da coluna de mês — SEM somar a largura das colunas
+  // fixas. As colunas fixas ficam "por cima" via position:sticky; o
+  // conteúdo não-fixo (os meses) já começa logo depois delas na própria
+  // tabela, então somar STICKY_TOTAL aqui deslocava a posição (o bug visto:
+  // com 4 colunas fixas somando 450px, 450 mod 180 = 90 — exatamente METADE
+  // da largura de uma coluna de mês, cortando o mês atual ao meio).
+  const STICKY_TOTAL = STICKY_W.reduce((a,b)=>a+b,0); // 170+120+80+80=450 — onde as colunas de mês de fato começam
   const MONTH_COL_WIDTH = MONTH_W[0] + MONTH_W[1]; // realizado + %
   if (scroll && curMonthIdx >= 0) {
-    scroll.scrollLeft = STICKY_TOTAL + curMonthIdx * MONTH_COL_WIDTH;
+    scroll.scrollLeft = curMonthIdx * MONTH_COL_WIDTH;
   }
 
   // "Snap" do scroll: ao parar de rolar, ajusta pro início do mês mais
   // próximo — sem isso, o usuário precisa "mirar" pra não cortar uma
-  // coluna no meio. Os meses só começam DEPOIS das colunas fixas
-  // (STICKY_TOTAL), então o cálculo precisa descontar esse deslocamento
-  // antes de arredondar — sem isso, o ponto de ancoragem fica deslocado
-  // (370 não é múltiplo de 180), puxando pro meio de uma coluna em vez do
-  // início do mês. O listener é anexado uma única vez por elemento
+  // coluna no meio. Os pontos de ancoragem são múltiplos puros de
+  // MONTH_COL_WIDTH (mesma convenção do posicionamento inicial acima — ver
+  // comentário lá). O listener é anexado uma única vez por elemento
   // (re-renderizar a tabela não duplica).
   if (scroll && !scroll._snapBound) {
     scroll._snapBound = true;
@@ -19097,6 +19175,18 @@ let _pat = {
   showDebtInstallments: false, // Linha de parcelas das dívidas pessoais — colapsada por padrão
 };
 
+// Quantos meses de colunas mostrar na tabela de Patrimônio (0 = todo o
+// histórico). Limitar a janela visível reduz DRASTICAMENTE o número de
+// células (<td>) renderizadas — que é o gargalo de desempenho da aba quando
+// há muitos meses de histórico. IMPORTANTE: isso afeta só a EXIBIÇÃO; todos
+// os cálculos (totais, saldo devedor, P&L/TIR, valor mais recente de cada
+// bem) continuam usando o histórico completo por baixo dos panos.
+let _patPeriod = 6;
+function patSetPeriod(v) {
+  _patPeriod = parseInt(v) || 0;
+  refreshPatrimonio();
+}
+
 // ── Seleção em lote de bens/direitos, investimentos e dívidas ──────────────
 // Cada entidade tem seu próprio conjunto de IDs selecionados. A seleção é por
 // checkbox (clique simples marca/desmarca; shift+clique seleciona o intervalo
@@ -19593,6 +19683,13 @@ function refreshPatrimonioTable() {
   _inv.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
   _pat.txAll.forEach(t => { const m = t.month.slice(0,7); if (m <= curM) monthSet.add(m); });
   const months = [...monthSet].sort();
+  // `months` acima = histórico COMPLETO, usado em TODOS os cálculos (totais,
+  // saldo devedor, P&L, último valor conhecido de cada bem). `visMonths` é só
+  // a JANELA VISÍVEL (últimos N meses, conforme o seletor de período) — usada
+  // exclusivamente para gerar as colunas/células exibidas, sem afetar conta
+  // nenhuma. Isso corta o volume de DOM (o gargalo de desempenho da aba)
+  // mantendo os números idênticos.
+  const visMonths = (_patPeriod && months.length > _patPeriod) ? months.slice(-_patPeriod) : months;
   // 130px já não sobrava espaço pro "✎" (marcador de valor editado
   // manualmente) quando o valor da célula chega em dezenas de milhões (ex:
   // "R$ 15.237.924,00 ✎") — o texto extrapolava a largura fixa da coluna
@@ -19627,7 +19724,7 @@ function refreshPatrimonioTable() {
     <div class="stat-card" id="pat-card-total"><div class="stat-lbl">📊 Total Patrimônio</div><div class="stat-val accent" style="font-size:22px">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>`;
 
   // Shared month header
-  const monthHeader = months.map(m =>
+  const monthHeader = visMonths.map(m =>
     `<th class="right" style="min-width:${COL_W}px;white-space:nowrap;font-size:11px;padding:6px 10px${m===curM?';background:var(--accent-lt);color:var(--accent)':''}">${fmtMonth(m)}</th>`
   ).join('');
 
@@ -19641,7 +19738,7 @@ function refreshPatrimonioTable() {
   // ── IPCA row ──
   const ipcaRow = `<tr style="background:var(--bg4);border-bottom:1px solid var(--border2)">
     <td style="${STICKY};left:0;min-width:460px;font-size:11px;color:var(--text3);font-weight:600;padding:5px 12px" colspan="4">📊 IPCA mensal</td>
-    ${months.map(m => {
+    ${visMonths.map(m => {
       const r = _pat.ipcaMonthly[m];
       return `<td class="right" style="font-size:11px;color:var(--text3);padding:5px 10px${m===curM?';background:var(--accent-lt)':''}">${r!=null?(r*100).toFixed(2)+'%':'—'}</td>`;
     }).join('')}
@@ -19782,7 +19879,7 @@ function refreshPatrimonioTable() {
       <td style="${STICKY};left:200px;min-width:80px;max-width:80px;font-size:11px;color:var(--text3);background:${bg}">${PAT_ASSET_TYPES[a.asset_type]||a.asset_type}${a.asset_type==='societario'&&a.ownership_pct!=null?`<span style="color:var(--accent);font-weight:600;margin-left:3px">${a.ownership_pct}%</span>`:''}${a.financed?'<span style="color:var(--red);font-size:9px;margin-left:3px">🏦</span>':''}</td>
       <td style="${STICKY};left:280px;min-width:90px;max-width:90px;font-size:11px;color:var(--text3);background:${bg}"></td>
       <td style="${STICKY};left:370px;min-width:90px;max-width:90px;font-size:11px;color:var(--text3);background:${bg}">${PAT_TRENDS[a.trend]||a.trend}</td>
-      ${months.map(m => {
+      ${visMonths.map(m => {
         const e = histMap[a.id]?.[m];
         const v = e?.value ?? null;
         const isCur = m === curM;
@@ -19808,7 +19905,7 @@ function refreshPatrimonioTable() {
         const contract = contracts.find(c => String(c.id) === String(cid));
         const isClosed = contract?.status === 'closed';
         const label = contract?.label || (contracts.length > 1 ? `Contrato #${cid}` : 'Financiamento');
-        const dCells = months.map(m => {
+        const dCells = visMonths.map(m => {
           const v = debtMap[m];
           const isProj = debtProjMap[m];
           const cellBg = m === curM ? 'var(--accent-lt)' : bg;
@@ -19831,7 +19928,7 @@ function refreshPatrimonioTable() {
           installByMonth[m]     = r.installment;
           installProjByMonth[m] = (r.is_projection === 1 && r.paid !== 1);
         });
-        const iCells = months.map(m => {
+        const iCells = visMonths.map(m => {
           const v = installByMonth[m];
           const isProj = installProjByMonth[m];
           const cellBg = m === curM ? 'var(--accent-lt)' : bg;
@@ -19957,7 +20054,7 @@ function refreshPatrimonioTable() {
       const tirLine2 = `<span style="color:${patPnlColor}">Ganho/Perda: ${patPnlLabel}</span>`;
       const tirCell = `<div style="line-height:1.6">${tirLine1 ? tirLine1 + '<br>' : ''}${tirLine2}</div>`;
 
-      const patNomCells = months.map(m => {
+      const patNomCells = visMonths.map(m => {
         const cf = patNetCash[m] ?? 0;
         const cellBg = m === curM ? 'var(--accent-lt)' : bg;
         if (!cf) return `<td class="right" style="font-size:11px;padding:3px 8px;background:${cellBg};color:var(--text3)">—</td>`;
@@ -19965,7 +20062,7 @@ function refreshPatrimonioTable() {
         return `<td class="${cls} right" style="font-size:11px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace">${fmtBRL(cf)}</td>`;
       }).join('');
 
-      const patRealCells = months.map(m => {
+      const patRealCells = visMonths.map(m => {
         const cf = patNetCash[m] ?? 0;
         const cellBg = m === curM ? 'var(--accent-lt)' : bg;
         if (!cf) return `<td class="right" style="font-size:11px;padding:3px 8px;background:${cellBg};color:var(--text3)">—</td>`;
@@ -19977,7 +20074,7 @@ function refreshPatrimonioTable() {
       assetRows += `
       ${tirCell ? `<tr style="background:${bg}">
         <td style="${STICKY};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${bg}" colspan="4">${tirCell}</td>
-        ${months.map(m => `<td style="background:${m===curM?'var(--accent-lt)':bg}"></td>`).join('')}
+        ${visMonths.map(m => `<td style="background:${m===curM?'var(--accent-lt)':bg}"></td>`).join('')}
         <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
       </tr>` : ''}
       ${_pat.showAssetFlow ? `<tr style="background:${bg}">
@@ -20044,7 +20141,7 @@ function refreshPatrimonioTable() {
     });
     const { balByMonth, balProjByMonth } = computeDebtBalByMonth(d);
 
-    const bCells = months.map(m => {
+    const bCells = visMonths.map(m => {
       const v = balByMonth[m];
       const isProj = balProjByMonth[m];
       const cellBg = m === curM ? 'var(--accent-lt)' : bg;
@@ -20054,7 +20151,7 @@ function refreshPatrimonioTable() {
       return `<td class="amt-exp right"${projTip} style="font-size:12px;padding:6px 10px;background:${cellBg};font-family:'DM Mono',monospace${projStyle}">${fmtBRL(v)}${isProj ? '<span style="font-size:8px;margin-left:2px;color:#f59e0b">~</span>' : ''}</td>`;
     }).join('');
 
-    const iCells = months.map(m => {
+    const iCells = visMonths.map(m => {
       const v = installByMonth[m];
       const isProj = installProjByMonth[m];
       const cellBg = m === curM ? 'var(--accent-lt)' : bg;
@@ -20096,7 +20193,7 @@ function refreshPatrimonioTable() {
     </tr>` : ''}`;
   });
 
-  const debtTotalRowCells = months.map(m => {
+  const debtTotalRowCells = visMonths.map(m => {
     const cellBg3 = m === curM ? ';background:var(--accent-lt)' : '';
     const v = debtTotalByMonth[m];
     const cls = v < 0 ? 'amt-exp' : 'amt-inc';
@@ -20110,7 +20207,7 @@ function refreshPatrimonioTable() {
 
 
 
-  const assetTotalRowCells = months.map(m => {
+  const assetTotalRowCells = visMonths.map(m => {
     const cellBg3 = m === curM ? ';background:var(--accent-lt)' : '';
     const v = assetTotalByMonth[m];
     const cls = v < 0 ? 'amt-exp' : 'amt-inc';
@@ -20143,23 +20240,31 @@ function refreshPatrimonioTable() {
       <td style="${STICKY};left:0;min-width:400px;font-size:12px;padding:6px 12px;background:${bg}" colspan="4">
         <div style="display:flex;align-items:center;gap:6px">${chipHtml}<span>${esc(a.name)}</span></div>
       </td>
-      ${months.map(m => {
-        const up = a.history.filter(h => h.month <= m);
-        const bal = up.length ? up[up.length-1].balance : null;
-        if (bal !== null) accTotalByMonth[m] += bal;
-        const isCur = m === curM;
-        const bg2 = isCur ? 'var(--accent-lt)' : bg;
-        if (bal === null) return `<td class="right" style="color:var(--text3);font-size:12px;padding:6px 10px;background:${bg2}">—</td>`;
-        const cls = bal >= 0 ? 'amt-inc' : 'amt-exp';
-        return `<td class="${cls} right" style="font-size:12px;font-family:'DM Mono',monospace;padding:6px 10px;background:${bg2}">${fmtBRL(bal)}</td>`;
-      }).join('')}
+      ${(() => {
+        // Precisa varrer TODOS os meses (não só os visíveis) pra acumular
+        // accTotalByMonth corretamente — mas só gera <td> pros meses da
+        // janela visível, meses fora dela só contribuem pro total.
+        let cellsHtml = '';
+        months.forEach(m => {
+          const up = a.history.filter(h => h.month <= m);
+          const bal = up.length ? up[up.length-1].balance : null;
+          if (bal !== null) accTotalByMonth[m] += bal;
+          if (!visMonths.includes(m)) return;
+          const isCur = m === curM;
+          const bg2 = isCur ? 'var(--accent-lt)' : bg;
+          if (bal === null) { cellsHtml += `<td class="right" style="color:var(--text3);font-size:12px;padding:6px 10px;background:${bg2}">—</td>`; return; }
+          const cls = bal >= 0 ? 'amt-inc' : 'amt-exp';
+          cellsHtml += `<td class="${cls} right" style="font-size:12px;font-family:'DM Mono',monospace;padding:6px 10px;background:${bg2}">${fmtBRL(bal)}</td>`;
+        });
+        return cellsHtml;
+      })()}
       <td style="${STICKY};right:0;min-width:60px;background:${bg}"></td>
     </tr>`;
   });
 
   const accTotalRow = `<tr style="font-weight:700;background:var(--bg4);border-top:2px solid var(--border2);border-bottom:2px solid var(--border2)">
     <td style="${STICKY4};left:0;min-width:400px;font-size:12px;padding:8px 12px" colspan="4">Total Contas</td>
-    ${months.map(m => `<td class="amt-inc right" style="font-size:12px;font-family:'DM Mono',monospace;padding:6px 10px${m===curM?';background:var(--accent-lt)':''}">${fmtBRL(accTotalByMonth[m])}</td>`).join('')}
+    ${visMonths.map(m => `<td class="amt-inc right" style="font-size:12px;font-family:'DM Mono',monospace;padding:6px 10px${m===curM?';background:var(--accent-lt)':''}">${fmtBRL(accTotalByMonth[m])}</td>`).join('')}
     <td style="${STICKY4};right:0;min-width:60px"></td>
   </tr>`;
 
@@ -20174,7 +20279,7 @@ function refreshPatrimonioTable() {
   const container = G('pat-all-tables');
   if (!container) return;
 
-  const spacer = `<tbody><tr style="height:12px;background:var(--bg)"><td colspan="${months.length+4}"></td></tr></tbody>`;
+  const spacer = `<tbody><tr style="height:12px;background:var(--bg)"><td colspan="${visMonths.length+4}"></td></tr></tbody>`;
   const { totals: invTotalByMonth, totalsExCash: invTotalExCashByMonth, netCashByMonth: invNetCashByMonth, extFlowByMonth: invExtFlowByMonth, incFlowByMonth: invIncFlowByMonth } = calcInvTotalByMonth(months);
   let totalInv = invTotalByMonth[curM] || 0;
 
@@ -20241,7 +20346,7 @@ function refreshPatrimonioTable() {
   const grandGanhoColor = grandGanho !== null ? (grandGanho >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text3)';
 
   const showReal2 = _inv.showRealFlow;
-  const totNomFlowCells = months.map(m => {
+  const totNomFlowCells = visMonths.map(m => {
     const cf = invNetCashByMonth[m] ?? 0;
     const isCur = m === curM;
     const bg4 = isCur ? 'var(--accent-lt)' : 'var(--bg4)';
@@ -20249,7 +20354,7 @@ function refreshPatrimonioTable() {
     const cls = cf >= 0 ? 'amt-inc' : 'amt-exp';
     return `<td class="${cls} right" style="font-size:11px;padding:3px 8px;background:${bg4};font-family:'DM Mono',monospace">${fmtBRL(cf)}</td>`;
   }).join('');
-  const totRealFlowCells = months.map(m => {
+  const totRealFlowCells = visMonths.map(m => {
     const cf = invNetCashByMonth[m] ?? 0;
     const isCur = m === curM;
     const bg4 = isCur ? 'var(--accent-lt)' : 'var(--bg4)';
@@ -20267,7 +20372,7 @@ function refreshPatrimonioTable() {
       ${grandIrrLabel ? `<span style="font-weight:400;font-size:11px;color:${grandIrrColor}" title="${TIR_TOOLTIP}">${grandIrrLabel}</span>` : ''}
       ${grandGanhoLabel ? `<span style="font-weight:700;font-size:11px;color:${grandGanhoColor};margin-left:4px" title="Ganho/Perda: valor atual menos capital investido líquido">${grandGanhoLabel}</span>` : ''}
     </td>
-    ${months.map(m => `<td class="amt-inc right" style="font-size:12px;font-family:'DM Mono',monospace;padding:6px 10px${m===curM?';background:var(--accent-lt)':''}">${fmtBRL(invTotalByMonth[m]||0)}</td>`).join('')}
+    ${visMonths.map(m => `<td class="amt-inc right" style="font-size:12px;font-family:'DM Mono',monospace;padding:6px 10px${m===curM?';background:var(--accent-lt)':''}">${fmtBRL(invTotalByMonth[m]||0)}</td>`).join('')}
     <td class="amt-inc right" style="font-size:12px;background:var(--bg3)">—</td>
     <td style="${STICKY4};right:0;min-width:60px"></td>
   </tr>
@@ -20283,7 +20388,7 @@ function refreshPatrimonioTable() {
     <td style="min-width:0;max-width:0;padding:0;border:none;overflow:hidden"></td>
     <td style="${STICKY4};right:0;min-width:60px;background:var(--bg4)"></td>
   </tr>` : ''}
-  <tr style="height:4px;background:var(--border2)"><td colspan="${months.length+5}"></td></tr>
+  <tr style="height:4px;background:var(--border2)"><td colspan="${visMonths.length+5}"></td></tr>
   </tbody>`;
 
   // Extra projection column header
@@ -20295,7 +20400,7 @@ function refreshPatrimonioTable() {
   const debtInstallToggle = `<button class="btn xs" onclick="_pat.showDebtInstallments=!_pat.showDebtInstallments;refreshPatrimonioTable()" style="font-size:10px;margin-left:8px">${_pat.showDebtInstallments?'▲ Ocultar':'▼ Parcelas'}</button>`;
 
   // inv rows
-  const invRows = buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden);
+  const invRows = buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths);
 
   // Store monthly totals for use by Aposentadoria tab
   window._patTotalByMonth = {};
@@ -20312,7 +20417,7 @@ function refreshPatrimonioTable() {
   // Update grand total to include investments and personal debts
   const grandTotalRow2 = `<tbody><tr style="font-weight:700;font-size:14px;background:var(--accent-bg);border-top:2px solid var(--accent)">
     <td style="position:sticky;z-index:3;background:var(--accent-bg);left:0;min-width:350px;padding:10px 12px;color:var(--accent)" colspan="4">📊 Total Patrimônio</td>
-    ${months.map(m => {
+    ${visMonths.map(m => {
       const v = assetTotalByMonth[m] + accTotalByMonth[m] + (invTotalByMonth[m]||0) + (debtTotalByMonth[m]||0);
       const isCur = m === curM;
       return `<td class="right" style="font-family:'DM Mono',monospace;padding:8px 10px;color:var(--accent)${isCur?';background:var(--accent-lt)':''}">${fmtBRL(v)}</td>`;
@@ -20323,9 +20428,9 @@ function refreshPatrimonioTable() {
 
   const STICKY_W_PAT = [200, 80, 90, 90]; // Ativo, Código, Cat., Tipo/Tend.
   const TRAIL_W_PAT  = 60;
-  const totalWidthPat = STICKY_W_PAT.reduce((a,b)=>a+b,0) + months.length * COL_W + TRAIL_W_PAT;
+  const totalWidthPat = STICKY_W_PAT.reduce((a,b)=>a+b,0) + visMonths.length * COL_W + TRAIL_W_PAT;
   let colgroupPat = '<colgroup>' + STICKY_W_PAT.map(w => `<col style="width:${w}px">`).join('');
-  months.forEach(() => { colgroupPat += `<col style="width:${COL_W}px">`; });
+  visMonths.forEach(() => { colgroupPat += `<col style="width:${COL_W}px">`; });
   colgroupPat += `<col style="width:${TRAIL_W_PAT}px">`;
   colgroupPat += '</colgroup>';
 
@@ -20349,12 +20454,12 @@ function refreshPatrimonioTable() {
       <tbody>
         <tr style="background:var(--bg3)">
           <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">🏠 Bens e Direitos ${assetFlowToggle}</td>
-          ${months.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
+          ${visMonths.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
           <td style="${STICKY3};right:0;min-width:60px;text-align:right">
             <button class="btn xs primary" onclick="openPatAssetModal()" style="font-size:10px">+ Novo</button>
           </td>
         </tr>
-        ${assetRows || `<tr><td colspan="${months.length+5}" class="empty" style="padding:1.5rem">Nenhum ativo.</td></tr>`}
+        ${assetRows || `<tr><td colspan="${visMonths.length+5}" class="empty" style="padding:1.5rem">Nenhum ativo.</td></tr>`}
       </tbody>
       <tbody>${assetTotalRow}</tbody>
       ${spacer}
@@ -20363,12 +20468,12 @@ function refreshPatrimonioTable() {
       <tbody>
         <tr style="background:var(--bg3)">
           <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">💳 Cartões e Dívidas ${debtInstallToggle}</td>
-          ${months.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
+          ${visMonths.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
           <td style="${STICKY3};right:0;min-width:60px;text-align:right">
             <button class="btn xs primary" onclick="openDebtModal()" style="font-size:10px">+ Nova</button>
           </td>
         </tr>
-        ${debtRows || `<tr><td colspan="${months.length+5}" class="empty" style="padding:1.5rem">Nenhuma dívida pessoal registrada.</td></tr>`}
+        ${debtRows || `<tr><td colspan="${visMonths.length+5}" class="empty" style="padding:1.5rem">Nenhuma dívida pessoal registrada.</td></tr>`}
       </tbody>
       <tbody>${debtTotalRow}</tbody>
       ${spacer}
@@ -20377,12 +20482,12 @@ function refreshPatrimonioTable() {
       <tbody>
         <tr style="background:var(--bg3)">
           <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">🏦 Contas Bancárias</td>
-          ${months.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
+          ${visMonths.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
           <td style="${STICKY3};right:0;min-width:60px;text-align:right">
             <button class="btn xs" onclick="openPatAccountsModal()" style="font-size:10px">⚙</button>
           </td>
         </tr>
-        ${accRows || `<tr><td colspan="${months.length+5}" class="empty" style="padding:1.5rem">Nenhuma conta.</td></tr>`}
+        ${accRows || `<tr><td colspan="${visMonths.length+5}" class="empty" style="padding:1.5rem">Nenhuma conta.</td></tr>`}
       </tbody>
       <tbody>${accTotalRow}</tbody>
       ${spacer}
@@ -20393,12 +20498,12 @@ function refreshPatrimonioTable() {
           <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">
             📈 Investimentos Financeiros ${realFlowToggle}
           </td>
-          ${months.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
+          ${visMonths.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
           <td style="${STICKY3};right:0;min-width:60px;text-align:right">
             <button class="btn xs primary" onclick="openInvAssetModal()" style="font-size:10px">+ Novo</button>
           </td>
         </tr>
-        ${invRows || `<tr><td colspan="${months.length+5}" class="empty" style="padding:1.5rem">Nenhum investimento.</td></tr>`}
+        ${invRows || `<tr><td colspan="${visMonths.length+5}" class="empty" style="padding:1.5rem">Nenhum investimento.</td></tr>`}
       </tbody>
       ${invTotalRow}
       ${spacer}
@@ -23684,7 +23789,8 @@ function calcIRR(cashflows) {
 }
 
 // ── Build inv rows for the patrimônio table ──
-function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
+function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths) {
+  visMonths = visMonths || months;
   if (!_inv.assets.length) return '';
 
   const showReal = _inv.showRealFlow;
@@ -23777,7 +23883,8 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
   patSelResetOrder('inv', catKeys.flatMap(k => byCategory[k].map(a => a.id)));
 
   // Helper: build a category subtotal row (value + optional cash flow rows)
-  function buildCatSubtotalRow(catKey, catAssets, allMonths, txByAsset2, curM2, STICKY2, COL_W2, stripe2, ipcaCumFn, showReal2, nextM2) {
+  function buildCatSubtotalRow(catKey, catAssets, allMonths, txByAsset2, curM2, STICKY2, COL_W2, stripe2, ipcaCumFn, showReal2, nextM2, visAllMonths2) {
+    visAllMonths2 = visAllMonths2 || allMonths;
     const catLabel = INV_CATEGORIES[catKey]?.label || catKey;
     const catTotalByMonth = {};
     const catNetCashByMonth = {};
@@ -23843,7 +23950,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     const catGanhoColor2 = catGanho2 !== null ? (catGanho2 >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text3)';
 
     const BG_SUB = 'var(--bg4)';
-    const valueCells2 = allMonths.map(m2 => {
+    const valueCells2 = visAllMonths2.map(m2 => {
       const v = catTotalByMonth[m2];
       const isCur = m2 === curM2;
       const cellBg = isCur ? 'var(--accent-lt)' : BG_SUB;
@@ -23851,7 +23958,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
       return `<td class="amt-inc right" style="font-weight:600;font-size:12px;padding:5px 8px;background:${cellBg};font-family:'DM Mono',monospace">${fmtBRL(v)}</td>`;
     }).join('');
 
-    const nomFlowCells2 = allMonths.map(m2 => {
+    const nomFlowCells2 = visAllMonths2.map(m2 => {
       const cf = catNetCashByMonth[m2] ?? 0;
       const isCur = m2 === curM2;
       const cellBg = isCur ? 'var(--accent-lt)' : BG_SUB;
@@ -23860,7 +23967,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
       return `<td class="${cls} right" style="font-size:11px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace">${fmtBRL(cf)}</td>`;
     }).join('');
 
-    const realFlowCells2 = allMonths.map(m2 => {
+    const realFlowCells2 = visAllMonths2.map(m2 => {
       const cf = catNetCashByMonth[m2] ?? 0;
       const isCur = m2 === curM2;
       const cellBg = isCur ? 'var(--accent-lt)' : BG_SUB;
@@ -24042,7 +24149,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     const typeCell  = `<td style="${STICKY};left:370px;min-width:90px;max-width:90px;font-size:11px;color:var(--text3);padding:4px 6px;background:${bg}">${esc(a.inv_type)}</td>`;
 
     // Value row
-    const valueCells = months.map(m => {
+    const valueCells = visMonths.map(m => {
       const v = bookValue[m];
       const isCur = m === curM;
       const cellBg = isCur ? 'var(--accent-lt)' : bg;
@@ -24053,7 +24160,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
 
     // Nominal flow row
     // External capital flow row
-    const extFlowCells = months.map(m => {
+    const extFlowCells = visMonths.map(m => {
       const cf = monthlyExtFlow[m] ?? 0;
       const isCur = m === curM;
       const cellBg = isCur ? 'var(--accent-lt)' : bg;
@@ -24063,7 +24170,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     }).join('');
 
     // Income/cost flow row
-    const incFlowCells = months.map(m => {
+    const incFlowCells = visMonths.map(m => {
       const cf = monthlyIncFlow[m] ?? 0;
       const isCur = m === curM;
       const cellBg = isCur ? 'var(--accent-lt)' : bg;
@@ -24073,7 +24180,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     }).join('');
 
     // Combined nominal flow cells (for total row — kept for IRR label)
-    const nomFlowCells = months.map(m => {
+    const nomFlowCells = visMonths.map(m => {
       const cf = monthlyNetCash[m] ?? 0;
       const isCur = m === curM;
       const cellBg = isCur ? 'var(--accent-lt)' : bg;
@@ -24084,7 +24191,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     const projFlowCell = `<td style="min-width:0;max-width:0;padding:0;border:none;overflow:hidden"></td>`;
 
     // Real flow row (IPCA-adjusted, combined)
-    const realFlowCells = months.map(m => {
+    const realFlowCells = visMonths.map(m => {
       const cf = monthlyNetCash[m] ?? 0;
       const isCur = m === curM;
       const cellBg = isCur ? 'var(--accent-lt)' : bg;
@@ -24131,7 +24238,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     // Category subtotal row
     // Skip subtotal for cash categories
     if (!['caixa','valor_em_caixa'].includes(catKey)) {
-      rows += buildCatSubtotalRow(catKey, byCategoryAll[catKey] || catAssets, months, txByAsset, curM, STICKY, COL_W, stripe, ipcaCumulative, showReal, nextM);
+      rows += buildCatSubtotalRow(catKey, byCategoryAll[catKey] || catAssets, months, txByAsset, curM, STICKY, COL_W, stripe, ipcaCumulative, showReal, nextM, visMonths);
     }
   }); // end catKeys.forEach
 

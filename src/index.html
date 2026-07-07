@@ -388,7 +388,8 @@
 .budget-sticky{position:sticky;z-index:3;background:var(--bg2);}
 .budget-sticky-1{left:0;min-width:170px;width:170px;}
 .budget-sticky-2{left:170px;min-width:120px;width:120px;}
-.budget-sticky-3{left:290px;min-width:80px;width:80px;border-right:2px solid var(--border);}
+.budget-sticky-3{left:290px;min-width:80px;width:80px;}
+.budget-sticky-4{left:370px;min-width:80px;width:80px;border-right:2px solid var(--border);}
 #budget-table th,#budget-table td{padding:8px 12px;font-size:12px;white-space:nowrap;}
 #budget-table thead th{position:sticky;top:0;z-index:4;background:var(--bg2);border-bottom:1px solid var(--border);font-size:11px;color:var(--text3);font-weight:700;}
 #budget-table thead tr:first-child th{top:0;}
@@ -1903,6 +1904,16 @@ select.inp option{background:var(--bg2);}
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
       <span id="pat-ipca-status" style="font-size:12px;color:var(--text3);flex:1;display:none">IPCA mensal não carregado</span>
       <button class="ev-action-btn" onclick="patFetchIPCA()" style="display:none">📡 Atualizar IPCA mensal</button>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px">
+        <span style="color:var(--text3)">Período:</span>
+        <select id="pat-period" onchange="patSetPeriod(this.value)" style="font-size:12px;padding:3px 6px;border-radius:6px;border:1px solid var(--border);background:var(--bg2);color:var(--text)">
+          <option value="3">3 meses</option>
+          <option value="6" selected>6 meses</option>
+          <option value="12">12 meses</option>
+          <option value="24">2 anos</option>
+          <option value="0">Todo o histórico</option>
+        </select>
+      </label>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
         <input type="checkbox" id="pat-show-hidden" onchange="refreshPatrimonioTable()"> Mostrar ocultos
       </label>

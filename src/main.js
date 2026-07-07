@@ -1170,7 +1170,7 @@ ipcMain.handle('budget:save', (_, { id, category, monthly_limit, alert_pct, roll
 // Rollover: accumulated leftover (limit - spent) from all prior months since the budget existed,
 // only for categories with rollover enabled. Positive = surplus carried forward; negative = overspend carried.
 ipcMain.handle('budget:rollover-balance', (_, { beforeMonth }) => {
-  const rolloverCats = all('SELECT category, monthly_limit, rollover_months FROM budgets WHERE active=1 AND rollover=1');
+  const rolloverCats = all('SELECT category, monthly_limit, rollover_months, consolidate_subs FROM budgets WHERE active=1 AND rollover=1');
   if (!rolloverCats.length) return {};
 
   // Helper: build the N months immediately before beforeMonth (capped window)
@@ -1185,15 +1185,25 @@ ipcMain.handle('budget:rollover-balance', (_, { beforeMonth }) => {
   }
 
   const result = {};
-  rolloverCats.forEach(({ category, monthly_limit, rollover_months }) => {
+  rolloverCats.forEach(({ category, monthly_limit, rollover_months, consolidate_subs }) => {
     const win = Math.max(1, Math.min(60, rollover_months || 3));
     const months = priorMonths(win);
+    // Precisa considerar as SUBCATEGORIAS (mesma regra usada em todo o
+    // resto do Orçamento, via consolidate_subs) — sem isso, um gasto
+    // lançado em "Categoria:Subcategoria" nunca contava como "gasto" aqui
+    // (só o match exato da categoria-mãe era considerado), fazendo o
+    // rollover acumular o limite mensal INTEIRO todo mês, mesmo quando a
+    // pessoa realmente gastava (só que na subcategoria).
+    const catFilter = consolidate_subs === 0
+      ? 'category=?'
+      : "(category=? OR category LIKE ? || ':%')";
     let acc = 0;
     months.forEach(ym => {
       const from = ym + '-01', to = ym + '-31';
+      const params = consolidate_subs === 0 ? [category, from, to] : [category, category, from, to];
       const row = first(`SELECT SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as spent
-        FROM transactions WHERE category=? AND date>=? AND date<=? AND transfer_id IS NULL`,
-        [category, from, to]);
+        FROM transactions WHERE ${catFilter} AND date>=? AND date<=? AND transfer_id IS NULL`,
+        params);
       const spent = row?.spent || 0;
       acc += (monthly_limit - spent); // leftover for the month (can be negative)
     });
