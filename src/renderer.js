@@ -662,6 +662,7 @@ async function goPage(name) {
   G('page-' + name)?.classList.add('active');
   currentPage = name;
   if (name !== 'account') currentAccountId = null;
+  try { if (name !== 'patrimonio') patSelClearAll(); } catch(e) {}
   const titles = {
     overview:   t('page_overview'),
     import:     t('page_import'),
@@ -1269,6 +1270,7 @@ async function openAccount(id) {
   currentAccountId = id;
   _acctView = 'table'; // reset to table on account switch
   currentPage = 'account';
+  try { patSelClearAll(); } catch(e) {}
   const acc = accounts.find(a => a.id === id);
   G('acct-name').textContent = acc?.name || 'Conta';
   G('page-title').textContent = acc?.name || 'Conta';
@@ -1285,6 +1287,10 @@ async function openAccount(id) {
   await refreshAccount();
   // Scroll to today after render
   setTimeout(() => scrollToToday(), 200);
+  // Moedinha: atualiza as dicas para a tela de conta (openAccount não passa
+  // por goPage, então precisa disparar o mesmo hook manualmente — sem isso,
+  // as dicas da conta só apareciam ao fechar e reabrir o assistente).
+  try { guideOnPageChange('account'); } catch(e) {}
 }
 
 // ══ OVERVIEW ══
@@ -3843,7 +3849,7 @@ async function initReportFilters() {
   // Category checkboxes
   const allRows = await ff.reportSummary({ excludeTransfers: false });
   const accountNames = new Set((accounts||[]).map(a=>a.name));
-  _repAllCats = [...new Set(allRows.map(r=>r.category).filter(c => c && !accountNames.has(c)))].sort();
+  _repAllCats = [...new Set(allRows.map(r=>r.category).filter(c => c && !accountNames.has(c) && !isTransferCategory(c)))].sort();
   renderRepCatChecks('');
 
   // Apply last-used report config, or default to last-month
@@ -3998,10 +4004,15 @@ function groupAndClassifyByParent(rows) {
 }
 
 // Build hierarchical tree from flat (month, category) rows.
-function buildTree(rows, categories) {
+function buildTree(rows, categories, excludeTransfers) {
   let filtered = rows;
+  // Defesa em profundidade: mesmo o SQL já excluindo transferências quando
+  // excludeTransfers está ligado, reforçamos aqui no cliente — assim, se por
+  // qualquer motivo uma transferência escapar do filtro SQL (ex: categoria
+  // atípica), ela ainda não aparece no relatório.
+  if (excludeTransfers) filtered = filtered.filter(r => !isTransferCategory(r.category));
   if (categories) {
-    filtered = rows.filter(r =>
+    filtered = filtered.filter(r =>
       categories.includes(r.category) ||
       categories.some(c => r.category.startsWith(c + ':') || c.startsWith(r.category + ':'))
     );
@@ -4079,7 +4090,7 @@ async function runReport() {
     // entre os dois relatórios. buildTree classifica cada linha mês-a-mês
     // antes de somar por categoria, pelo mesmo motivo.
     const flatRows = await ff.reportMonthly({ fromDate:from, toDate:to, accountIds, excludeTransfers, categories });
-    const { parents, totalExp, totalInc } = buildTree(flatRows, categories);
+    const { parents, totalExp, totalInc } = buildTree(flatRows, categories, excludeTransfers);
     if (!parents.length) { el.innerHTML='<div class="empty"><div class="ei">📊</div><p>Sem dados</p></div>'; return; }
 
     // Split income vs expense groups (by net)
@@ -4178,6 +4189,7 @@ async function runReport() {
 
   } else if (type === 'monthly') {
     let catRows = await ff.reportMonthly({ fromDate:from, toDate:to, accountIds, excludeTransfers, categories });
+    if (excludeTransfers) catRows = catRows.filter(r => !isTransferCategory(r.category));
     if (!catRows.length) { el.innerHTML='<div class="empty"><div class="ei">📅</div><p>Sem dados</p></div>'; return; }
     // Mesma metodologia do Resumo e da Evolução: agrupa subcategorias na
     // categoria-mãe (uma subcategoria positiva reduz a despesa da mãe, em
@@ -4233,6 +4245,7 @@ async function runReport() {
 
   } else if (type === 'expenses-map') {
     let rows=await ff.reportSummary({ fromDate:from, toDate:to, accountIds, excludeTransfers });
+    if (excludeTransfers) rows = rows.filter(r => !isTransferCategory(r.category));
     if (categories) rows = rows.filter(r => categories.includes(r.category));
     const expRows=rows.filter(r=>r.expenses>0).sort((a,b)=>b.expenses-a.expenses);
     const total=expRows.reduce((s,r)=>s+r.expenses,0);
@@ -4567,7 +4580,7 @@ function bankLogoHtml(p, size=24) {
 const BROKER_HELP_TEXT = {
   btg_broker: 'Como conseguir o extrato do BTG: acesse btgpactual.com, entre na sua conta, vá em "Documentos" → "Extrato de Investimentos". Clique em "Solicitar", escolha o período "Mês específico", tipo de documento "Consolidado" e formato "Excel (.xlsx)".',
   xp_broker: 'Como conseguir os documentos da XP (são dois arquivos): (1) Posição — menu "Minha Conta" → "Histórico de Carteira", selecione o mês e baixe em "XLS". (2) Movimentações — menu "Minha Conta" → "Saldo/Extrato" (da Conta Investimento), selecione um período acima de 30 dias e clique no botão com um X (exportar).',
-  itau_broker: 'Como conseguir o extrato do Itaú: acesse itau.com.br, entre na sua conta, vá em Menu → Investimentos. No campo "Posição consolidada", clique em "Imprimir" e salve como PDF.',
+  itau_broker: 'Como conseguir o extrato do Itaú: no app/site do Itaú Personnalité, vá no menu no canto superior esquerdo, clique em "Investimentos", e no link "Carteira de investimentos" (dentro do quadro de Posição Consolidada, logo abaixo da linha com o total investido) — esse é o formato mais completo e recomendado. Alternativamente, o extrato mensal comum ("Extrato Consolidado Inteligente") também traz a seção "02. Investimentos" com os dados necessários.',
   santander_broker: 'Este é o mesmo PDF do "Extrato Consolidado Inteligente" usado para importar a conta corrente — a seção "Investimentos" já vem incluída nele, não precisa de um extrato separado da corretora.',
 };
 
@@ -10147,15 +10160,23 @@ async function parseSantanderBroker(buffer) {
   const PRODUCT_ROW_RE = /^(.+?)\s+(\d{2}\/\d{2}\/\d{2,4})\s+([\d.]+,\d{2})\s+([\d.,]+)\s+(\d{2}\/\d{2}\/\d{2,4})\s+(.+)$/;
   // Resumo: "<rótulo> <rendimento> <valor bruto> <valor líquido>"
   const RESUMO_ROW_RE = /^(.+?)\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})\s+([\d.]+,\d{2})$/;
+  // Cabeçalhos de seção de renda fixa (ex: "CDB / RDB", "LCA / LCI / LIG") —
+  // quando a MESMA seção tem várias aplicações (ex: 5 CDBs comprados em
+  // meses diferentes), o Santander soma todas numa ÚNICA linha de "Resumo"
+  // — por isso agrupamos os produtos por seção, e não um-a-um, antes de
+  // casar com as linhas do Resumo (na mesma ordem de aparição das seções).
+  const SECTION_HEADING_RE = /^(CDB\/RDB|LCA\/LCI\/LIG|LCI|LC|RDB)$/i;
 
-  const rendaFixaPending = []; // [{name}] na ordem de aparição
-  const resumoRows = [];       // [{valorLiquido}] na ordem de aparição
+  const sections = [];   // [{ products: [{name}] }] na ordem de aparição
+  let curSection = null;
+  const resumoRows = []; // [{valorLiquido}] na ordem de aparição
   let inResumo = false;
 
   for (let i = 0; i < allRows.length; i++) {
     const line = allRows[i].trim();
     if (!line) continue;
     const lineNorm = norm(line);
+    const lineNoSpace = lineNorm.replace(/\s+/g, '');
 
     if (lineNorm === 'resumo') { inResumo = true; continue; }
     if (inResumo) {
@@ -10164,10 +10185,20 @@ async function parseSantanderBroker(buffer) {
       if (rm) { resumoRows.push({ valorLiquido: parseBRL(rm[4]) }); continue; }
     }
 
+    if (SECTION_HEADING_RE.test(lineNoSpace.toUpperCase())) {
+      curSection = { products: [] };
+      sections.push(curSection);
+      continue;
+    }
+
     // Produto de renda fixa (CDB/RDB, LCA/LCI/LIG, etc.) — o nome do ativo
     // fica na coluna "Produto" dessa mesma linha de dados.
     const pm = line.match(PRODUCT_ROW_RE);
-    if (pm) { rendaFixaPending.push({ name: pm[1].trim() }); continue; }
+    if (pm) {
+      if (!curSection) { curSection = { products: [] }; sections.push(curSection); }
+      curSection.products.push({ name: pm[1].trim() });
+      continue;
+    }
 
     // Fundo de investimento — nome fica na linha ACIMA de "CNPJ do Fundo".
     if (lineNorm.startsWith('cnpj do fundo')) {
@@ -10210,15 +10241,22 @@ async function parseSantanderBroker(buffer) {
     }
   }
 
-  // Combina cada produto de renda fixa com sua linha do "Resumo",
-  // POSICIONALMENTE (na ordem de aparição) — o rótulo do Resumo (ex: "LCA/
-  // LCI/LIG CDI") não bate com o nome do produto (ex: "LCA DI SANTANDER"),
-  // mas a ordem de listagem é sempre a mesma.
-  rendaFixaPending.forEach((p, idx) => {
+  // Combina cada SEÇÃO de renda fixa (podendo ter mais de uma aplicação) com
+  // sua linha do "Resumo", POSICIONALMENTE (na ordem de aparição) — o rótulo
+  // do Resumo (ex: "LCA/LCI/LIG CDI") não bate com o nome do produto (ex:
+  // "LCA DI SANTANDER"), mas a ordem de listagem é sempre a mesma. Quando uma
+  // seção tem várias aplicações (ex: 5 CDBs comprados em meses diferentes),
+  // o Resumo soma todas numa linha só — refletimos isso com um único ativo,
+  // com o nome indicando quantas aplicações foram somadas.
+  sections.forEach((section, idx) => {
     const r = resumoRows[idx];
-    if (!r) return;
-    const { category, inv_type } = classifySantanderAsset(p.name, false);
-    assets.push({ name: p.name, category, inv_type, broker: 'Santander', valor: r.valorLiquido, movimentacoes: [] });
+    if (!r || !section.products.length) return;
+    const first = section.products[0];
+    const name = section.products.length > 1
+      ? `${first.name} (${section.products.length} aplicações)`
+      : first.name;
+    const { category, inv_type } = classifySantanderAsset(first.name, false);
+    assets.push({ name, category, inv_type, broker: 'Santander', valor: r.valorLiquido, movimentacoes: [] });
   });
 
   return { month: stmtMonth, assets, caixaValue: null, broker: 'Santander', unresolvedMovements: [] };
@@ -10241,7 +10279,7 @@ async function parseSantanderBroker(buffer) {
 // 2) "total investido" appears as a running footer on EVERY page, not just
 //    the last one — it must close the current section without halting the
 //    whole parse, or anything past page 1 silently gets dropped.
-async function parseItauInvestmentsPDF(buffer) {
+async function _parseItauExtratoConsolidadoPDF(buffer) {
   await loadPdfJsLib();
   const pdf = await getPdfDocumentWithPassword(buffer);
   if (!pdf) throw new Error('__IMPORT_CANCELLED__');
@@ -10481,6 +10519,198 @@ async function parseItauInvestmentsPDF(buffer) {
     assets, categoryTargets, broker: 'Itaú', month: stmtMonth, totalLiquido,
     consolidatedTotal, // total declarado na pág. 1 — usado para validar a importação
   };
+}
+
+// ── Itaú "Carteira de Investimentos" (PDF) — o outro formato de extrato de
+// investimentos do Itaú, baixado por um caminho diferente (mais escondido)
+// do app/site, com relatório de posição e performance da carteira em vez do
+// extrato mensal comum. Layout completamente diferente do "Extrato
+// Consolidado" (parseado por _parseItauExtratoConsolidadoPDF acima) — mas,
+// ao contrário do Santander, aqui o texto vem limpo, sem fragmentação de
+// glifos, então a reconstrução de linha é bem mais simples (só agrupar por
+// proximidade de Y, sem heurística de espaço).
+async function _parseItauCarteiraPDF(buffer) {
+  await loadPdfJsLib();
+  const pdf = await getPdfDocumentWithPassword(buffer);
+  if (!pdf) throw new Error('__IMPORT_CANCELLED__');
+
+  const norm = s => (s||'').toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim();
+  const MONEY_RE = /^-?[\d.]+,\d{2}$/;
+  function parseBRL(s) {
+    if (s == null) return null;
+    s = String(s).trim();
+    if (!s) return null;
+    s = s.replace(/\./g,'').replace(',', '.');
+    const n = parseFloat(s);
+    return isNaN(n) ? null : n;
+  }
+  const MONTHS_PT = { janeiro:1, fevereiro:2, marco:3, abril:4, maio:5, junho:6,
+    julho:7, agosto:8, setembro:9, outubro:10, novembro:11, dezembro:12 };
+
+  // Classifica categoria/tipo interno a partir do NOME do ativo primeiro
+  // (Tesouro/CRI/CRA/CDB/etc. são inequívocos pelo nome, como nos outros
+  // parsers) e só recorre ao cabeçalho da categoria da carteira ("Juros
+  // pós-fixados", "Multimercados", "Ações", "Cambial"...) como último recurso.
+  function classifyCarteiraAsset(categoryHeader, name) {
+    const n = (name||'').toUpperCase();
+    if (/^TIT\.?\s*P[UÚ]BLICO|TESOURO/.test(n)) {
+      if (/NTNB|IPCA/.test(n)) return { category:'tesouro', inv_type:'Tesouro IPCA+' };
+      if (/LTN|PREFIXADO/.test(n)) return { category:'tesouro', inv_type:'Tesouro Prefixado' };
+      if (/LFT|SELIC/.test(n)) return { category:'tesouro', inv_type:'Tesouro SELIC' };
+      return { category:'tesouro', inv_type:'Tesouro Prefixado' };
+    }
+    if (/^CRI\b/.test(n)) return { category:'renda_fixa', inv_type:'CRI' };
+    if (/^CRA\b/.test(n)) return { category:'renda_fixa', inv_type:'CRA' };
+    if (/^CDB\b/.test(n)) return { category:'renda_fixa', inv_type:'CDB' };
+    if (/^LCI\b/.test(n)) return { category:'renda_fixa', inv_type:'LCI' };
+    if (/^LCA\b/.test(n)) return { category:'renda_fixa', inv_type:'LCA' };
+    if (/^LF\b/.test(n))  return { category:'renda_fixa', inv_type:'LF' };
+    if (/DEB[EÊ]NTURE/.test(n)) return { category:'renda_fixa', inv_type:'Debênture' };
+    const h = norm(categoryHeader);
+    if (h.includes('multimercado')) return { category:'fundos', inv_type:'Fundo Multimercado' };
+    if (h.includes('acoes') || h === 'acao') return { category:'renda_variavel', inv_type:'Ações' };
+    if (h.includes('cambial')) return { category:'fundos', inv_type:'Fundo Cambial' };
+    if (h.includes('juros') || h.includes('inflacao')) return { category:'renda_fixa', inv_type:'Debênture' };
+    return { category:'fundos', inv_type:'Fundo Multimercado' };
+  }
+
+  // Agrupa os itens de texto de uma página em "linhas" por proximidade de Y
+  // (tolerância de 3pt) — aqui não há fragmentação de glifo (diferente do
+  // Santander), então basta isso, sem heurística de espaço/largura.
+  async function getRows(pageNum) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    const viewport = page.getViewport({ scale: 1 });
+    const items = content.items.filter(it => it.str.trim() !== '').map(it => ({
+      x: it.transform[4], y: viewport.height - it.transform[5], text: it.str.trim(),
+    }));
+    items.sort((a,b) => a.y - b.y || a.x - b.x);
+    const rows = [];
+    let cur = null;
+    for (const it of items) {
+      if (!cur || it.y - cur.y > 3) { cur = { y: it.y, items: [] }; rows.push(cur); }
+      cur.items.push(it);
+    }
+    rows.forEach(r => r.items.sort((a,b) => a.x - b.x));
+    return rows;
+  }
+
+  // ── Página 1 (capa): mês do extrato ──
+  let stmtMonth = null;
+  const p1rows = await getRows(1);
+  for (const r of p1rows) {
+    const line = r.items.map(i => i.text).join(' ');
+    const m = line.match(/(Janeiro|Fevereiro|Mar[çc]o|Abril|Maio|Junho|Julho|Agosto|Setembro|Outubro|Novembro|Dezembro)\s+(\d{4})/i);
+    if (m) { stmtMonth = `${m[2]}-${String(MONTHS_PT[norm(m[1])]).padStart(2,'0')}`; break; }
+  }
+
+  // ── Página "1 — posição e performance da carteira": saldo líquido do mês
+  // atual (última coluna da linha "saldo líquido") — usado só pra validar a
+  // importação (soma dos ativos deve bater com isso).
+  let consolidatedTotal = null;
+  const p2rows = await getRows(2);
+  for (const r of p2rows) {
+    const items = r.items;
+    const label = norm(items.filter(i => i.x < 160).map(i => i.text).join(' '));
+    if (label.startsWith('saldo liquido')) {
+      // Restrito à faixa das DUAS colunas de mês (mês anterior / mês atual)
+      // — mais à direita na mesma linha vêm "+ entradas"/"- saídas", que têm
+      // seus próprios valores monetários e não devem entrar aqui.
+      const moneyItems = items.filter(i => i.x >= 130 && i.x < 260 && MONEY_RE.test(i.text));
+      if (moneyItems.length) consolidatedTotal = parseBRL(moneyItems[moneyItems.length - 1].text);
+      break;
+    }
+  }
+
+  // ── Localiza a página de "3 — sua carteira detalhada" (a tabela com um
+  // ativo por linha) — procurando o cabeçalho da tabela em vez de assumir um
+  // número de página fixo, pra não quebrar se o relatório crescer/encolher.
+  let detailPageNum = null;
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const rows = await getRows(p);
+    const hasHeader = rows.some(r => {
+      const txt = norm(r.items.map(i => i.text).join(' '));
+      return txt.includes('produto') && txt.includes('saldo') && txt.includes('vencto');
+    });
+    if (hasHeader) { detailPageNum = p; break; }
+  }
+  if (!detailPageNum) throw new Error('Não foi possível localizar a seção "Sua carteira detalhada" neste PDF.');
+
+  const assets = [];
+  let nameBuffer = [];       // linhas de nome acumuladas antes da linha de dados
+  let currentCategory = null; // categoria da carteira atual ("Multimercados" etc.)
+  let skipNextNameOnly = false; // descarta a linha de continuação LOGO DEPOIS de uma linha de dados (ex: "150529)")
+  let stop = false;
+
+  for (let p = detailPageNum; p <= pdf.numPages && !stop; p++) {
+    const rows = await getRows(p);
+    for (const r of rows) {
+      const items = r.items;
+      const nameText = items.filter(i => i.x < 170).map(i => i.text).join(' ').trim();
+      const nameNorm = norm(nameText);
+
+      if (nameNorm === 'indicadores') { stop = true; break; } // fim da tabela de ativos
+      if (nameNorm === 'produto') continue;                    // cabeçalho da tabela
+      if (nameNorm.startsWith('total da carteira')) continue;  // já validado via página 2
+      if (nameNorm.startsWith('retorno sobre')) continue;      // sub-linha de benchmark, não é ativo
+
+      // Cabeçalho de categoria: "7,1% Juros pós-fixados 19.583,31"
+      const pctItem = items.find(i => i.x < 55 && /^\d{1,3},\d%$/.test(i.text));
+      if (pctItem) {
+        currentCategory = items.filter(i => i.x >= 55 && i.x < 170).map(i => i.text).join(' ').trim();
+        nameBuffer = [];
+        skipNextNameOnly = false;
+        continue;
+      }
+
+      // Linha de dados do ativo: tem o Saldo (R$) na faixa de coluna certa
+      const saldoItem = items.find(i => i.x >= 172 && i.x < 235 && MONEY_RE.test(i.text));
+      if (saldoItem) {
+        const venctoItem = items.find(i => i.x >= 255 && i.x < 305 && /^\d{2}\/\d{2}\/\d{2,4}$/.test(i.text));
+        const fullName = (nameBuffer.join(' ') + ' ' + nameText).trim();
+        nameBuffer = [];
+        skipNextNameOnly = true; // a próxima linha só-de-nome (se houver) é uma continuação DESTE ativo (ex: "150529)"), não do próximo
+        const valor = parseBRL(saldoItem.text);
+        const { category, inv_type } = classifyCarteiraAsset(currentCategory, fullName);
+        assets.push({ name: fullName, category, inv_type, broker: 'Itaú', valor, movimentacoes: [] });
+        continue;
+      }
+
+      // Linha só de nome (continuação, antes ou depois da linha de dados) —
+      // só acumula depois que já vimos alguma categoria (evita "lixo" de
+      // texto introdutório da página antes da primeira categoria aparecer).
+      if (nameText && currentCategory) {
+        if (skipNextNameOnly) { skipNextNameOnly = false; continue; }
+        nameBuffer.push(nameText);
+      }
+    }
+  }
+
+  if (!stmtMonth) {
+    const now = new Date();
+    stmtMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  }
+
+  const totalLiquido = assets.reduce((s,a) => s + (a.valor||0), 0);
+  return { assets, categoryTargets: {}, broker: 'Itaú', month: stmtMonth, totalLiquido, consolidatedTotal };
+}
+
+// ── Dispatcher: detecta automaticamente qual dos dois formatos de PDF de
+// investimentos do Itaú foi importado — o "Extrato Consolidado" (extrato
+// mensal comum, seção "02. Investimentos") ou a "Carteira de Investimentos"
+// (relatório de posição/performance, baixado por um caminho mais escondido
+// do app/site) — e chama o parser certo. A pessoa não precisa saber qual dos
+// dois tem em mãos; o app decide sozinho pela primeira página do arquivo.
+async function parseItauInvestmentsPDF(buffer) {
+  await loadPdfJsLib();
+  const pdf = await getPdfDocumentWithPassword(buffer);
+  if (!pdf) throw new Error('__IMPORT_CANCELLED__');
+  const page = await pdf.getPage(1);
+  const content = await page.getTextContent();
+  const text = content.items.map(it => it.str).join(' ').toLowerCase();
+  const isCarteira = text.includes('carteira de') && text.includes('investimentos') &&
+    (text.includes('posiçãoe') || text.includes('posição') || text.includes('performance'));
+  return isCarteira ? _parseItauCarteiraPDF(buffer) : _parseItauExtratoConsolidadoPDF(buffer);
 }
 
 // ── Santander credit card invoice (Fatura) PDF parser ──
@@ -12166,13 +12396,18 @@ function catKey(e,dropId,inputId){
 // ══ MODALS ══
 // ── Custom confirm dialog (replaces window.confirm to avoid Electron UI freeze) ──
 let _confirmResolve = null;
-function showConfirmDialog(title, detail = '', okLabel = 'Confirmar', danger = false) {
+function showConfirmDialog(title, detail = '', okLabel = 'Confirmar', danger = false, detailIsHtml = false) {
   return new Promise(resolve => {
     _confirmResolve = resolve;
     const el = G('modal-confirm');
     if (!el) { resolve(true); return; }
     G('modal-confirm-title').textContent  = title;
-    G('modal-confirm-detail').textContent = detail;
+    // Por padrão o detalhe é texto puro (.textContent, seguro contra HTML
+    // acidental). Só quando quem chama sinaliza detailIsHtml=true usamos
+    // innerHTML — usado, por ex., pela exclusão em lote do patrimônio, que
+    // monta uma lista formatada do que será apagado.
+    const detailEl = G('modal-confirm-detail');
+    if (detailIsHtml) detailEl.innerHTML = detail; else detailEl.textContent = detail;
     const okBtn = G('modal-confirm-ok');
     okBtn.textContent = okLabel;
     okBtn.className = danger ? 'btn danger' : 'btn primary';
@@ -13438,7 +13673,7 @@ const GUIDE_PAGES = {
 const GUIDE_TIPS = {
   overview: [
     { q: 'Como funciona o gráfico 📈 Receitas e Despesas?',
-      a: `<p>Esse é o gráfico principal da Visão Geral. Cada barra representa um mês: a parte de um lado mostra tudo que entrou (receitas) e a de outro tudo que saiu (despesas) naquele mês.</p>
+      a: `<p>Esse é o gráfico principal da Visão Geral. São duas linhas ao longo do tempo, uma mês a mês: uma mostra tudo que entrou (receitas) e a outra tudo que saiu (despesas) em cada mês.</p>
       <p><strong>Clique em qualquer mês do gráfico</strong> — os painéis logo abaixo (Orçado vs. Realizado, Participação por categoria, Cartões de crédito) atualizam para mostrar só os detalhes daquele mês específico. É a forma mais rápida de "entrar" num mês e investigar o que aconteceu.</p>
       <p>No canto do gráfico tem três controles: o período (quantos meses aparecem), o botão IPCA e o botão MM 12m — cada um tem sua própria dica aqui embaixo, com mais detalhe.</p>` },
 
@@ -13492,7 +13727,7 @@ const GUIDE_TIPS = {
     { q: 'O que mostra 💳 Cartões de crédito, e por que definir o limite de cada cartão?',
       a: `<p>Esse painel mostra, para cada cartão de crédito, o quanto já foi gasto na fatura do mês selecionado.</p>
       <p><strong>Por que o limite do cartão importa:</strong> sem o limite cadastrado, o app só consegue mostrar "quanto você gastou" — mas não consegue desenhar a barra mostrando a <strong>distância entre o gasto atual e o limite total do cartão</strong>, que é a informação mais importante pra saber se você está perto de estourar o cartão.</p>
-      <p>💡 <strong>Como cadastrar:</strong> vá em <a onclick="goPage('patrimonio')">Patrimônio</a> (ou nas configurações da conta do cartão) e preencha o campo de limite. Depois disso, a barra aqui passa a mostrar claramente o quanto ainda "cabe" no cartão até o limite.</p>` },
+      <p>💡 <strong>Como cadastrar:</strong> abra as configurações da conta do cartão (na aba de contas, edite o cartão) e preencha o campo de limite. Depois disso, a barra aqui passa a mostrar claramente o quanto ainda "cabe" no cartão até o limite.</p>` },
   ],
 
   projecao: [
@@ -13561,7 +13796,7 @@ const GUIDE_TIPS = {
     { q: 'Como exporto um relatório?',
       a: `<p>Depois de gerar o relatório, use os botões ao lado do "Atualizar":</p>
       <ul>
-        <li><strong>📋 CSV</strong>: formato de texto simples, compatível com outros programas de finanças (como o Moneyspire).</li>
+        <li><strong>📋 CSV</strong>: formato de texto simples, compatível com outros programas de finanças.</li>
         <li><strong>📊 Excel</strong>: gera uma planilha .xlsx pronta pra abrir no Excel ou Google Planilhas.</li>
         <li><strong>📄 PDF</strong>: gera um arquivo PDF formatado, bom pra imprimir ou compartilhar.</li>
       </ul>
@@ -13578,7 +13813,7 @@ const GUIDE_TIPS = {
       a: `<p>Clique em <strong>"➕ Outro banco…"</strong> (ou "➕ Outro cartão…") no fim da lista de bancos. O app abre um assistente que tenta reconhecer sozinho o formato do seu arquivo:</p>
       <ol>
         <li><strong>Selecione o arquivo</strong> do seu banco (CSV, XLSX, XLS, OFX ou PDF).</li>
-        <li>O app tenta <strong>detectar automaticamente</strong> as colunas (data, descrição, valor) e mostra uma prévia. Se dedetectar direito, é só confirmar.</li>
+        <li>O app tenta <strong>detectar automaticamente</strong> as colunas (data, descrição, valor) e mostra uma prévia. Se detectar direito, é só confirmar.</li>
         <li>Se não conseguir detectar sozinho, você vai precisar indicar manualmente <strong>qual coluna é a data, qual é a descrição e qual é o valor</strong> (e, se o arquivo tiver colunas separadas de entrada e saída em vez de uma só com o sinal, isso também dá pra configurar).</li>
         <li>Dá pra marcar <strong>"Inverter sinal"</strong> se o app importar tudo com o sinal trocado (despesas aparecendo como receita, ou vice-versa) — é um erro comum de configuração fácil de corrigir aqui.</li>
       </ol>
@@ -13648,8 +13883,13 @@ const GUIDE_TIPS = {
       <p>💡 Prefere digitar em vez de preencher campo por campo? Use o <strong>"✨ Lançar com IA"</strong> — descreva em uma frase (ex.: "almoço 45 reais ontem no cartão") e o app já monta o lançamento pra você confirmar.</p>` },
 
     { q: 'Como fazer uma transferência entre contas?',
-      a: `<p>Clique em <strong>"⇄ Transferência"</strong> no topo da tela (ou use o atalho <kbd>Ctrl+T</kbd>). Escolha a <strong>conta de origem</strong>, a <strong>conta de destino</strong>, o valor e a data — o app cria automaticamente os dois lados do movimento (a saída de uma conta e a entrada na outra), sempre vinculados um ao outro.</p>
-      <p>💡 Por que isso importa: transferências feitas dessa forma (em vez de dois lançamentos comuns separados) são reconhecidas automaticamente pelos Relatórios e pela Evolução como "não são receita nem despesa de verdade" — então não distorcem seus totais.</p>
+      a: `<p>Há dois jeitos, e os dois produzem o mesmo resultado:</p>
+      <ol>
+        <li><strong>Botão dedicado:</strong> clique em <strong>"⇄ Transferência"</strong> no topo da tela (ou use o atalho <kbd>Ctrl+T</kbd>). Escolha a <strong>conta de origem</strong>, a <strong>conta de destino</strong>, o valor e a data.</li>
+        <li><strong>Pelo lançamento comum:</strong> ao criar um lançamento normal (no botão "+ Lançamento"), basta escolher, no campo de <strong>categoria</strong>, a categoria que representa a conta de destino — ela aparece no formato <strong>"⇄ Transferência: [nome da conta]"</strong> (o emoji das setinhas seguido do nome da conta). O app entende que é uma transferência e cuida do resto.</li>
+      </ol>
+      <p>De qualquer uma das formas, o app cria automaticamente os dois lados do movimento (a saída de uma conta e a entrada na outra), sempre vinculados um ao outro.</p>
+      <p>💡 Por que isso importa: transferências feitas assim (em vez de dois lançamentos comuns soltos) são reconhecidas automaticamente pelos Relatórios e pela Evolução como "não são receita nem despesa de verdade" — então não distorcem seus totais.</p>
       <p>Se você editar ou apagar um lado da transferência, o outro lado é atualizado/removido junto, pra nunca ficar um "lado solto".</p>` },
 
     { q: 'Como criar uma recorrência a partir de um lançamento que já existe?',
@@ -13721,7 +13961,7 @@ const GUIDE_TIPS = {
 
   evolucao: [
     { q: 'Diferença entre "Resumo" e "Por categoria"',
-      a: `<p><strong>Resumo</strong> mostra os totais gerais mês a mês: receita total, despesa total e o resultado (lucro/déficit) — a visão "de cima" da sua vida financeira ao longo do tempo.</p>
+      a: `<p><strong>Resumo</strong> mostra os totais gerais mês a mês: receita total, despesa total e o resultado (lucro/prejuízo) — a visão "de cima" da sua vida financeira ao longo do tempo.</p>
       <p><strong>Por categoria</strong> quebra isso categoria por categoria, mês a mês — útil pra ver a evolução de uma categoria específica (ex: "meus gastos com Mercado estão subindo?").</p>` },
 
     { q: 'Os botões "Corrigir por IPCA" e "Média móvel 12m"',
@@ -13786,15 +14026,22 @@ const GUIDE_TIPS = {
       a: `<p>Contas, bens ou investimentos marcados como <strong>ocultos</strong> ficam fora da lista visível por padrão — é só uma forma de "arrumar a mesa" e não poluir a tela com itens que você não quer ver toda hora (ex: uma conta antiga já encerrada, mas que você quer manter no histórico).</p>
       <p>⚠️ <strong>Importante:</strong> ocultar um item <strong>não</strong> tira ele das totalizações nem dos gráficos — ele continua contando normalmente no "Total Patrimônio" e em todos os cálculos, só não aparece na lista enquanto "Mostrar ocultos" estiver desmarcado. É uma questão só de visualização, não de cálculo.</p>` },
 
-    { q: 'O que faz o botão "📡 Atualizar IPCA mensal"?',
-      a: `<p>Busca automaticamente, direto do Banco Central, os valores mensais do IPCA — o índice usado para corrigir valores antigos ao poder de compra de hoje em vários lugares do app (Patrimônio, Evolução, Aposentadoria). Vale rodar de vez em quando pra manter os dados de inflação em dia.</p>` },
+    { q: 'Como excluir vários itens de uma vez (em lote)?',
+      a: `<p>Além do ✕ que exclui um item individualmente, cada linha de <strong>bem/direito</strong>, <strong>investimento</strong> e <strong>dívida</strong> tem uma <strong>caixinha de seleção</strong> na coluna de ações (à direita).</p>
+      <ol>
+        <li>Marque as caixinhas dos itens que quer excluir — pode misturar bens, investimentos e dívidas na mesma seleção.</li>
+        <li>Para selecionar vários de uma vez, marque o primeiro e, segurando <strong>Shift</strong>, clique na caixinha do último — todos os itens entre eles são selecionados de uma vez.</li>
+        <li>Aparece uma barra na parte de baixo da tela mostrando quantos itens estão selecionados. Clique em <strong>"🗑 Excluir selecionados"</strong>.</li>
+        <li>Um aviso lista exatamente o que será apagado e pede confirmação — porque <strong>a exclusão não pode ser desfeita</strong> (todo o histórico dos itens é removido).</li>
+      </ol>
+      <p>💡 Mudou de ideia? Clique em "Cancelar" na barra pra limpar a seleção sem excluir nada.</p>` },
 
     { q: 'Como funcionam os filtros e a ordenação da tabela?',
       a: `<p>Clique em <strong>"🔍 Filtros e ordenação"</strong> pra abrir um painel onde dá pra filtrar bens por tipo (imóvel, veículo, barco, etc.) e escolher a ordem de exibição (nome, valor atual, tipo) — tanto para os bens quanto para as contas, cada um com seu próprio critério de ordenação.</p>` },
 
     { q: 'Dívida com garantia (financiamento) x dívida sem garantia — qual a diferença?',
       a: `<p>Um financiamento com alienação fiduciária ou hipoteca (o bem fica em garantia do banco/construtora) já aparece automaticamente na seção de <strong>Bens e Direitos</strong>, na linha "Saldo devedor" do próprio bem — não precisa cadastrar de novo.</p>
-      <p>A seção separada de <strong>dívidas</strong> ("💳 Cartões e Dívidas") é só para empréstimos <strong>sem</strong> um bem específico dado como garantia — por exemplo, um empréstimo pessoal ou um cartão de crédito parcelado. Cadastrar o mesmo financiamento nos dois lugares contaria a dívida em dobro no seu patrimônio.</p>` },
+      <p>A seção separada de <strong>dívidas</strong> ("💳 Cartões e Dívidas") é só para empréstimos <strong>sem</strong> um bem específico dado como garantia — por exemplo, um empréstimo pessoal. Cadastrar o mesmo financiamento nos dois lugares contaria a dívida em dobro no seu patrimônio.</p>` },
   ],
 
   goals: [
@@ -13874,7 +14121,7 @@ const GUIDE_TIPS = {
       <p>Quando a confiança não é alta o suficiente, o app <strong>prefere não sugerir nada</strong> a arriscar uma sugestão errada — por isso nem todo lançamento vem com sugestão automática, mesmo depois de bastante uso.</p>` },
 
     { q: 'O que faz o botão "Treinar com histórico"?',
-      a: `<p>Reprocessa todos os seus lançamentos <strong>já categorizados</strong> no passado de uma vez, extraindo os padrões deles pro aprendizado — útil principalmente depois de importar um grande volume de histórico antigo, ou se você acabou de começar a usar o app e quer "adiantar" o aprendizado em vez de esperar ele se acumular aos poucos.</p>` },
+      a: `<p>Reprocessa todos os seus lançamentos <strong>já categorizados</strong> no passado de uma vez, extraindo os padrões deles pro aprendizado — útil principalmente depois de importar um grande volume de histórico antigo.</p>` },
 
     { q: 'Para que servem "Exportar" e "Importar" aqui?',
       a: `<p>Exportar salva tudo o que o app aprendeu num arquivo. Importar carrega esse arquivo de volta — útil ao trocar de computador, reinstalar o app, ou simplesmente ter um backup separado do aprendizado (que é diferente do backup normal dos seus dados financeiros).</p>` },
@@ -18850,6 +19097,131 @@ let _pat = {
   showDebtInstallments: false, // Linha de parcelas das dívidas pessoais — colapsada por padrão
 };
 
+// ── Seleção em lote de bens/direitos, investimentos e dívidas ──────────────
+// Cada entidade tem seu próprio conjunto de IDs selecionados. A seleção é por
+// checkbox (clique simples marca/desmarca; shift+clique seleciona o intervalo
+// desde o último clicado, como em listas de arquivos). Uma barra de ação
+// aparece quando há algo selecionado, com exclusão em lote protegida por um
+// alerta de confirmação reforçado.
+const _patSel = {
+  asset: { ids: new Set(), lastClicked: null, order: [] },
+  inv:   { ids: new Set(), lastClicked: null, order: [] },
+  debt:  { ids: new Set(), lastClicked: null, order: [] },
+};
+const _PAT_SEL_META = {
+  asset: { label: 'bem/direito', labelPlural: 'bens/direitos',      del: id => ff.patAssetDelete({ id }) },
+  inv:   { label: 'investimento', labelPlural: 'investimentos',      del: id => ff.invAssetDelete({ id }) },
+  debt:  { label: 'dívida',       labelPlural: 'dívidas',            del: id => ff.debtDelete({ id }) },
+};
+
+// Registra, na ordem visual, os IDs de cada tipo — usado pra resolver o
+// intervalo do shift+clique. Chamado pelos renderizadores de cada tabela
+// antes de desenhar as linhas.
+function patSelResetOrder(type, ids) {
+  _patSel[type].order = ids.slice();
+  // Remove da seleção quaisquer IDs que já não existam mais (ex: após excluir)
+  const present = new Set(ids);
+  [..._patSel[type].ids].forEach(id => { if (!present.has(id)) _patSel[type].ids.delete(id); });
+}
+
+// Handler do clique no checkbox de seleção (event vem do onclick do checkbox)
+function patSelToggle(type, id, evt) {
+  const sel = _patSel[type];
+  if (evt && evt.shiftKey && sel.lastClicked != null) {
+    // Seleciona o intervalo contíguo (na ordem visual) entre o último
+    // clicado e o atual — todos passam a ficar marcados.
+    const a = sel.order.indexOf(sel.lastClicked);
+    const b = sel.order.indexOf(id);
+    if (a !== -1 && b !== -1) {
+      const [lo, hi] = a < b ? [a, b] : [b, a];
+      for (let i = lo; i <= hi; i++) sel.ids.add(sel.order[i]);
+    }
+  } else {
+    if (sel.ids.has(id)) sel.ids.delete(id); else sel.ids.add(id);
+  }
+  sel.lastClicked = id;
+  patSelSyncUI(type);
+}
+
+// Sincroniza os checkboxes visíveis e a barra de ação com o estado atual —
+// sem re-renderizar a tabela inteira (mais leve e não perde o scroll).
+function patSelSyncUI(type) {
+  const sel = _patSel[type];
+  document.querySelectorAll(`.pat-sel-chk[data-seltype="${type}"]`).forEach(chk => {
+    chk.checked = sel.ids.has(parseInt(chk.dataset.selid));
+  });
+  patSelRenderBar();
+}
+
+function patSelClear(type) {
+  _patSel[type].ids.clear();
+  _patSel[type].lastClicked = null;
+  patSelSyncUI(type);
+}
+function patSelClearAll() {
+  ['asset','inv','debt'].forEach(t => { _patSel[t].ids.clear(); _patSel[t].lastClicked = null; });
+  patSelRenderBar();
+  ['asset','inv','debt'].forEach(t => patSelSyncUI(t));
+}
+
+// Barra flutuante de ação em lote (uma só, some quando nada está selecionado)
+function patSelRenderBar() {
+  let bar = G('pat-sel-bar');
+  const total = _patSel.asset.ids.size + _patSel.inv.ids.size + _patSel.debt.ids.size;
+  if (!total) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'pat-sel-bar';
+    bar.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2500;'
+      + 'background:var(--bg2);border:1px solid var(--border2);border-radius:12px;'
+      + 'box-shadow:0 6px 24px rgba(0,0,0,.18);padding:10px 14px;display:flex;align-items:center;gap:14px;font-size:13px';
+    document.body.appendChild(bar);
+  }
+  const parts = [];
+  if (_patSel.asset.ids.size) parts.push(`${_patSel.asset.ids.size} ${_patSel.asset.ids.size === 1 ? 'bem/direito' : 'bens/direitos'}`);
+  if (_patSel.inv.ids.size)   parts.push(`${_patSel.inv.ids.size} investimento${_patSel.inv.ids.size === 1 ? '' : 's'}`);
+  if (_patSel.debt.ids.size)  parts.push(`${_patSel.debt.ids.size} dívida${_patSel.debt.ids.size === 1 ? '' : 's'}`);
+  bar.innerHTML = `
+    <span style="font-weight:600">${total} selecionado${total === 1 ? '' : 's'}</span>
+    <span style="color:var(--text3);font-size:12px">(${parts.join(' + ')})</span>
+    <button class="btn sm" onclick="patSelClearAll()">Cancelar</button>
+    <button class="btn sm" style="background:var(--red);color:#fff;border-color:var(--red)" onclick="patSelDeleteSelected()">🗑 Excluir selecionados</button>`;
+}
+
+async function patSelDeleteSelected() {
+  const groups = ['asset','inv','debt'].map(t => ({ type: t, ids: [..._patSel[t].ids] })).filter(g => g.ids.length);
+  const total = groups.reduce((s, g) => s + g.ids.length, 0);
+  if (!total) return;
+
+  // Alerta de confirmação reforçado, listando exatamente o que será apagado.
+  const lines = groups.map(g => {
+    const meta = _PAT_SEL_META[g.type];
+    const names = g.ids.map(id => {
+      if (g.type === 'asset') return _pat.assets.find(a => a.id === id)?.name;
+      if (g.type === 'inv')   return _inv.assets.find(a => a.id === id)?.name;
+      if (g.type === 'debt')  return _pat.debts.find(d => d.id === id)?.name;
+    }).filter(Boolean);
+    const nameList = names.length <= 6 ? names.join(', ') : names.slice(0, 6).join(', ') + ` e mais ${names.length - 6}`;
+    return `<strong>${g.ids.length} ${g.ids.length === 1 ? meta.label : meta.labelPlural}</strong>: ${esc(nameList)}`;
+  });
+  const detailHtml = `Você está prestes a excluir <strong>${total} ${total === 1 ? 'item' : 'itens'}</strong> de uma vez:`
+    + `<ul style="margin:10px 0 10px 4px;padding-left:18px;line-height:1.7">${lines.map(l => `<li>${l}</li>`).join('')}</ul>`
+    + `⚠️ <strong>Todo o histórico</strong> (movimentações, parcelas, valores mês a mês) desses itens será removido. <strong>Esta ação não pode ser desfeita.</strong>`;
+  const ok = await showConfirmDialog(`Excluir ${total} ${total === 1 ? 'item' : 'itens'} em lote?`, detailHtml, `Excluir ${total} ${total === 1 ? 'item' : 'itens'}`, true, true);
+  if (!ok) return;
+
+  let done = 0;
+  for (const g of groups) {
+    const meta = _PAT_SEL_META[g.type];
+    for (const id of g.ids) { try { await meta.del(id); done++; } catch(e) { console.error('Erro ao excluir', g.type, id, e); } }
+  }
+  patSelClearAll();
+  toast(`${done} ${done === 1 ? 'item removido' : 'itens removidos'}`);
+  await refreshInvestimentos().catch(()=>{});
+  refreshPatrimonio();
+}
+
+
 // Sign convention for pat_transactions (from investor's cash perspective)
 const PAT_TX_CASH = {
   compra:                 { label: '🟢 Compra',                   sign: -1 },
@@ -19389,6 +19761,7 @@ function refreshPatrimonioTable() {
   });
 
   let assetRows = '';
+  patSelResetOrder('asset', visibleAssets.map(a => a.id));
   visibleAssets.forEach((a, ri) => {
     const bg = stripe(ri);
     assetRows += `<tr draggable="true" style="background:${bg};height:38px;cursor:grab"
@@ -19422,6 +19795,7 @@ function refreshPatrimonioTable() {
         </td>`;
       }).join('')}
       <td style="text-align:center;${STICKY};right:0;min-width:60px;background:${bg}">
+        <input type="checkbox" class="pat-sel-chk" data-seltype="asset" data-selid="${a.id}" ${_patSel.asset.ids.has(a.id)?'checked':''} onclick="patSelToggle('asset',${a.id},event)" title="Selecionar para exclusão em lote" style="vertical-align:middle;margin-right:2px;cursor:pointer">
         <button class="btn-icon" onclick="openPatAssetModal(${a.id})" title="Editar">✎</button>
         <button class="btn-icon" onclick="deletePatAsset(${a.id})" style="color:var(--red)" title="Excluir">✕</button>
       </td>
@@ -19658,6 +20032,7 @@ function refreshPatrimonioTable() {
   });
 
   let debtRows = '';
+  patSelResetOrder('debt', visibleDebts.map(d => d.id));
   visibleDebts.forEach((d, ri) => {
     const bg = stripe(ri);
     const installByMonth = {};
@@ -19709,6 +20084,7 @@ function refreshPatrimonioTable() {
       <td style="${STICKY};left:370px;min-width:90px;max-width:90px;background:${bg}"></td>
       ${bCells}
       <td style="text-align:center;${STICKY};right:0;min-width:60px;background:${bg}">
+        <input type="checkbox" class="pat-sel-chk" data-seltype="debt" data-selid="${d.id}" ${_patSel.debt.ids.has(d.id)?'checked':''} onclick="patSelToggle('debt',${d.id},event)" title="Selecionar para exclusão em lote" style="vertical-align:middle;margin-right:2px;cursor:pointer">
         <button class="btn-icon" onclick="openDebtModal(${d.id})" title="Editar">✎</button>
         <button class="btn-icon" onclick="deletePatDebt(${d.id})" style="color:var(--red)" title="Excluir">✕</button>
       </td>
@@ -23396,6 +23772,10 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
   // Any unknown categories at the end
   Object.keys(byCategory).forEach(k => { if (!INV_CAT_ORDER.includes(k)) catKeys.push(k); });
 
+  // Ordem visual dos investimentos (categoria a categoria, na mesma ordem em
+  // que as linhas aparecem) — usada para resolver o intervalo do shift+clique.
+  patSelResetOrder('inv', catKeys.flatMap(k => byCategory[k].map(a => a.id)));
+
   // Helper: build a category subtotal row (value + optional cash flow rows)
   function buildCatSubtotalRow(catKey, catAssets, allMonths, txByAsset2, curM2, STICKY2, COL_W2, stripe2, ipcaCumFn, showReal2, nextM2) {
     const catLabel = INV_CATEGORIES[catKey]?.label || catKey;
@@ -23716,6 +24096,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden) {
     const projRealCell = `<td style="min-width:0;max-width:0;padding:0;border:none;overflow:hidden"></td>`;
 
     const editCell = `<td style="text-align:center;${STICKY};right:0;min-width:60px;background:${bg}">
+      <input type="checkbox" class="pat-sel-chk" data-seltype="inv" data-selid="${a.id}" ${_patSel.inv.ids.has(a.id)?'checked':''} onclick="patSelToggle('inv',${a.id},event)" title="Selecionar para exclusão em lote" style="vertical-align:middle;margin-right:2px;cursor:pointer">
       <button class="btn-icon" onclick="openInvAssetModal(${a.id})" title="Editar">✎</button>
       <button class="btn-icon" onclick="deleteInvAsset(${a.id})" style="color:var(--red)" title="Excluir">✕</button>
     </td>`;

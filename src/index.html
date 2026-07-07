@@ -1901,8 +1901,8 @@ select.inp option{background:var(--bg2);}
     </div>
     <!-- Toolbar -->
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
-      <span id="pat-ipca-status" style="font-size:12px;color:var(--text3);flex:1">IPCA mensal não carregado</span>
-      <button class="ev-action-btn" onclick="patFetchIPCA()">📡 Atualizar IPCA mensal</button>
+      <span id="pat-ipca-status" style="font-size:12px;color:var(--text3);flex:1;display:none">IPCA mensal não carregado</span>
+      <button class="ev-action-btn" onclick="patFetchIPCA()" style="display:none">📡 Atualizar IPCA mensal</button>
       <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
         <input type="checkbox" id="pat-show-hidden" onchange="refreshPatrimonioTable()"> Mostrar ocultos
       </label>
@@ -2661,7 +2661,7 @@ select.inp option{background:var(--bg2);}
             </div>
             <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn sm" onclick="patGenerateSchedule()">⚙️ Gerar cronograma</button>
-              <button class="btn sm" onclick="ff.financingFetchIndexes().then(r=>{const ok=r.updated.join(', ')||'nenhum';const errs=(r.errors&&r.errors.length)?(' | Falhou: '+r.errors.join(' / ')):'';toast((errs?'⚠️':'✅')+' Atualizados: '+ok+errs, errs?6000:2500);}).catch(e=>toast('⚠️ '+e.message,6000))">📡 Atualizar índices</button>
+              <button class="btn sm" onclick="ff.financingFetchIndexes().then(r=>{const ok=r.updated.join(', ')||'nenhum';const errs=(r.errors&&r.errors.length)?(' | Falhou: '+r.errors.join(' / ')):'';toast((errs?'⚠️':'✅')+' Atualizados: '+ok+errs, errs?6000:2500);}).catch(e=>toast('⚠️ '+e.message,6000))"style="display:none">📡 Atualizar índices</button>
               <span id="fin-schedule-summary" style="font-size:11px;color:var(--text3)"></span>
             </div>
           </div>
@@ -2826,7 +2826,7 @@ select.inp option{background:var(--bg2);}
 
             <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn sm" onclick="patGenerateSchedule()">⚙️ Gerar cronograma</button>
-              <button class="btn sm" onclick="ff.financingFetchIndexes().then(r=>{const ok=r.updated.join(', ')||'nenhum';const errs=(r.errors&&r.errors.length)?(' | Falhou: '+r.errors.join(' / ')):'';toast((errs?'⚠️':'✅')+' Atualizados: '+ok+errs, errs?6000:2500);}).catch(e=>toast('⚠️ '+e.message,6000))">📡 Atualizar índices</button>
+              <button class="btn sm" onclick="ff.financingFetchIndexes().then(r=>{const ok=r.updated.join(', ')||'nenhum';const errs=(r.errors&&r.errors.length)?(' | Falhou: '+r.errors.join(' / ')):'';toast((errs?'⚠️':'✅')+' Atualizados: '+ok+errs, errs?6000:2500);}).catch(e=>toast('⚠️ '+e.message,6000))"style="display:none">📡 Atualizar índices</button>
               <span id="fin-schedule-summary-fb" style="font-size:11px;color:var(--text3)"></span>
             </div>
           </div>
@@ -3334,7 +3334,7 @@ select.inp option{background:var(--bg2);}
           <button id="ev-ma-pill" class="ev-toggle-pill active" onclick="evToggleMaPill()">〜 Média móvel 12m</button>
           <input type="checkbox" id="ev-ipca" style="display:none" checked>
           <input type="checkbox" id="ev-ma" style="display:none" checked>
-          <button class="ev-action-btn" onclick="fetchIPCA()" title="Buscar IPCA mensal do Banco Central" style="margin-left:auto">📡 Atualizar IPCA</button>
+          <button class="ev-action-btn" onclick="fetchIPCA()" title="Buscar IPCA mensal do Banco Central" style="margin-left:auto;display:none">📡 Atualizar IPCA</button>
         </div>
         <div id="ev-ipca-status" style="display:none;font-size:12px;color:var(--text3);margin-bottom:8px;padding:6px 12px;background:var(--bg3);border-radius:6px"></div>
 
@@ -3988,7 +3988,7 @@ select.inp option{background:var(--bg2);}
     <div class="modal" style="width:360px;padding:0;overflow:hidden">
       <div style="padding:20px 20px 12px">
         <div style="font-size:15px;font-weight:600;margin-bottom:8px" id="modal-confirm-title">Confirmar</div>
-        <div style="font-size:13px;color:var(--text2)" id="modal-confirm-detail"></div>
+        <div style="font-size:13px;color:var(--text2);max-height:50vh;overflow-y:auto" id="modal-confirm-detail"></div>
       </div>
       <div class="modal-footer" style="gap:8px">
         <button class="btn" id="modal-confirm-cancel" onclick="confirmDialogResolve(false)">Cancelar</button>
