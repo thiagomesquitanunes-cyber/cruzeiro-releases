@@ -936,9 +936,16 @@ async function buildEvolucaoCategorySeries() {
 
   // net por categoria por mês (despesa positiva, receita negativa — antes da inversão de sinal)
   const byCat = {};
+  // Bruto por categoria por mês: {income, expenses} SEM correção de IPCA e SEM MA12.
+  // É o valor nominal real daquele mês — usado pelos insights para (a) comparar
+  // contra orçamentos (que são definidos em R$ nominais) e (b) citar números
+  // concretos do mês, além da tendência suavizada.
+  const byCatRaw = {};
   catRows.forEach(r => {
     if (!byCat[r.category]) byCat[r.category] = {};
     byCat[r.category][r.month] = (r.expenses||0) - (r.income||0);
+    if (!byCatRaw[r.category]) byCatRaw[r.category] = {};
+    byCatRaw[r.category][r.month] = { income: r.income||0, expenses: r.expenses||0 };
   });
 
   // Para cada categoria: série corrigida por IPCA, depois suavizada por MA12
@@ -949,7 +956,7 @@ async function buildEvolucaoCategorySeries() {
     series[cat] = { months: allMonths, raw: rawNet, ma12 };
   });
 
-  return { allMonths, allCats, series, refMonth };
+  return { allMonths, allCats, series, byCatRaw, refMonth };
 }
 
 // targetMonth/filters: período (quantos meses), categorias (lista ou vazio=todas),
@@ -959,7 +966,11 @@ async function buildInsightsSummary(targetMonth, filters) {
   const periodMonths = filters.periodMonths || 6;
   const selectedCats = filters.categories && filters.categories.length ? new Set(filters.categories) : null;
 
-  const { allMonths, series } = await buildEvolucaoCategorySeries();
+  // Garante que a classificação receita/despesa configurada pelo usuário esteja
+  // carregada — é ela que tem prioridade sobre qualquer heurística de sinal.
+  try { if (!Object.keys(_catTypes).length) await loadCatTypes(); } catch(e) {}
+
+  const { allMonths, series, byCatRaw } = await buildEvolucaoCategorySeries();
   // 9999 = "desde o início" — usa todos os meses disponíveis
   const months = periodMonths >= 9999
     ? allMonths.filter(m => m <= targetMonth)
@@ -969,6 +980,24 @@ async function buildInsightsSummary(targetMonth, filters) {
   const prevMonths = months.filter(m => m !== curM);
 
   const catsToUse = selectedCats ? [...selectedCats] : Object.keys(series);
+
+  // Classificação de tipo (receita/despesa) em ordem de confiança decrescente:
+  //   1. configuração EXPLÍCITA do usuário (_catTypes) — sempre vence;
+  //   2. heurística de PALAVRAS-CHAVE (getCatType: salário, juros, dividendo…);
+  //   3. só então, como ÚLTIMO recurso, o sinal médio dos dados.
+  // Antes usava-se apenas o sinal médio, o que classificava errado categorias de
+  // despesa com muitos estornos (ficavam "receita") e categorias de receita com
+  // débitos pontuais (ficavam "despesa"). É a causa raiz da IA dizer "ganhos"
+  // onde era gasto e vice-versa.
+  const classifyType = (cat, avgSign) => {
+    if (_catTypes[cat] === 'income' || _catTypes[cat] === 'expense') return _catTypes[cat];
+    if (getCatType(cat) === 'income') return 'income';
+    return avgSign < 0 ? 'income' : 'expense';
+  };
+
+  // Bruto (nominal, sem IPCA/MA12) por categoria no mês alvo e média dos meses
+  // anteriores — dá à IA o número REAL do mês, além da tendência suavizada.
+  const rawNetOf = (cat, m) => { const d = byCatRaw?.[cat]?.[m]; return d ? (d.expenses - d.income) : 0; };
 
   // Por categoria: valor MA12 (já suavizado) no mês alvo, média dos meses
   // anteriores (também já em MA12, então a comparação é "tendência vs tendência",
@@ -982,57 +1011,97 @@ async function buildInsightsSummary(targetMonth, filters) {
     const priorVals = prevMonths.map(m => { const i = idxOf(m); return i>=0 ? s.ma12[i] : 0; }).filter(v => v !== 0);
     const avgPrior = priorVals.length ? priorVals.reduce((a,b)=>a+b,0)/priorVals.length : 0;
 
-    // Determina se é receita ou despesa. A série de buildEvolucaoCategorySeries
-    // é construída como "despesa positiva, receita negativa" (expenses - income)
-    // — por isso receita = valor médio NEGATIVO, não positivo.
+    // A série é "despesa positiva, receita negativa" (expenses - income).
     const allVals = s.ma12.filter(v => v !== 0);
     const avgSign = allVals.length ? allVals.reduce((a,b)=>a+b,0)/allVals.length : cur;
-    const isIncome = avgSign < 0;
+    const isIncome = classifyType(cat, avgSign) === 'income';
 
     // Normaliza pra magnitude intuitiva: despesa positiva = gastou mais;
-    // receita positiva = ganhou mais. Sem isso, mesmo com o rótulo certo,
-    // a direção da tendência (subindo/caindo) ainda saía invertida pra
-    // receita, e os números brutos negativos confundiriam a IA.
+    // receita positiva = ganhou mais.
     const curNat      = isIncome ? -cur : cur;
     const avgPriorNat = isIncome ? -avgPrior : avgPrior;
     const pctChange = avgPriorNat !== 0 ? ((curNat - avgPriorNat) / Math.abs(avgPriorNat)) * 100 : null;
 
+    // Número BRUTO do mês alvo (nominal), normalizado pelo tipo, e nº de meses
+    // com movimento — para a IA evitar conclusões sobre categorias com poucos dados.
+    const rawCur = rawNetOf(cat, curM);
+    const rawCurNat = isIncome ? -rawCur : rawCur;
+    const monthsWithData = months.filter(m => rawNetOf(cat, m) !== 0).length;
+
     return {
       category: cat,
       type: isIncome ? 'receita' : 'despesa',
-      current: Math.round(curNat),
-      avgPrior: Math.round(avgPriorNat),
+      current: Math.round(curNat),           // tendência MA12 (R$ de hoje)
+      avgPrior: Math.round(avgPriorNat),      // tendência MA12 média anterior
+      actualThisMonth: Math.round(rawCurNat), // valor NOMINAL real do mês alvo
+      monthsWithData,                         // quantos meses do período tiveram movimento
       pctChange: pctChange === null ? null : Math.round(pctChange),
       // Para receitas: subindo = bom; Para despesas: aumentando = ruim
       trend: isIncome
         ? (pctChange === null ? 'estável' : pctChange > 5 ? 'subindo' : pctChange < -5 ? 'caindo' : 'estável')
         : (pctChange === null ? 'estável' : pctChange > 5 ? 'aumentando' : pctChange < -5 ? 'reduzindo' : 'estável'),
     };
-  }).filter(c => c && (c.current !== 0 || c.avgPrior !== 0))
+  }).filter(c => c && (c.current !== 0 || c.avgPrior !== 0 || c.actualThisMonth !== 0))
     .sort((a,b) => Math.abs(b.current) - Math.abs(a.current))
     .slice(0, 20);
 
-  const totalByMonth = {};
-  months.forEach(m => {
-    totalByMonth[m] = Object.keys(series).reduce((s, cat) => {
-      const i = series[cat].months.indexOf(m);
-      return s + (i >= 0 ? series[cat].ma12[i] : 0);
-    }, 0);
-  });
-  const totalSpentCurrent = totalByMonth[curM] || 0;
-  const priorTotals = prevMonths.map(m => totalByMonth[m]).filter(v => v);
-  const avgMonthlySpent = priorTotals.length ? priorTotals.reduce((a,b)=>a+b,0)/priorTotals.length : 0;
+  // ── Totais separados por TIPO, em valores NOMINAIS do mês alvo ──
+  // Antes existia um único "totalSpentCurrent" que somava todas as séries com
+  // receita negativa — ou seja, era o RESULTADO LÍQUIDO, não o total gasto. O
+  // nome enganava a IA a dizer "você gastou R$ X" com um número que já descontava
+  // as receitas. Agora separamos explicitamente despesa, receita, resultado e
+  // taxa de poupança, cada um com rótulo inequívoco.
+  const splitTotals = (m) => {
+    let income = 0, expenses = 0;
+    Object.keys(byCatRaw || {}).forEach(cat => {
+      if (selectedCats && !selectedCats.has(cat)) return;
+      const d = byCatRaw[cat][m]; if (!d) return;
+      const net = d.expenses - d.income;
+      const allVals = series[cat] ? series[cat].ma12.filter(v => v !== 0) : [];
+      const avgSign = allVals.length ? allVals.reduce((a,b)=>a+b,0)/allVals.length : net;
+      if (classifyType(cat, avgSign) === 'income') income += (d.income - d.expenses);
+      else expenses += net;
+    });
+    return { income: Math.max(0, income), expenses: Math.max(0, expenses) };
+  };
+  const curTot = splitTotals(curM);
+  const totalExpenses = curTot.expenses;
+  const totalIncome   = curTot.income;
+  const netResult     = totalIncome - totalExpenses;
+  const savingsRate   = totalIncome > 0 ? Math.round((netResult / totalIncome) * 100) : null;
 
-  // Orçamentos referentes ao mês alvo (não ao mês corrente real)
+  const priorTots = prevMonths.map(splitTotals);
+  const avgMonthlyExpenses = priorTots.length ? priorTots.reduce((a,b)=>a+b.expenses,0)/priorTots.length : 0;
+  const avgMonthlyIncome   = priorTots.length ? priorTots.reduce((a,b)=>a+b.income,0)/priorTots.length : 0;
+
+  // Orçamentos referentes ao mês alvo — agora com SUBCATEGORIAS e valor LÍQUIDO
+  // (despesa menos estornos na mesma categoria), exatamente como a aba Orçamento.
+  // Antes o casamento era por categoria EXATA, então um orçamento em "Carro" com
+  // gasto lançado em "Carro:Combustível" aparecia como gasto = 0.
   let budgets = [];
   try {
     const bl = (await ff.budgetList()).filter(b => b.type !== 'income');
-    const actuals = await ff.budgetActuals({ month: curM });
-    const actMap = {};
-    actuals.forEach(a => { actMap[a.category] = a.spent || 0; });
-    budgets = bl.map(b => ({ category: b.category, limit: b.monthly_limit,
-      spent: Math.round(actMap[b.category] || 0) }));
+    const actuals = await ff.budgetActuals({ month: curM }); // já livre de transferências
+    budgets = bl.map(b => {
+      const consolidate = b.consolidate_subs !== 0;
+      let spent = 0, received = 0;
+      actuals.forEach(a => {
+        const c = a.category || '';
+        if (c === b.category || (consolidate && c.startsWith(b.category + ':'))) {
+          spent += a.spent || 0; received += a.received || 0;
+        }
+      });
+      const netSpent = Math.max(0, spent - received);
+      return { category: b.category, limit: b.monthly_limit,
+        spent: Math.round(netSpent),
+        pctUsed: b.monthly_limit > 0 ? Math.round(netSpent / b.monthly_limit * 100) : null,
+        status: b.monthly_limit > 0 ? (netSpent > b.monthly_limit ? 'acima' : netSpent >= b.monthly_limit * 0.85 ? 'perto' : 'ok') : 'sem_limite' };
+    });
   } catch(e) {}
+
+  // Maiores transações reais do mês (para a IA citar exemplos concretos)
+  let topTransactions = { expenses: [], income: [] };
+  try { topTransactions = await ff.insightsTopTransactions({ month: curM, limit: 5 }); } catch(e) {}
 
   // Dívidas pessoais cadastradas, com taxa de juros real (para a IA comparar
   // contra os encargos de rotativo/cheque especial detectados na importação)
@@ -1067,12 +1136,18 @@ async function buildInsightsSummary(targetMonth, filters) {
   } catch(e) {}
 
   return { currentMonth: curM, monthsAnalyzed: months.length,
-           dataSource: 'Evolução (valores já corrigidos pelo IPCA e suavizados por média móvel de 12 meses)',
+           dataSource: 'Aba Evolução. Campos "current"/"avgPrior" das categorias = tendência de 12 meses (MA12) já corrigida por IPCA (R$ de hoje). Campo "actualThisMonth" = valor NOMINAL real do mês. Totais e orçamentos abaixo = valores NOMINAIS reais do mês (sem IPCA/MA12).',
            focus: filters.focus || 'ambos', userRequest: filters.freeText || null,
            categoriesFilter: selectedCats ? [...selectedCats] : 'todas',
-           totalSpentCurrent: Math.round(totalSpentCurrent),
-           avgMonthlySpent: Math.round(avgMonthlySpent),
-           categories, budgets, personalDebts, recentDebtInterest,
+           // Totais NOMINAIS do mês alvo, separados sem ambiguidade:
+           totalExpenses: Math.round(totalExpenses),   // soma das DESPESAS líquidas do mês
+           totalIncome:   Math.round(totalIncome),      // soma das RECEITAS líquidas do mês
+           netResult:     Math.round(netResult),        // receitas - despesas (poupança do mês; negativo = déficit)
+           savingsRate,                                  // % da receita que sobrou (null se não houve receita)
+           avgMonthlyExpenses: Math.round(avgMonthlyExpenses), // média de despesas dos meses anteriores
+           avgMonthlyIncome:   Math.round(avgMonthlyIncome),   // média de receitas dos meses anteriores
+           categories, budgets, topTransactions,
+           personalDebts, recentDebtInterest,
            liquidBalanceToday: Math.round(liquidBalance) };
 }
 
@@ -1857,13 +1932,27 @@ async function renderDashBudget(monthStr) {
   const budgets = (await ff.budgetList().catch(() => [])).filter(b => b.type !== 'income');
   const actuals = await ff.budgetActuals({ month: monthStr }).catch(() => []);
   const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: monthStr }).catch(() => ({}));
-  const actMap = {};
-  actuals.forEach(a => { actMap[a.category] = a.spent || 0; });
+
+  // Gasto realizado por orçamento: soma SUBCATEGORIAS (quando consolidate_subs)
+  // e desconta estornos (received) — mesma regra da aba Orçamento. Antes usava
+  // match exato da categoria-mãe, então gasto lançado em "Carro:Combustível"
+  // não contava para o orçamento "Carro" e a barra ficava artificialmente baixa.
+  const spentFor = (b) => {
+    const consolidate = b.consolidate_subs !== 0;
+    let spent = 0, received = 0;
+    actuals.forEach(a => {
+      const c = a.category || '';
+      if (c === b.category || (consolidate && c.startsWith(b.category + ':'))) {
+        spent += a.spent || 0; received += a.received || 0;
+      }
+    });
+    return Math.max(0, spent - received);
+  };
 
   const enriched = budgets.map(b => {
     const rollAcc = (b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0;
     const effLimit = b.monthly_limit + rollAcc;
-    const spent = actMap[b.category] || 0;
+    const spent = spentFor(b);
     return { category: b.category, spent, effLimit, pct: effLimit > 0 ? (spent / effLimit * 100) : 0 };
   }).filter(b => b.effLimit > 0).sort((a,b) => b.pct - a.pct);
 
@@ -15519,7 +15608,11 @@ async function refreshBudget() {
 
   // ── Resumo: disponível, orçado, poupança planejada vs necessária ──
   const totalIncomePlanned  = incomeBudgets.reduce((s,b) => s + b.monthly_limit, 0);
-  const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + effLimitOf(b), 0);
+  // "Total orçado (despesas)" e os percentuais usam SEMPRE o planejamento
+  // MENSAL puro (sem rollover). O rollover é um extra de meses anteriores e
+  // aparece à parte (coluna Rollover na tabela e "sobra de rollover" no resumo)
+  // — somá-lo aqui inflava o planejado e confundia a leitura.
+  const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + b.monthly_limit, 0);
   // "Poupança planejada" usa só o limite PURO do mês (sem rollover) — o
   // rollover é uma folga adicional de meses passados, não faz sentido somar
   // ele na meta de poupança do MÊS ATUAL (senão um rollover grande faria a
@@ -15649,7 +15742,7 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   // isso, o navegador usa auto-layout e colapsa colunas vazias/com pouco
   // conteúdo para quase 0px quando há muitas colunas (era exatamente o
   // bug visto: meses viravam barras finíssimas, ilegíveis).
-  const STICKY_W = [170, 120, 80, 80];
+  const STICKY_W = [170, 120, 90, 80, 80];
   const MONTH_W  = [120, 60]; // realizado, %
   // Coluna extra, em branco, ao final da tabela — existe só pra "absorver"
   // o corte quando a largura da tela não é um múltiplo exato da largura das
@@ -15677,9 +15770,10 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   let html = colgroup + `<thead>
     <tr>
       <th class="budget-sticky budget-sticky-1" rowspan="2">Categorias</th>
-      <th class="budget-sticky budget-sticky-2 right" rowspan="2">Planejamento</th>
-      <th class="budget-sticky budget-sticky-3 center" rowspan="2">% atual</th>
-      <th class="budget-sticky budget-sticky-4 center" rowspan="2" title="Soma do realizado dividida pela soma do planejado nos últimos 12 meses (inclui o mês atual)">% 12 meses</th>
+      <th class="budget-sticky budget-sticky-2 right" rowspan="2">Planejamento<br><span style="font-weight:400;font-size:10px;color:var(--text3)">(mensal)</span></th>
+      <th class="budget-sticky budget-sticky-3 right" rowspan="2" title="Saldo acumulado de rollover: sobra (+) ou excesso (−) carregado de meses anteriores. É um extra — NÃO entra no planejamento mensal nem em nenhum dos percentuais.">Rollover</th>
+      <th class="budget-sticky budget-sticky-4 center" rowspan="2">% atual</th>
+      <th class="budget-sticky budget-sticky-5 center" rowspan="2" title="Soma do realizado dividida pela soma do planejado mensal nos últimos 12 meses (inclui o mês atual)">% 12 meses</th>
       ${months.map(m => `<th colspan="2" style="${monthHeaderBg(m)};padding:0"><div style="display:flex;align-items:center;justify-content:center;padding:8px 12px">${monthLabelShort(m)}</div></th>`).join('')}
       <th rowspan="2" style="border:none"></th>
     </tr>
@@ -15688,20 +15782,22 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
     </tr>
   </thead><tbody>`;
 
-  function groupRow(label, bg, planned, monthTotals, type, plannedPure) {
+  function groupRow(label, bg, planned, monthTotals, type, rolloverTotal) {
     const curActual = monthTotals[curMonthStr] || 0;
     const curPct = planned > 0 ? (curActual / planned * 100) : 0;
     const actual12m = last12Months.reduce((s,m) => s + (monthTotals[m]||0), 0);
-    // Mesma correção do catRow: usa o planejado PURO (sem rollover) como
-    // base do acumulado de 12 meses, nunca o `planned` do mês atual (que,
-    // para despesas, já pode estar distorcido pelo rollover).
-    const planned12m = (plannedPure ?? planned) * last12Months.length;
+    // % sempre contra o planejado MENSAL (sem rollover).
+    const planned12m = planned * last12Months.length;
     const pct12m = planned12m > 0 ? (actual12m / planned12m * 100) : 0;
+    const rollCell = (type === 'income' || !rolloverTotal)
+      ? '—'
+      : `<span style="color:${rolloverTotal >= 0 ? 'var(--green)' : 'var(--red)'}">${rolloverTotal > 0 ? '+' : ''}${fmtBRL(rolloverTotal)}</span>`;
     let row = `<tr>
       <td class="budget-sticky budget-sticky-1" style="background:${bg};color:#fff;font-weight:700">${label}</td>
       <td class="budget-sticky budget-sticky-2 right" style="background:${bg};color:#fff;font-weight:700;font-family:'DM Mono',monospace">${fmtBRL(planned)}</td>
-      <td class="budget-sticky budget-sticky-3 center" style="background:${bg};color:#fff;font-weight:700">${curPct.toFixed(0)}%</td>
-      <td class="budget-sticky budget-sticky-4 center" style="background:${bg};color:#fff;font-weight:700">${pct12m.toFixed(0)}%</td>`;
+      <td class="budget-sticky budget-sticky-3 right" style="background:${bg};color:#fff;font-weight:700;font-family:'DM Mono',monospace">${rollCell}</td>
+      <td class="budget-sticky budget-sticky-4 center" style="background:${bg};color:#fff;font-weight:700">${curPct.toFixed(0)}%</td>
+      <td class="budget-sticky budget-sticky-5 center" style="background:${bg};color:#fff;font-weight:700">${pct12m.toFixed(0)}%</td>`;
     months.forEach(m => {
       const actual = monthTotals[m]||0;
       const pct = planned > 0 ? (actual / planned * 100) : 0;
@@ -15713,7 +15809,8 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   }
 
   function catRow(b, type, i) {
-    const planned = type === 'income' ? b.monthly_limit : effLimitOf(b);
+    const planned = b.monthly_limit; // planejamento MENSAL puro (sem rollover)
+    const rollover = type === 'income' ? 0 : (effLimitOf(b) - b.monthly_limit);
     const curActual = actualFor(b.category, curMonthStr, type, b.consolidate_subs !== 0);
     const curPct = planned > 0 ? (curActual / planned * 100) : 0;
     const curPctColor = type === 'income'
@@ -15745,8 +15842,9 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
         <button class="btn-icon" style="color:var(--red);font-size:10px;margin-left:2px;vertical-align:middle" title="Excluir" onclick="deleteBudget(${b.id})">✕</button>
       </td>
       <td class="budget-sticky budget-sticky-2 right" style="background:${stripe};font-family:'DM Mono',monospace">${fmtBRL(planned)}</td>
-      <td class="budget-sticky budget-sticky-3 center" style="background:${stripe};color:${curPctColor};font-weight:700">${curPct.toFixed(0)}%</td>
-      <td class="budget-sticky budget-sticky-4 center" style="background:${stripe};color:${pct12mColor};font-weight:700" title="Realizado líquido dos últimos ${last12Months.length} meses ÷ planejado no mesmo período">${pct12m.toFixed(0)}%</td>`;
+      <td class="budget-sticky budget-sticky-3 right" style="background:${stripe};font-family:'DM Mono',monospace" title="${b.rollover ? 'Saldo de rollover acumulado (extra, fora do planejamento mensal)' : 'Rollover desativado nesta categoria'}">${rollover ? `<span style="color:${rollover>=0?'var(--green)':'var(--red)'}">${rollover>0?'+':''}${fmtBRL(rollover)}</span>` : '—'}</td>
+      <td class="budget-sticky budget-sticky-4 center" style="background:${stripe};color:${curPctColor};font-weight:700">${curPct.toFixed(0)}%</td>
+      <td class="budget-sticky budget-sticky-5 center" style="background:${stripe};color:${pct12mColor};font-weight:700" title="Realizado líquido dos últimos ${last12Months.length} meses ÷ planejado mensal no mesmo período">${pct12m.toFixed(0)}%</td>`;
     months.forEach(m => {
       const actual = actualFor(b.category, m, type, b.consolidate_subs !== 0);
       const pct = planned > 0 ? (actual / planned * 100) : 0;
@@ -15772,11 +15870,11 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
     incomeBudgets.forEach((b,i) => html += catRow(b, 'income', i));
   }
   if (expenseBudgets.length) {
-    const totalExpensePlanned = expenseBudgets.reduce((s,b) => s+effLimitOf(b), 0);
     const totalExpensePlannedPureGroup = expenseBudgets.reduce((s,b) => s+b.monthly_limit, 0);
+    const totalRolloverGroup = expenseBudgets.reduce((s,b) => s + (effLimitOf(b) - b.monthly_limit), 0);
     const expenseMonthTotals = {};
     months.forEach(m => { expenseMonthTotals[m] = expenseBudgets.reduce((s,b) => s+actualFor(b.category,m,'expense', b.consolidate_subs !== 0), 0); });
-    html += groupRow('Despesas', '#ef5350', totalExpensePlanned, expenseMonthTotals, 'expense', totalExpensePlannedPureGroup);
+    html += groupRow('Despesas', '#ef5350', totalExpensePlannedPureGroup, expenseMonthTotals, 'expense', totalRolloverGroup);
     expenseBudgets.forEach((b,i) => html += catRow(b, 'expense', i));
   }
   html += '</tbody>';
@@ -15791,7 +15889,7 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   // tabela, então somar STICKY_TOTAL aqui deslocava a posição (o bug visto:
   // com 4 colunas fixas somando 450px, 450 mod 180 = 90 — exatamente METADE
   // da largura de uma coluna de mês, cortando o mês atual ao meio).
-  const STICKY_TOTAL = STICKY_W.reduce((a,b)=>a+b,0); // 170+120+80+80=450 — onde as colunas de mês de fato começam
+  const STICKY_TOTAL = STICKY_W.reduce((a,b)=>a+b,0); // 170+120+90+80+80=540 — onde as colunas de mês de fato começam
   const MONTH_COL_WIDTH = MONTH_W[0] + MONTH_W[1]; // realizado + %
   // Redimensiona a coluna em branco final pra garantir que sempre sobre
   // scrollWidth suficiente pra rolar até o mês atual sem o navegador

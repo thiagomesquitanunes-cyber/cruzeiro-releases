@@ -146,6 +146,16 @@ async function remove(table, filters) {
   await _rest(`/${table}?${qs}`, { method: 'DELETE' });
 }
 
+// Remove do Supabase as linhas do usuário cujo synced_at é anterior ao
+// timestamp do sync atual — ou seja, tudo que NÃO foi tocado no upsert
+// desta rodada (linhas excluídas no desktop, fora da janela, ou de
+// versões antigas do sync). Mais robusto que pruneNotIn para tabelas
+// grandes: não estoura o limite de tamanho da URL com listas de IDs.
+async function removeOlderThan(table, userId, syncedAtIso) {
+  const qs = `user_id=eq.${encodeURIComponent(userId)}&synced_at=lt.${encodeURIComponent(syncedAtIso)}`;
+  await _rest(`/${table}?${qs}`, { method: 'DELETE' });
+}
+
 // Remove do Supabase tudo que NÃO está mais na lista de valores atuais
 // (usado para limpar contas/metas/recorrentes excluídas no desktop)
 async function pruneNotIn(table, userId, column, currentValues) {
@@ -162,6 +172,6 @@ async function pruneNotIn(table, userId, column, currentValues) {
 module.exports = {
   login, logout, refreshSession,
   getSession, getUserId, isLoggedIn,
-  upsert, select, update, remove, pruneNotIn,
+  upsert, select, update, remove, pruneNotIn, removeOlderThan,
   SUPABASE_URL,
 };

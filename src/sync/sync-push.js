@@ -26,6 +26,24 @@ function encJSON(obj) {
   if (!crypto_utils.isUnlocked()) return obj;
   return crypto_utils.encryptJSON(obj);
 }
+
+// Cifra os campos sensíveis das linhas DEPOIS da checagem de mudança.
+// Motivo: encrypt() usa um nonce ALEATÓRIO a cada chamada, então cifrar o mesmo
+// dado duas vezes gera bytes totalmente diferentes. Enquanto o hash de mudança
+// era calculado sobre as linhas JÁ cifradas, hasChanged() dava "mudou" em TODA
+// sincronização (mesmo sem nenhuma alteração real) — o que (a) reenviava tudo ao
+// Supabase sempre e (b) reescrevia o arquivo de hashes a cada sync, fazendo o
+// Dropbox re-sincronizá-lo sem parar e divergir entre máquinas. Cifrando só
+// depois do hash (que agora é calculado sobre o texto em claro), o hash fica
+// estável entre execuções e IDÊNTICO entre máquinas com os mesmos dados.
+// Campos null/undefined são preservados como estão (não são cifrados).
+function encFields(rows, scalarFields, jsonFields) {
+  for (const r of rows) {
+    (scalarFields || []).forEach(f => { if (r[f] !== null && r[f] !== undefined) r[f] = enc(r[f]); });
+    (jsonFields   || []).forEach(f => { if (r[f] !== null && r[f] !== undefined) r[f] = encJSON(r[f]); });
+  }
+  return rows;
+}
 const crypto = require('crypto');
 const path   = require('path');
 const fs     = require('fs');
@@ -109,7 +127,7 @@ async function pushBalances(all, userId, syncInvestments) {
       user_id:      userId,
       account_name: acc.name,
       account_type: acc.type,
-      balance:      enc(toCents(bal)),
+      balance:      toCents(bal),
       currency:     acc.currency || 'BRL',
       is_hidden:    acc.hidden === 1,
       sort_order:   acc.sort_order || 0,
@@ -123,6 +141,7 @@ async function pushBalances(all, userId, syncInvestments) {
   }
   const syncedAt = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAt);
+  encFields(rows, ['balance']);
 
   await sb.upsert('mobile_balances', rows, 'user_id,account_name');
 
@@ -162,12 +181,12 @@ async function pushTransactions(all, userId, syncInvestments) {
       user_id:       userId,
       desktop_id:    String(t.id),
       date:          t.date,
-      description:   enc(t.memo || t.category || ''),
-      amount:        enc(toCents(t.amount)),
+      description:   t.memo || t.category || '',
+      amount:        toCents(t.amount),
       category:      category || null,
       subcategory:   subcategory || null,
       account_name:  t.account_name,
-      memo:          enc(t.memo || null),
+      memo:          t.memo || null,
       is_reconciled: t.cleared === 1,
       synced_at:     new Date().toISOString(),
     };
@@ -179,6 +198,7 @@ async function pushTransactions(all, userId, syncInvestments) {
   }
   const syncedAt = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAt);
+  encFields(rows, ['description', 'amount', 'memo']);
 
   // Upsert em lotes de 500 para não estourar limites HTTP
   for (let i = 0; i < rows.length; i += 500) {
@@ -199,22 +219,40 @@ async function pushBudgets(all, userId) {
   const to    = `${month}-31`;
 
   const budgets = all('SELECT * FROM budgets WHERE active=1');
+  // Realizado por categoria: despesa E estorno, já excluindo transferências
+  // (reais e categorizadas manualmente). Antes só somava despesas com match
+  // exato da categoria e incluía transferências — o "gasto" no mobile não batia
+  // com o do desktop quando havia subcategorias, estornos ou transferências.
   const actuals = all(`
-    SELECT category, SUM(ABS(amount)) as spent
+    SELECT category,
+      SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as spent,
+      SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) as received
     FROM transactions
-    WHERE date>=? AND date<=? AND amount<0 AND transfer_id IS NULL
+    WHERE date>=? AND date<=? AND transfer_id IS NULL
+      AND (category IS NULL OR LOWER(category) NOT LIKE '%transfer%')
     GROUP BY category
   `, [from, to]);
 
-  const spentByCategory = {};
-  actuals.forEach(r => { spentByCategory[r.category] = r.spent; });
+  // Gasto líquido por orçamento, somando subcategorias (quando consolidate_subs)
+  // e descontando estornos — mesma regra da aba Orçamento do desktop.
+  const spentForBudget = (b) => {
+    const consolidate = b.consolidate_subs !== 0;
+    let spent = 0, received = 0;
+    actuals.forEach(r => {
+      const c = r.category || '';
+      if (c === b.category || (consolidate && c.startsWith(b.category + ':'))) {
+        spent += r.spent || 0; received += r.received || 0;
+      }
+    });
+    return Math.max(0, spent - received);
+  };
 
   const rows = budgets.map(b => ({
     user_id:       userId,
     month,
     category:      b.category,
-    monthly_limit: enc(toCents(b.monthly_limit)),
-    spent:         enc(toCents(spentByCategory[b.category] || 0)),
+    monthly_limit: toCents(b.monthly_limit),
+    spent:         toCents(spentForBudget(b)),
     alert_pct:     b.alert_pct || 80,
     synced_at:     new Date().toISOString(),
   }));
@@ -225,6 +263,7 @@ async function pushBudgets(all, userId) {
   }
   const syncedAtB = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtB);
+  encFields(rows, ['monthly_limit', 'spent']);
   await sb.upsert('mobile_budgets', rows, 'user_id,month,category');
   await sb.pruneNotIn('mobile_budgets', userId, 'category', budgets.map(b => b.category))
     .catch(() => {});
@@ -242,6 +281,7 @@ async function pushGoals(all, userId) {
       SELECT SUM(ABS(amount)) as total
       FROM transactions
       WHERE amount<0 AND transfer_id IS NULL
+        AND (category IS NULL OR LOWER(category) NOT LIKE '%transfer%')
         AND date >= date('now','-3 months')
     `);
     return rows[0]?.total / 3 || 0;
@@ -273,6 +313,17 @@ async function pushGoals(all, userId) {
       `, [g.account_id, month])[0]?.s || 0;
       progressPct = Math.min(100, (saved / g.monthly_amount) * 100);
       currentAmount = saved;
+    } else if (g.type === 'retirement') {
+      // Meta automática de Aposentadoria: target_amount (longo prazo,
+      // patrimônio) e monthly_amount (curto prazo, poupança mensal
+      // necessária) já vêm prontos de syncRetirementGoal. Os valores
+      // "atuais" (patrimônio hoje, poupança realizada) são CALCULADOS
+      // AO VIVO no mobile a partir de mobile_patrimonio e mobile_evolution
+      // — igual ao próprio desktop, que também não persiste esses valores
+      // (eles mudam a cada sync e dependem de dados de outras telas).
+      // current_amount/progress_pct ficam null aqui de propósito.
+      currentAmount = null;
+      progressPct   = null;
     }
 
     return {
@@ -282,12 +333,12 @@ async function pushGoals(all, userId) {
       type:           g.type,
       icon:           g.icon || '🎯',
       color:          g.color || '#2563eb',
-      target_amount:  g.target_amount  ? enc(toCents(g.target_amount))  : null,
-      monthly_amount: g.monthly_amount ? enc(toCents(g.monthly_amount)) : null,
+      target_amount:  g.target_amount  ? toCents(g.target_amount)  : null,
+      monthly_amount: g.monthly_amount ? toCents(g.monthly_amount) : null,
       emergency_months: g.emergency_months || null,
       deadline:       g.deadline || null,
-      current_amount: enc(toCents(currentAmount)),
-      progress_pct:   Math.round(progressPct * 100) / 100,
+      current_amount: currentAmount === null ? null : toCents(currentAmount),
+      progress_pct:   progressPct === null ? null : Math.round(progressPct * 100) / 100,
       active:         g.active === 1,
       synced_at:      new Date().toISOString(),
     };
@@ -299,6 +350,7 @@ async function pushGoals(all, userId) {
   }
   const syncedAtG = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtG);
+  encFields(rows, ['target_amount', 'monthly_amount', 'current_amount']);
   await sb.upsert('mobile_goals', rows, 'user_id,desktop_id');
   await sb.pruneNotIn('mobile_goals', userId, 'desktop_id', goals.map(g => String(g.id)));
 }
@@ -315,8 +367,8 @@ async function pushScheduled(all, userId) {
     user_id:      userId,
     desktop_id:   String(r.id),
     next_date:    r.next_date,
-    memo:         enc(r.memo || ''),
-    amount:       enc(toCents(r.amount)),
+    memo:         r.memo || '',
+    amount:       toCents(r.amount),
     category:     r.category || null,
     account_name: accMap[r.account_id] || null,
     frequency:    r.frequency,
@@ -330,6 +382,7 @@ async function pushScheduled(all, userId) {
   }
   const syncedAtS = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtS);
+  encFields(rows, ['memo', 'amount']);
   await sb.upsert('mobile_scheduled', rows, 'user_id,desktop_id');
   await sb.pruneNotIn('mobile_scheduled', userId, 'desktop_id', recurring.map(r => String(r.id)));
 }
@@ -385,10 +438,10 @@ async function pushPatrimonio(all, userId, syncInvestments) {
     return {
       user_id:      userId,
       month,
-      total_assets: enc(toCents(totalAssets)),
-      total_debts:  enc(toCents(totalDebts)),
-      net_worth:    enc(toCents(totalAssets - totalDebts)),
-      breakdown:    encJSON(breakdownCents),
+      total_assets: toCents(totalAssets),
+      total_debts:  toCents(totalDebts),
+      net_worth:    toCents(totalAssets - totalDebts),
+      breakdown:    breakdownCents,
       synced_at:    new Date().toISOString(),
     };
   });
@@ -399,6 +452,7 @@ async function pushPatrimonio(all, userId, syncInvestments) {
   }
   const syncedAtP = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtP);
+  encFields(rows, ['total_assets', 'total_debts', 'net_worth'], ['breakdown']);
   await sb.upsert('mobile_patrimonio', rows, 'user_id,month');
 }
 
@@ -419,11 +473,16 @@ async function pushEvolution(all, userId, getDbPath, fs) {
   //      categorias sem modo definido também saem.
   //   3. Classifica cada categoria por SALDO LÍQUIDO (income-expenses):
   //      cada categoria entra em UM grupo só (receita OU despesa), o que
-  //      garante que a soma bate com o total mês a mês.
+  //      garante que a soma bate com o total mês a mês. Isso vale também
+  //      para o detalhamento por categoria (by_category).
   //   4. Aplica correção IPCA (se ev_ipca), trazendo tudo para R$ do mês
-  //      de referência (mês mais recente).
-  //   5. Aplica média móvel de 12 meses (se ev_ma).
-  //   6. Filtra pelo período selecionado (ev_year).
+  //      de referência — o ÚLTIMO MÊS COM TAXA DE IPCA disponível
+  //      (getIpcaRefMonth do desktop), não o último mês de dados.
+  //   5. Aplica média móvel de 12 meses (se ev_ma) — como campos
+  //      SEPARADOS (income_ma/expenses_ma), sem substituir os valores
+  //      normais (a tabela do desktop mostra as duas colunas).
+  //   6. ev_year é filtro de VISUALIZAÇÃO no desktop — sincronizamos
+  //      todos os meses e o mobile decide o recorte.
   // ─────────────────────────────────────────────────────────────
 
   // ── Lê a configuração real do usuário ──
@@ -453,9 +512,10 @@ async function pushEvolution(all, userId, getDbPath, fs) {
   const catConfig = cfg.ev_catConfig || [];
   const useIpca   = cfg.ev_ipca !== false && Object.keys(ipcaRates).length > 0;
   const useMa     = cfg.ev_ma   === true;
-  const evYear    = cfg.ev_year || 'all';
 
   // ── 1. Query por mês+categoria — idêntica ao desktop ──
+  // (transfer_id IS NULL cobre transferências reais; o filtro por nome
+  //  de categoria é reforço para casos legados sem transfer_id setado)
   const catRows = all(`
     SELECT substr(date,1,7) as month, category,
       SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expenses,
@@ -473,7 +533,7 @@ async function pushEvolution(all, userId, getDbPath, fs) {
   const catConfigActive = catConfig.length > 0;
 
   const byMonth = {};      // month -> { income, expenses }
-  const catByMonth = {};   // month -> { categoria: valorDespesaCents }
+  const catByMonth = {};   // month -> { categoria: valorDespesaCents } (líquido, só quando net<0)
   for (const r of catRows) {
     const mode = modeOf[r.category];
     if (mode === 'excluded') continue;
@@ -484,7 +544,6 @@ async function pushEvolution(all, userId, getDbPath, fs) {
     if (net > 0) m.income += net;
     else if (net < 0) m.expenses += Math.abs(net);
 
-    // by_category guarda o lado de despesa (para o detalhamento no mobile)
     if (net < 0) {
       if (!catByMonth[r.month]) catByMonth[r.month] = {};
       catByMonth[r.month][r.category] = toCents(Math.abs(net));
@@ -493,14 +552,15 @@ async function pushEvolution(all, userId, getDbPath, fs) {
 
   let months = Object.keys(byMonth).sort();
   if (!months.length) {
-    // Nada a sincronizar — limpa e sai
     await sb.remove('mobile_evolution', { user_id: userId });
     console.log('[sync:push:evolution] nenhum mês com dados');
     return;
   }
 
-  // ── 4. Correção IPCA (traz tudo para R$ do mês de referência) ──
-  const refMonth = months[months.length - 1];
+  // ── 4. Correção IPCA — refMonth é o ÚLTIMO MÊS COM TAXA, não o
+  // último mês de dados (idêntico a getIpcaRefMonth() do renderer) ──
+  const ipcaMonths = Object.keys(ipcaRates).sort();
+  const refMonth   = ipcaMonths.length ? ipcaMonths[ipcaMonths.length - 1] : null;
   function inflateMonth(value, fromMonth) {
     if (!value || !refMonth || fromMonth >= refMonth) return value || 0;
     let [y, m] = fromMonth.split('-').map(Number);
@@ -516,63 +576,45 @@ async function pushEvolution(all, userId, getDbPath, fs) {
     return value * f;
   }
 
-  let incArr = months.map(m => byMonth[m].income);
-  let expArr = months.map(m => byMonth[m].expenses);
+  const incArr = months.map(m => useIpca ? inflateMonth(byMonth[m].income, m)   : byMonth[m].income);
+  const expArr = months.map(m => useIpca ? inflateMonth(byMonth[m].expenses, m) : byMonth[m].expenses);
 
-  if (useIpca) {
-    incArr = months.map((m, i) => inflateMonth(incArr[i], m));
-    expArr = months.map((m, i) => inflateMonth(expArr[i], m));
-  }
-
-  // ── 5. Média móvel de 12 meses ──
+  // ── 5. Média móvel de 12 meses (campos separados, não substitui) ──
   function movAvg12(arr, i) {
     const w = arr.slice(Math.max(0, i - 11), i + 1).filter(v => v !== 0 && !isNaN(v));
     return w.length ? w.reduce((s, v) => s + v, 0) / w.length : 0;
   }
-  if (useMa) {
-    const rawInc = [...incArr], rawExp = [...expArr];
-    incArr = incArr.map((_, i) => movAvg12(rawInc, i));
-    expArr = expArr.map((_, i) => movAvg12(rawExp, i));
-  }
+  const incMA = months.map((_, i) => useMa ? movAvg12(incArr, i) : incArr[i]);
+  const expMA = months.map((_, i) => useMa ? movAvg12(expArr, i) : expArr[i]);
 
-  // ── 6. Filtra pelo período (ev_year) ──
-  let keepMonths = months;
-  if (evYear && evYear !== 'all') {
-    keepMonths = months.filter(m => m.startsWith(evYear + '-') || m.slice(0, 4) === String(evYear));
-  }
+  // ── Monta as linhas finais (sincroniza TODOS os meses; ev_year é
+  // filtro de visualização, não de dados) ──
+  const rows = months.map((m, i) => ({
+    user_id:     userId,
+    month:       m,
+    income:      toCents(incArr[i]),
+    expenses:    toCents(expArr[i]),
+    balance:     toCents(incArr[i] - expArr[i]),
+    income_ma:   toCents(incMA[i]),
+    expenses_ma: toCents(expMA[i]),
+    by_category: catByMonth[m] || {},
+    synced_at:   new Date().toISOString(),
+  }));
 
-  // ── Monta as linhas finais ──
-  const rows = [];
-  months.forEach((m, i) => {
-    if (!keepMonths.includes(m)) return;
-    const income   = incArr[i];
-    const expenses = expArr[i];
-    rows.push({
-      user_id:     userId,
-      month:       m,
-      income:      enc(toCents(income)),
-      expenses:    enc(toCents(expenses)),
-      balance:     enc(toCents(income - expenses)),
-      by_category: encJSON(catByMonth[m] || {}),
-      synced_at:   new Date().toISOString(),
-    });
-  });
-
-  // Hash: só re-envia se algo mudou (economia de Egress)
   if (!hasChanged('evolution', rows.map(r => ({ ...r, synced_at: undefined })))) {
     console.log('[sync:push] evolution sem mudança — pulando');
     return;
   }
   const syncedAtE = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtE);
+  encFields(rows, ['income', 'expenses', 'balance', 'income_ma', 'expenses_ma'], ['by_category']);
 
   // DELETE + INSERT: elimina dados de versões antigas com filtros incorretos
   await sb.remove('mobile_evolution', { user_id: userId });
   if (rows.length) await sb.upsert('mobile_evolution', rows, 'user_id,month');
 
-  console.log(`[sync:push:evolution] ${rows.length} meses (ipca=${useIpca}, ma=${useMa}, year=${evYear})`);
+  console.log(`[sync:push:evolution] ${rows.length} meses (ipca=${useIpca}, ma=${useMa}, refMonth=${refMonth})`);
 }
-
 
 // ─────────────────────────────────────────────────────────────
 // 8. Regras de ML

@@ -764,6 +764,10 @@ ipcMain.handle('accounts:balance-before', (_, { accountId, beforeDate }) => {
 
 // Transactions
 ipcMain.handle('tx:list', (_, { accountId, sortBy, order, fromDate }) => {
+  // Sem conta válida não há o que listar — evita "bind undefined" no SQLite
+  // (o handler era chamado com accountId undefined em alguns momentos de
+  // render, ex.: dashboard antes de a conta estar pronta).
+  if (accountId == null) return [];
   const col = ['date','category','amount'].includes(sortBy) ? sortBy : 'date';
   const dir = order === 'asc' ? 'ASC' : 'DESC';
   let where = 'account_id=?';
@@ -1124,6 +1128,7 @@ ipcMain.handle('goal:avg-monthly-expenses', () => {
     SELECT substr(date,1,7) as month, SUM(ABS(amount)) as total
     FROM transactions
     WHERE amount < 0 AND transfer_id IS NULL
+      AND (category IS NULL OR LOWER(category) NOT LIKE '%transfer%')
       AND date >= date('now','-3 months')
     GROUP BY month ORDER BY month DESC LIMIT 3`);
   if (!rows.length) return 0;
@@ -1139,6 +1144,7 @@ ipcMain.handle('goal:avg-monthly-savings', () => {
       SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expenses
     FROM transactions
     WHERE transfer_id IS NULL
+      AND (category IS NULL OR LOWER(category) NOT LIKE '%transfer%')
       AND substr(date,1,7) <= ?
       AND date >= date('now','-12 months')
     GROUP BY month ORDER BY month DESC LIMIT 12`, [today]);
@@ -1226,6 +1232,7 @@ ipcMain.handle('budget:actuals', (_, { month }) => {
     SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) as received
     FROM transactions
     WHERE date>=? AND date<=? AND transfer_id IS NULL
+      AND (category IS NULL OR LOWER(category) NOT LIKE '%transfer%')
     GROUP BY category`, [from, to]);
 });
 
@@ -1239,7 +1246,9 @@ ipcMain.handle('budget:avg3m', (_, { beforeMonth }) => {
   }
   return all(`SELECT category, SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END)/3.0 as avg_spent
     FROM transactions WHERE substr(date,1,7) IN (${months.map(()=>'?').join(',')})
-    AND transfer_id IS NULL AND amount<0 GROUP BY category`, months);
+    AND transfer_id IS NULL AND amount<0
+    AND (category IS NULL OR LOWER(category) NOT LIKE '%transfer%')
+    GROUP BY category`, months);
 });
 
 // Budget: monthly budgeted vs actual by category
@@ -6493,6 +6502,27 @@ Responda SOMENTE com JSON válido, sem markdown: {"cats":{"0":"Categoria","1":"O
   }
 });
 
+// ── Insights: maiores transações do mês (para dar concretude à análise da IA) ──
+// Retorna as N maiores DESPESAS e as N maiores RECEITAS do mês (líquidas por
+// lançamento, já excluindo transferências — tanto as com transfer_id quanto as
+// categorizadas manualmente como "⇄ Transferência: X"). Serve para a IA citar
+// exemplos reais ("a maior despesa do mês foi R$ X em Y") em vez de só tendências.
+ipcMain.handle('insights:top-transactions', (_, { month, limit }) => {
+  const from = month + '-01';
+  const to   = month + '-31';
+  const n = Math.max(1, Math.min(20, parseInt(limit) || 5));
+  const base = `FROM transactions t
+    WHERE t.date>=? AND t.date<=? AND t.transfer_id IS NULL
+      AND (t.category IS NULL OR LOWER(t.category) NOT LIKE '%transfer%')`;
+  const expenses = all(`SELECT t.date, t.category, t.memo, t.amount ${base}
+    AND t.amount < 0 ORDER BY t.amount ASC LIMIT ?`, [from, to, n]);
+  const income = all(`SELECT t.date, t.category, t.memo, t.amount ${base}
+    AND t.amount > 0 ORDER BY t.amount DESC LIMIT ?`, [from, to, n]);
+  const clean = r => ({ date: r.date, category: r.category || '(sem categoria)',
+    memo: (r.memo || '').slice(0, 60), amount: Math.round(Math.abs(r.amount)) });
+  return { expenses: expenses.map(clean), income: income.map(clean) };
+});
+
 // ── AI: proactive financial insights ──
 ipcMain.handle('ai:generate-insights', async (_, { summary }) => {
   if (!summary) return { ok: false, error: 'EMPTY' };
@@ -6503,9 +6533,18 @@ ESTÃO suavizados por média móvel de 12 meses (MA12) — ou seja, NÃO são o 
 específico, são uma tendência de 12 meses centrada naquele mês. Isso é intencional: evita que você
 aponte um "salto" em categorias episódicas (viagens, presentes sazonais, manutenções pontuais) que
 naturalmente variam mês a mês sem indicar um problema real — a suavização já filtrou esse ruído.
-Trate "pctChange" como uma variação de TENDÊNCIA ano a ano, não como um pico isolado. NÃO descreva
-variações como "neste mês" ou "no mês passado" — descreva como "nos últimos 12 meses" ou "na
-tendência recente", já que é isso que os números representam.
+Trate "pctChange" como uma variação de TENDÊNCIA ano a ano, não como um pico isolado.
+
+Cada categoria traz TRÊS números: "current" e "avgPrior" (tendência MA12, R$ de hoje — use-os
+com linguagem de TENDÊNCIA: "na tendência dos últimos 12 meses", "na média recente") e
+"actualThisMonth" (o valor NOMINAL que REALMENTE aconteceu no mês analisado — este SIM pode ser
+descrito como "neste mês você gastou/recebeu R$ X"). Use "actualThisMonth" quando quiser citar o
+fato concreto do mês, e "current"/"pctChange" quando quiser falar de tendência. NÃO confunda os
+dois nem descreva a tendência MA12 como se fosse o gasto pontual do mês.
+
+CUIDADO COM POUCOS DADOS: cada categoria traz "monthsWithData" (quantos meses do período tiveram
+movimento). Se for baixo (1 ou 2), NÃO afirme tendências fortes ("disparou", "triplicou") sobre
+ela — pode ser um gasto pontual. Prefira categorias com histórico consistente para conclusões.
 
 CRÍTICO — cada categoria já vem com "type" ("receita" ou "despesa") e "trend" pré-calculados pelo
 app. SEMPRE confie nesses dois campos para decidir o tom — NUNCA tente adivinhar pelo nome da
@@ -6516,8 +6555,22 @@ notícia RUIM (gastou mais) e deve ser descrita com linguagem de gasto/custo ("g
 aumentaram", nunca "ganhos com X aumentaram"). Uma categoria com type="receita" e trend="subindo" é
 uma notícia BOA (ganhou mais) e deve ser descrita com linguagem de receita/ganho.
 
-O resumo também traz: orçamentos, dívidas pessoais cadastradas (com taxa de juros real), juros de
-rotativo/cheque especial detectados recentemente em importações, e o saldo líquido disponível hoje.
+O resumo também traz, para o MÊS ANALISADO (valores NOMINAIS reais, sem IPCA/MA12):
+- "totalIncome" = total de RECEITAS do mês; "totalExpenses" = total de DESPESAS do mês;
+  "netResult" = receitas − despesas (a poupança do mês; se negativo, houve DÉFICIT);
+  "savingsRate" = % da receita que sobrou (netResult/totalIncome). Ao falar de "quanto gastou",
+  use SEMPRE "totalExpenses" — NUNCA o netResult (que já desconta receitas). A taxa de poupança é
+  um ótimo indicador de saúde financeira: comente-a (ex.: "você poupou 18% da renda") e compare com
+  "avgMonthlyIncome"/"avgMonthlyExpenses" (médias dos meses anteriores) para dizer se melhorou ou piorou.
+- "budgets": cada orçamento traz "limit", "spent" (gasto LÍQUIDO no mês, já somando subcategorias e
+  descontando estornos), "pctUsed" (% do limite usado) e "status" ("acima" = estourou, "perto" = ≥85%,
+  "ok", "sem_limite"). SEMPRE que houver orçamentos, gere ao menos um insight comparando ORÇADO vs
+  REALIZADO, priorizando os de status "acima" e "perto", citando o % e os valores reais.
+- "topTransactions": as maiores DESPESAS ("expenses") e RECEITAS ("income") individuais do mês, cada
+  uma com categoria, memo e valor. Use-as para dar CONCRETUDE ("a maior despesa do mês foi R$ X em Y")
+  em vez de só falar em agregados. Não invente transações que não estejam nessa lista.
+- dívidas pessoais cadastradas (com taxa de juros real), juros de rotativo/cheque especial detectados
+  recentemente em importações, e o saldo líquido disponível hoje ("liquidBalanceToday").
 
 Campos de controle da análise (respeite-os com prioridade):
 - "categoriesFilter": se for uma lista (não "todas"), a análise deve focar SOMENTE nessas categorias.

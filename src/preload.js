@@ -36,6 +36,7 @@ const api = {
   txFindDuplicatesInRange: (d) => ipcRenderer.invoke('tx:find-duplicates-in-range', d),
   txSumInRange: (d) => ipcRenderer.invoke('tx:sum-in-range', d),
   aiGenerateInsights: (d) => ipcRenderer.invoke('ai:generate-insights', d),
+  insightsTopTransactions: (d) => ipcRenderer.invoke('insights:top-transactions', d),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
   importSavePending:  (state) => ipcRenderer.invoke('import:save-pending', state),
   importLoadPending:  ()      => ipcRenderer.invoke('import:load-pending'),

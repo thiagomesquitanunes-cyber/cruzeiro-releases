@@ -9,6 +9,18 @@
 // ─────────────────────────────────────────────────────────────
 
 const sb = require('./supabase-client');
+const cryptoUtils = require('./crypto-utils');
+
+// Decifra um campo vindo do mobile (quick_entries agora são cifrados
+// no aparelho antes do insert). Fallback: se o valor não estiver
+// cifrado (app mobile antigo, ou chave indisponível no momento do
+// lançamento), retorna como veio. Números cifrados voltam como string.
+function dec(value) {
+  if (value == null) return value;
+  if (!cryptoUtils.isUnlocked()) return value;
+  const d = cryptoUtils.decrypt(value);
+  return d == null ? value : d;
+}
 
 // Normaliza texto para chave de ML (igual ao normKey do main.js)
 function normKey(s) {
@@ -38,6 +50,10 @@ async function pullQuickEntries(all, run, first, save, userId) {
 
   for (const entry of entries) {
     try {
+      // Decifra campos sensíveis (cifrados pelo mobile antes do insert)
+      entry.amount = Number(dec(entry.amount));
+      entry.memo   = dec(entry.memo);
+
       const entryType = entry.entry_type || 'expense';
 
       if (entryType === 'transfer') {

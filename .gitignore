@@ -34,3 +34,4 @@ cruzeiro_data_*.json
 backups/
 *.db
 *.db.bak
+*.zip
