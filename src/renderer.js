@@ -12677,7 +12677,16 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Enter')  { e.preventDefault(); confirmDialogResolve(true);  }
 });
 
-function openModal(id){ G(id)?.classList.add('open'); }
+function openModal(id){
+  G(id)?.classList.add('open');
+  // O atalho de Enter (onkeydown na .modal) só dispara pra eventos que
+  // borbulham de DENTRO do modal — se o foco ficar em algum elemento de
+  // fora (ex: o campo que disparou a abertura, atrás do overlay), o Enter
+  // nunca chega no handler. openModal() nunca movia o foco pra dentro do
+  // modal, então o Enter parecia simplesmente "não funcionar".
+  if (id === 'modal-transfer') setTimeout(() => G('tr-amount')?.focus(), 50);
+  else if (id === 'modal-tx') setTimeout(() => G('tx-memo')?.focus(), 50);
+}
 function closeModal(id){
   const el = G(id);
   if (!el) return;
@@ -24847,8 +24856,16 @@ async function aposPullPatrimonio() {
     if (window._patGrandTotal && typeof window._patGrandTotal.value === 'number' && window._patGrandTotal.value > 0) {
       total = window._patGrandTotal.value;
     } else {
-      // Fallback: sum account balances
-      total = accounts.reduce((s, a) => s + (a.balance || 0), 0);
+      // Fallback: sum account balances. accounts (global) só tem metadados
+      // (nome, tipo, banco...) — NÃO tem saldo; saldo por conta vive em
+      // _pat.accountBalances[].history (mesmo dado que a aba Patrimônio usa
+      // pro card "Contas"). accounts.reduce(...a.balance...) sempre dava 0.
+      const now2 = new Date();
+      const curM2 = `${now2.getFullYear()}-${String(now2.getMonth()+1).padStart(2,'0')}`;
+      total = (_pat?.accountBalances || []).reduce((s, a) => {
+        const up = (a.history || []).filter(h => h.month <= curM2);
+        return s + (up.length ? up[up.length - 1].balance : 0);
+      }, 0);
     }
     const inp = G('apos-patrimonio-atual');
     if (inp) {
@@ -25321,9 +25338,535 @@ async function aposInit() {
   }
   // Patrimônio atual é sempre puxado automaticamente do total real (não editável manualmente)
   await aposPullPatrimonio();
-  aposCalc();
+  await apos2Init();
+  // Restaura qual das duas visões (projeção vs. pós-aposentadoria) estava
+  // ativa — apos2Init() já carregou _aposMode do config junto com os outros
+  // campos da visão 2.
+  aposTglMode(_aposMode === 'inverso' ? 'inverso' : 'projecao');
   // Also update Focus in background
   if (!_aposFocusData) aposUpdateFocus().catch(() => {});
+}
+
+// ══ APOSENTADORIA — VISÃO 2: PÓS-APOSENTADORIA (drawdown) ══
+// Simula o consumo do patrimônio já na aposentadoria: dado um patrimônio
+// inicial e juros reais (sempre informados pelo usuário — não entram na
+// rotação de "campo calculado"), mais renda não financeira mensal (ex:
+// INSS/pensão) e despesa mensal, até quando o patrimônio dura? Ou, dado até
+// quando quer garantir renda (idade-limite), qual a despesa mensal máxima
+// sustentável? Exatamente um dos 3 campos (renda não financeira /
+// idade-limite / despesa mensal) é calculado a partir dos outros 4 — o
+// usuário escolhe qual via os rádios "🧮 calcular este campo".
+let _aposMode = 'projecao'; // 'projecao' | 'inverso'
+let _apos2View = 'table';
+let _apos2Chart = null;
+let _apos2CalcField = 'idade';
+let _apos2IncomeAssetIds   = new Set(); // bens e direitos considerados geradores de renda (afeta "usar atual" do patrimônio inicial)
+let _apos2PreserveAssetIds = new Set(); // bens e direitos a preservar (viram o patrimônio desejado na idade limite)
+
+// Bens e direitos (_pat.assets) com o valor mais recente conhecido —
+// mesmo padrão de leitura de histMap usado no gráfico de Patrimônio
+// (renderer.js, refreshPatrimonioChart). Investimentos financeiros não
+// entram aqui de propósito — o usuário pediu que eles sempre contem como
+// geradores de renda, sem precisar aparecer nesta lista de seleção.
+function apos2GetPatAssetsWithValues() {
+  if (!_pat?.assets?.length) return [];
+  const now = new Date();
+  const curM = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const histMap = {};
+  (_pat.historyAll || []).forEach(h => {
+    if (!histMap[h.asset_id]) histMap[h.asset_id] = {};
+    histMap[h.asset_id][h.month] = h.value;
+  });
+  return _pat.assets
+    .filter(a => !a.hidden)
+    .map(a => {
+      const months = Object.keys(histMap[a.id] || {}).filter(m => m <= curM).sort();
+      const value = months.length ? (histMap[a.id][months[months.length - 1]] || 0) : 0;
+      return { id: a.id, name: a.name, value };
+    })
+    .filter(a => a.value > 0.01);
+}
+
+// Renderiza a lista de checkboxes de bens e direitos dentro de `containerId`
+// — usado tanto pelo seletor de "geram renda" quanto pelo de "preservar".
+function apos2RenderAssetPicker(containerId, selectedIds, toggleFnName) {
+  const el = G(containerId);
+  if (!el) return;
+  const assets = apos2GetPatAssetsWithValues();
+  el.innerHTML = assets.length
+    ? assets.map(a => `
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0;cursor:pointer">
+        <input type="checkbox" ${selectedIds.has(a.id)?'checked':''} onchange="${toggleFnName}(${a.id})" style="margin:0">
+        <span style="flex:1">${esc(a.name)}</span>
+        <span style="font-family:'DM Mono',monospace;color:var(--text3);font-size:11px">${fmtBRL(a.value)}</span>
+      </label>`).join('')
+    : '<div style="font-size:11px;color:var(--text3)">Nenhum bem/direito cadastrado na aba Patrimônio.</div>';
+}
+
+function apos2ToggleIncomeAssetsPanel() {
+  const panel = G('apos2-income-assets-panel');
+  if (!panel) return;
+  const willOpen = panel.style.display === 'none';
+  panel.style.display = willOpen ? '' : 'none';
+  if (willOpen) apos2RenderAssetPicker('apos2-income-assets-panel', _apos2IncomeAssetIds, 'apos2ToggleIncomeAsset');
+}
+function apos2TogglePreserveAssetsPanel() {
+  const panel = G('apos2-preserve-assets-panel');
+  if (!panel) return;
+  const willOpen = panel.style.display === 'none';
+  panel.style.display = willOpen ? '' : 'none';
+  if (willOpen) apos2RenderAssetPicker('apos2-preserve-assets-panel', _apos2PreserveAssetIds, 'apos2TogglePreserveAsset');
+}
+function apos2ToggleIncomeAsset(id) {
+  if (_apos2IncomeAssetIds.has(id)) _apos2IncomeAssetIds.delete(id); else _apos2IncomeAssetIds.add(id);
+  apos2SaveConfig();
+}
+function apos2TogglePreserveAsset(id) {
+  if (_apos2PreserveAssetIds.has(id)) _apos2PreserveAssetIds.delete(id); else _apos2PreserveAssetIds.add(id);
+  apos2SaveConfig();
+  apos2UpdatePatFinalDisplay();
+  apos2Calc();
+}
+// Quando há ativos marcados pra preservar, o campo "patrimônio desejado"
+// passa a ser a SOMA deles, travado — igual ao padrão dos campos
+// calculados (apos2SetCalcField). Desmarcando todos, volta a ser um campo
+// normal, editável manualmente.
+function apos2UpdatePatFinalDisplay() {
+  const inp = G('apos2-pat-final');
+  if (!inp) return;
+  const selected = apos2GetPatAssetsWithValues().filter(a => _apos2PreserveAssetIds.has(a.id));
+  if (selected.length) {
+    const sum = selected.reduce((s,a) => s + a.value, 0);
+    if (inp.setValue) inp.setValue(sum); else inp.value = sum;
+    inp.readOnly = true;
+    inp.style.background = '#f1f8e9'; inp.style.borderColor = '#c8e6c9'; inp.style.color = '#2e7d32';
+  } else {
+    inp.readOnly = false;
+    inp.style.background = ''; inp.style.borderColor = ''; inp.style.color = '';
+  }
+}
+function apos2TryEditPatFinal() {
+  const inp = G('apos2-pat-final');
+  if (inp?.readOnly) toast('Desmarque os ativos selecionados abaixo pra editar esse valor manualmente.');
+}
+
+// Valor futuro do patrimônio após n anos, com juros reais anuais r e
+// retirada líquida anual fixa W (despesa − renda não financeira, já anual)
+// — fórmula padrão de valor futuro de uma anuidade com principal inicial.
+function apos2FV(P0, r, n, W) {
+  if (Math.abs(r) < 1e-9) return P0 - W * n;
+  const f = Math.pow(1 + r, n);
+  return P0 * f - W * (f - 1) / r;
+}
+// Retirada líquida anual sustentável que leva o patrimônio de P0 a
+// exatamente Pf (patrimônio desejado na idade limite — 0 por padrão, mas
+// pode ser um valor positivo se o usuário quiser garantir uma herança) em
+// exatamente n anos.
+function apos2SolveW(P0, r, n, Pf) {
+  if (n <= 0) return P0 - Pf;
+  if (Math.abs(r) < 1e-9) return (P0 - Pf) / n;
+  const f = Math.pow(1 + r, n);
+  if (Math.abs(f - 1) < 1e-9) return (P0 - Pf) / n;
+  return (P0 * f - Pf) * r / (f - 1);
+}
+// Quantos anos até o patrimônio atingir Pf, dada uma retirada líquida
+// anual fixa W. Usa bisseção sobre apos2FV (monótona em n, pra qualquer
+// combinação de sinais de r/W/Pf) em vez de fórmula fechada — mais robusto
+// contra os vários casos-limite que Pf≠0 introduz (patrimônio podendo
+// crescer rumo a um alvo positivo, nunca convergir, etc). Retorna Infinity
+// se o patrimônio nunca CAI abaixo de Pf (fica sempre seguro), ou NaN se
+// nunca ALCANÇA Pf (ex: já começa abaixo do alvo e só piora).
+function apos2SolveN(P0, r, W, Pf) {
+  const f0 = P0 - Pf;
+  if (Math.abs(f0) < 1e-6) return 0; // já começa exatamente no alvo
+  const f1 = apos2FV(P0, r, 1, W) - Pf;
+  const movingToward = (f0 > 0 && f1 < f0) || (f0 < 0 && f1 > f0);
+  if (!movingToward) return f0 > 0 ? Infinity : NaN;
+  let hi = 1;
+  while (hi <= 200 && Math.sign(apos2FV(P0, r, hi, W) - Pf) === Math.sign(f0)) hi *= 2;
+  if (hi > 200) return f0 > 0 ? Infinity : NaN;
+  let lo = hi / 2;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (Math.sign(apos2FV(P0, r, mid, W) - Pf) === Math.sign(f0)) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// Se o campo `field` está travado (é o "calculado" no momento), chacoalha
+// o rótulo do rádio "🧮 calcular este campo" correspondente — dá pro
+// usuário perceber onde precisa mexer pra poder editar aquele valor, em
+// vez de só o campo ficar mudo sem explicação.
+function apos2TryEdit(field) {
+  if (_apos2CalcField !== field) return;
+  const label = G(`apos2-radiolabel-${field}`);
+  if (!label) return;
+  label.classList.remove('apos2-shake');
+  void label.offsetWidth; // força reflow pra poder reiniciar a animação
+  label.classList.add('apos2-shake');
+}
+
+// Marca qual dos 3 campos elegíveis é "calculado" (travado/readonly,
+// preenchido pelo app) — patrimônio inicial e juros reais nunca entram
+// aqui, ficam sempre editáveis (o usuário pediu pra tirar esse botão dos
+// dois, prefere sempre informar os dois manualmente).
+function apos2SetCalcField(field) {
+  _apos2CalcField = field;
+  const map = { renda:'apos2-renda-nao-fin', idade:'apos2-age-limit', despesa:'apos2-despesa' };
+  Object.entries(map).forEach(([k, id]) => {
+    const el = G(id);
+    if (!el) return;
+    const isCalc = k === field;
+    el.readOnly = isCalc;
+    el.style.background  = isCalc ? '#f1f8e9' : '';
+    el.style.borderColor = isCalc ? '#c8e6c9' : '';
+    el.style.color       = isCalc ? '#2e7d32' : '';
+  });
+  apos2Calc();
+}
+
+// Média mensal (últimos 12 meses com dado) de receita ou despesa — de uma
+// categoria específica (e subcategorias) ou de todas somadas juntas.
+async function apos2Compute12mAvg(type, category) {
+  try {
+    const catRows = await ff.evolucaoByCat({ excludedCats: [] }).catch(() => []);
+    const curMonthStr = todayStr().slice(0,7);
+    const months = [];
+    let d = new Date(curMonthStr + '-02');
+    for (let i = 0; i < 12; i++) { d.setMonth(d.getMonth() - 1); months.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`); }
+    const byMonth = {};
+    catRows.forEach(r => { if (months.includes(r.month)) (byMonth[r.month] = byMonth[r.month]||[]).push(r); });
+    const monthTotals = months.map(m => (byMonth[m]||[])
+      .filter(r => !category || r.category === category || r.category.startsWith(category + ':'))
+      .reduce((s,r) => s + (type === 'income' ? (r.income||0) : (r.expenses||0)), 0));
+    const withData = monthTotals.filter(v => v > 0);
+    return withData.length ? withData.reduce((a,b)=>a+b,0) / withData.length : null;
+  } catch(e) { return null; }
+}
+
+async function apos2PopulateCategoryDropdown() {
+  const sel = G('apos2-renda-cat');
+  if (!sel) return;
+  try {
+    const rows = await ff.evolucaoByCat({ excludedCats: [] }).catch(() => []);
+    const cats = [...new Set(rows.filter(r => (r.income||0) > 0).map(r => r.category))].sort((a,b) => a.localeCompare(b,'pt-BR'));
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— Escolher categoria de renda —</option>' + cats.map(c => `<option value="${esc(c)}"${c===cur?' selected':''}>${esc(c)}</option>`).join('');
+  } catch(e) {}
+}
+
+async function apos2UpdateRendaHint() {
+  const hintEl = G('apos2-renda-hint');
+  if (!hintEl) return;
+  const cat = G('apos2-renda-cat')?.value || '';
+  if (!cat) { hintEl.textContent = ''; return; }
+  const avg = await apos2Compute12mAvg('income', cat);
+  hintEl.innerHTML = avg
+    ? `📊 Média 12m: <a href="#" onclick="event.preventDefault();G('apos2-renda-nao-fin').setValue(${avg.toFixed(2)});apos2Calc()" style="font-weight:700;color:var(--green);text-decoration:none">${fmtBRL(avg)}</a> <span style="color:var(--text3)">(clique para usar)</span>`
+    : `<span style="color:var(--text3)">Sem histórico de receita para "${esc(cat)}" nos últimos 12 meses</span>`;
+}
+
+// Média 12 meses de despesa — usa EXATAMENTE o mesmo dado da coluna "Média
+// 12M desp." da aba Evolução (Resumo mensal): computeSummaryFromByCat (que
+// agrupa por categoria-mãe e classifica pelo NET, não pelo campo `expenses`
+// cru de cada categoria isolada) + movAvg12. Um cálculo ingênuo somando
+// `expenses` de cada categoria direto (o que esta função fazia antes)
+// ignora esse líquido — estornos/reembolsos dentro de uma categoria inflam
+// o total, exatamente o tipo de distorção que a convenção do projeto já
+// evita em outros lugares (ver getCatType/netClassify). Transferências já
+// são excluídas antes disso, na própria query SQL (evolucao:monthly-by-category).
+async function apos2GetDespesaMA12() {
+  try {
+    const { byCatFull } = await getEvolucaoData();
+    const now2 = new Date();
+    const curM2 = `${now2.getFullYear()}-${String(now2.getMonth()+1).padStart(2,'0')}`;
+    const allMonths = [...new Set(Object.keys(byCatFull))].filter(m => m <= curM2).sort();
+    if (!allMonths.length) return null;
+    const refMonth = getIpcaRefMonth();
+    const useIPCA  = G('ev-ipca')?.checked !== false;
+    const corr = (v, m) => useIPCA && refMonth ? inflateMonth(v, m, refMonth) : (v || 0);
+    const summary = computeSummaryFromByCat(allMonths, byCatFull);
+    const allExp  = allMonths.map(m => corr(summary[m]?.expenses || 0, m));
+    const allMA12 = allMonths.map((_, i) => movAvg12(allExp, i));
+    return allMA12[allMA12.length - 1] || null; // valor do último mês disponível — igual à tabela de Evolução
+  } catch(e) { console.error('apos2GetDespesaMA12:', e); return null; }
+}
+
+async function apos2UpdateDespesaHint() {
+  const hintEl = G('apos2-despesa-hint');
+  if (!hintEl) return;
+  const avg = await apos2GetDespesaMA12();
+  hintEl.innerHTML = avg
+    ? `📊 Média 12m (igual à aba Evolução): <a href="#" onclick="event.preventDefault();G('apos2-despesa').setValue(${avg.toFixed(2)});apos2Calc()" style="font-weight:700;color:var(--green);text-decoration:none">${fmtBRL(avg)}</a> <span style="color:var(--text3)">(clique para usar)</span>`
+    : '';
+}
+
+// "Usar atual" do patrimônio inicial — diferente do "patrimônio atual" cru
+// da visão 1 (que soma TUDO), aqui só entram investimentos financeiros e
+// contas bancárias (sempre — capital líquido, presumidamente rentável) mais
+// os bens e direitos que o usuário marcou como geradores de renda no
+// seletor abaixo (ex: um imóvel alugado entra, a casa onde mora não).
+async function apos2PullPatrimonio() {
+  try {
+    const now = new Date();
+    const curM = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const invTotal    = (window._invTotalByMonth || {})[curM] || 0;
+    // accounts (global) só tem metadados (nome, tipo, banco...), NÃO tem
+    // saldo — saldo por conta vive em _pat.accountBalances[].history, o
+    // mesmo dado que a aba Patrimônio usa pra somar o card "Contas".
+    const contasTotal = (_pat?.accountBalances || []).reduce((s, a) => {
+      const up = (a.history || []).filter(h => h.month <= curM);
+      return s + (up.length ? up[up.length - 1].balance : 0);
+    }, 0);
+    const bensTotal   = apos2GetPatAssetsWithValues()
+      .filter(a => _apos2IncomeAssetIds.has(a.id))
+      .reduce((s, a) => s + a.value, 0);
+    const total = invTotal + contasTotal + bensTotal;
+    const inp = G('apos2-pat-inicial');
+    if (inp) {
+      if (inp.setValue) inp.setValue(Math.max(0, total));
+      else inp.value = Math.max(0, total).toLocaleString('pt-BR',{minimumFractionDigits:2});
+      apos2Calc();
+    }
+  } catch(e) { toast('Erro ao buscar patrimônio: ' + e.message); }
+}
+
+async function apos2SaveConfig() {
+  const fields = {
+    apos2_ageRet:      G('apos2-age-ret')?.value || '',
+    apos2_patInicial:  G('apos2-pat-inicial')?.value || '',
+    apos2_rateReal:    G('apos2-rate-real')?.value || '',
+    apos2_rendaNaoFin: G('apos2-renda-nao-fin')?.value || '',
+    apos2_rendaCat:    G('apos2-renda-cat')?.value || '',
+    apos2_ageLimit:    G('apos2-age-limit')?.value || '',
+    apos2_despesa:     G('apos2-despesa')?.value || '',
+    apos2_patFinal:    G('apos2-pat-final')?.value || '',
+    apos2_calcField:   _apos2CalcField,
+    apos2_incomeAssetIds:   [..._apos2IncomeAssetIds],
+    apos2_preserveAssetIds: [..._apos2PreserveAssetIds],
+    apos_mode:         _aposMode,
+  };
+  try { const cfg = await ff.overviewConfigGet().catch(() => null) || {}; await ff.overviewConfigSave({ ...cfg, ...fields }); }
+  catch(e) { console.error('apos2SaveConfig:', e); }
+}
+
+async function apos2LoadConfig() {
+  try {
+    const cfg = await ff.overviewConfigGet().catch(() => null) || {};
+    if (!cfg) return;
+    if (cfg.apos2_ageRet)      G('apos2-age-ret').value = cfg.apos2_ageRet;
+    if (cfg.apos2_patInicial) { const inp=G('apos2-pat-inicial');   if (inp) (inp.setValue?inp.setValue(parseBRLStr(cfg.apos2_patInicial)):(inp.value=cfg.apos2_patInicial)); }
+    if (cfg.apos2_rateReal)   G('apos2-rate-real').value = cfg.apos2_rateReal;
+    if (cfg.apos2_rendaNaoFin){ const inp=G('apos2-renda-nao-fin'); if (inp) (inp.setValue?inp.setValue(parseBRLStr(cfg.apos2_rendaNaoFin)):(inp.value=cfg.apos2_rendaNaoFin)); }
+    if (cfg.apos2_rendaCat)   { const sel=G('apos2-renda-cat'); if (sel) sel.value = cfg.apos2_rendaCat; }
+    if (cfg.apos2_ageLimit)   G('apos2-age-limit').value = cfg.apos2_ageLimit;
+    if (cfg.apos2_despesa)    { const inp=G('apos2-despesa'); if (inp) (inp.setValue?inp.setValue(parseBRLStr(cfg.apos2_despesa)):(inp.value=cfg.apos2_despesa)); }
+    if (cfg.apos2_patFinal)   { const inp=G('apos2-pat-final'); if (inp) (inp.setValue?inp.setValue(parseBRLStr(cfg.apos2_patFinal)):(inp.value=cfg.apos2_patFinal)); }
+    if (cfg.apos2_calcField)  _apos2CalcField = cfg.apos2_calcField;
+    if (Array.isArray(cfg.apos2_incomeAssetIds))   _apos2IncomeAssetIds   = new Set(cfg.apos2_incomeAssetIds);
+    if (Array.isArray(cfg.apos2_preserveAssetIds)) _apos2PreserveAssetIds = new Set(cfg.apos2_preserveAssetIds);
+    if (cfg.apos_mode)        _aposMode = cfg.apos_mode;
+  } catch(e) {}
+}
+
+async function apos2Init() {
+  setupCurrencyInput(G('apos2-pat-inicial'));
+  setupCurrencyInput(G('apos2-renda-nao-fin'));
+  setupCurrencyInput(G('apos2-despesa'));
+  setupCurrencyInput(G('apos2-pat-final'));
+  await apos2PopulateCategoryDropdown();
+  await apos2LoadConfig();
+  apos2UpdatePatFinalDisplay(); // se havia ativos a preservar salvos, já trava o campo antes do primeiro cálculo
+  const radio = document.querySelector(`input[name="apos2-calc-field"][value="${_apos2CalcField}"]`);
+  if (radio) radio.checked = true;
+  apos2SetCalcField(_apos2CalcField); // aplica o readonly visual certo e já recalcula
+  apos2UpdateDespesaHint();
+  if (G('apos2-renda-cat')?.value) apos2UpdateRendaHint();
+}
+
+async function apos2Calc() {
+  apos2SaveConfig();
+
+  const ageRet = parseInt(G('apos2-age-ret')?.value || '0');
+  const calcField = _apos2CalcField;
+
+  const fieldEls = { renda:'apos2-renda-nao-fin', idade:'apos2-age-limit', despesa:'apos2-despesa' };
+  const labels   = { renda:'renda não financeira', idade:'idade limite', despesa:'despesa mensal' };
+  const missing = [];
+  if (!ageRet) missing.push('idade inicial');
+  if (!G('apos2-pat-inicial')?.value?.trim()) missing.push('patrimônio inicial');
+  if (!G('apos2-rate-real')?.value?.toString()?.trim()) missing.push('juros reais');
+  Object.keys(fieldEls).forEach(k => {
+    if (k === calcField) return;
+    const el = G(fieldEls[k]);
+    if (!el || el.value.trim() === '') missing.push(labels[k]);
+  });
+  if (missing.length) {
+    G('apos2-kpis').innerHTML = `<div style="color:var(--text3);font-size:13px;padding:12px">Preencha: ${missing.join(', ')}.</div>`;
+    if (G('apos2-table-body')) G('apos2-table-body').innerHTML = '';
+    return;
+  }
+
+  const P0   = aposParseInput('apos2-pat-inicial');
+  const rate = (parseFloat(G('apos2-rate-real').value) || 0) / 100;
+  const Pf   = aposParseInput('apos2-pat-final'); // patrimônio desejado na idade limite — 0 se em branco (comportamento antigo)
+  let Rm     = calcField === 'renda'   ? null : aposParseInput('apos2-renda-nao-fin');
+  let ageLim = calcField === 'idade'   ? null : parseInt(G('apos2-age-limit').value || '0');
+  let Dm     = calcField === 'despesa' ? null : aposParseInput('apos2-despesa');
+
+  if (calcField !== 'idade' && ageLim <= ageRet) {
+    G('apos2-kpis').innerHTML = `<div style="color:var(--red);font-size:13px;padding:12px">A idade limite precisa ser maior que a idade inicial.</div>`;
+    if (G('apos2-table-body')) G('apos2-table-body').innerHTML = '';
+    return;
+  }
+
+  const n = calcField === 'idade' ? null : (ageLim - ageRet);
+  let resultMsg = '', infinite = false;
+
+  if (calcField === 'idade') {
+    const W = (Dm - Rm) * 12;
+    const nCalc = apos2SolveN(P0, rate, W, Pf);
+    if (nCalc === Infinity) {
+      infinite = true;
+      ageLim = ageRet + 60; // horizonte de exibição
+      resultMsg = Pf > 0
+        ? `Patrimônio nunca cai abaixo dos ${fmtBRL(Pf)} desejados`
+        : 'Patrimônio nunca se esgota (renda não financeira + juros cobrem a despesa)';
+    } else if (isNaN(nCalc)) {
+      G('apos2-kpis').innerHTML = `<div style="color:var(--red);font-size:13px;padding:12px">Com esses valores, o patrimônio nunca chega a ${fmtBRL(Pf)} — ajuste a despesa, a renda não financeira ou o patrimônio desejado.</div>`;
+      if (G('apos2-table-body')) G('apos2-table-body').innerHTML = '';
+      return;
+    } else {
+      ageLim = ageRet + nCalc;
+      resultMsg = `Patrimônio ${Pf>0?`chega a ${fmtBRL(Pf)}`:'dura'} até os ${ageLim.toFixed(1)} anos`;
+      G('apos2-age-limit').value = Math.round(ageLim);
+    }
+  } else if (calcField === 'despesa') {
+    const W = apos2SolveW(P0, rate, n, Pf);
+    Dm = W / 12 + Rm;
+    resultMsg = `Despesa mensal máxima sustentável: ${fmtBRL(Dm)}`;
+    G('apos2-despesa').setValue(Math.max(0, Dm));
+  } else if (calcField === 'renda') {
+    const W = apos2SolveW(P0, rate, n, Pf);
+    Rm = Dm - W / 12;
+    resultMsg = `Renda não financeira necessária: ${fmtBRL(Math.max(0, Rm))}`;
+    G('apos2-renda-nao-fin').setValue(Math.max(0, Rm));
+  }
+
+  const W = (Dm - Rm) * 12;
+  const rows = apos2BuildRows(P0, rate, ageRet, ageLim, W, Pf);
+  renderApos2KPIs({ resultMsg, P0, rate, Rm, Dm, ageLim, W, infinite, Pf });
+  if (_apos2View === 'table') renderApos2Table(rows);
+  else renderApos2Charts(rows);
+}
+
+function apos2BuildRows(P0, rate, ageRet, ageLim, W, Pf) {
+  const curYear = new Date().getFullYear();
+  const nYears = Math.max(1, Math.round(ageLim - ageRet));
+  const rows = [];
+  let pat = P0;
+  for (let y = 0; y <= nYears; y++) {
+    rows.push({ ano: curYear + y, idade: ageRet + y, patInicio: pat, rendimento: pat * rate, retirada: W });
+    const patNext = pat * (1 + rate) - W;
+    // Só interrompe cedo mostrando "zerou" quando o alvo TAMBÉM é zero —
+    // se o alvo é positivo (herança), a trajetória segue até o fim (deve
+    // terminar perto do valor desejado, não de zero).
+    if (Pf <= 0 && patNext <= 0 && pat > 0) {
+      // Linha final só marca "patrimônio zerado" — sem rendimento nem
+      // retirada de verdade nesse ano (o que sobrava já foi consumido no
+      // ano anterior), diferente de mostrar W cheio como se ainda tivesse
+      // saindo dinheiro de um patrimônio que já é zero.
+      rows.push({ ano: curYear + y + 1, idade: ageRet + y + 1, patInicio: 0, rendimento: 0, retirada: 0 });
+      break;
+    }
+    pat = patNext;
+  }
+  return rows;
+}
+
+function renderApos2KPIs({ resultMsg, P0, rate, Rm, Dm, ageLim, W, infinite, Pf }) {
+  const kpis = [
+    { icon:'🧮', label:'Resultado calculado', value: resultMsg, color:'#7c3aed' },
+    { icon:'🏛️', label:'Patrimônio inicial', value: fmtBRL(P0), color:'var(--green)' },
+    { icon:'📊', label:'Juros reais', value:`${(rate*100).toFixed(2)}% a.a.`, color:'#0891b2' },
+    { icon:'💵', label:'Retirada líquida/mês', value: fmtBRL(W/12), sub:`despesa ${fmtBRL(Dm)} − renda não fin. ${fmtBRL(Rm)}`, color: W>0?'#d97706':'#43a047' },
+    { icon:'⏳', label:'Idade limite', value: infinite ? '∞ (nunca acaba)' : Math.round(ageLim)+' anos', color:'#ef5350' },
+    { icon:'🎁', label:'Patrimônio desejado na idade limite', value: fmtBRL(Pf), sub: Pf>0?'herança/reserva a garantir':'patrimônio pode zerar', color:'#0d9488' },
+  ];
+  G('apos2-kpis').innerHTML = kpis.map(k => `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-left:4px solid ${k.color};border-radius:12px;padding:14px 16px;box-shadow:0 1px 3px rgba(20,30,50,.04)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span style="font-size:18px">${k.icon}</span>
+        <span style="font-size:11px;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.02em">${k.label}</span>
+      </div>
+      <div style="font-size:16px;font-weight:800;color:${k.color}">${k.value}</div>
+      ${k.sub?`<div style="font-size:11px;color:var(--text3);margin-top:3px">${k.sub}</div>`:''}
+    </div>`).join('');
+}
+
+function renderApos2Table(rows) {
+  const tbody = G('apos2-table-body');
+  if (!tbody) return;
+  const mono = `font-family:'DM Mono',monospace`;
+  tbody.innerHTML = rows.map((r,i) => {
+    const isLast = i === rows.length - 1;
+    return `<tr style="${isLast?'background:rgba(239,83,80,.08)':''}">
+      <td style="font-size:12px;padding:5px 8px">${r.ano}</td>
+      <td style="font-size:12px;padding:5px 8px;text-align:center">${r.idade}</td>
+      <td class="right" style="font-size:12px;padding:5px 8px;${mono}">${fmtBRL(r.patInicio)}</td>
+      <td class="right" style="font-size:12px;padding:5px 8px;${mono};color:var(--green)">${fmtBRL(r.rendimento)}</td>
+      <td class="right" style="font-size:12px;padding:5px 8px;${mono};color:var(--red)">${fmtBRL(r.retirada)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderApos2Charts(rows) {
+  if (_apos2Chart) { try{_apos2Chart.destroy();}catch(e){} _apos2Chart=null; }
+  const labels = rows.map(r => `${r.idade}a`);
+  const patData = rows.map(r => Math.round(r.patInicio));
+  const fmtY = v => v==null?'':('R$'+(Math.abs(v)>=1e6?(v/1e6).toFixed(1)+'M':Math.abs(v)>=1e3?(v/1e3).toFixed(0)+'k':v));
+  const GREEN = '#43a047';
+  const ctx = G('apos2-chart')?.getContext('2d');
+  if (!ctx) return;
+  _apos2Chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [
+      { label:'Patrimônio', data:patData, borderColor:GREEN, backgroundColor:evChartGradient(ctx,GREEN,380),
+        fill:true, tension:.4, borderWidth:2.5, pointRadius:0, pointHoverRadius:6, pointHoverBackgroundColor:GREEN, pointHoverBorderColor:'#fff', pointHoverBorderWidth:2, spanGaps:false },
+    ]},
+    options: { responsive:true, maintainAspectRatio:false,
+      interaction:{ mode:'index', intersect:false },
+      plugins:{
+        legend:{ display:false },
+        title:{ display:true, text:'Patrimônio pós-aposentadoria, por idade', font:{size:13,weight:'700'}, color:GREEN, padding:{bottom:12} },
+        tooltip:{ enabled:false, external:(context) => dashTooltip(context, {
+          getTitle: (dp) => labels[dp[0].dataIndex],
+          getRows:  (dp) => dp.filter(d=>d.parsed.y!=null).map(d => ({ color:d.dataset.borderColor, label:d.dataset.label, value:fmtBRL(d.parsed.y) })),
+        }) },
+      },
+      scales:{ x:{ grid:{display:false}, ticks:{font:{size:10}} }, y:{ grid:{color:themeGridColor()}, ticks:{ font:{size:10}, callback:fmtY } } },
+      animation:{ duration:600 },
+    }
+  });
+}
+
+function apos2TglView(view) {
+  _apos2View = view;
+  G('apos2-table-view').style.display = view==='table' ? '' : 'none';
+  G('apos2-chart-view').style.display = view==='chart' ? '' : 'none';
+  G('apos2-view-table').classList.toggle('primary', view==='table');
+  G('apos2-view-chart').classList.toggle('primary', view==='chart');
+  apos2Calc();
+}
+
+function aposTglMode(mode) {
+  _aposMode = mode;
+  G('apos-view-projecao').style.display = mode==='projecao' ? '' : 'none';
+  G('apos-view-inverso').style.display  = mode==='inverso'  ? '' : 'none';
+  G('apos-mode-projecao').classList.toggle('primary', mode==='projecao');
+  G('apos-mode-inverso').classList.toggle('primary', mode==='inverso');
+  apos2SaveConfig();
+  if (mode === 'inverso') apos2Calc(); else aposCalc();
 }
 
 // ══ ACCOUNT CHART ══════════════════════════════════════════════════════════

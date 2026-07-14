@@ -719,6 +719,8 @@ select.inp option{background:var(--bg2);}
 #tour-next{min-width:90px;}
 .tour-highlight{outline:3px solid var(--accent);outline-offset:3px;border-radius:6px;animation:tour-pulse 1.5s infinite;}
 @keyframes tour-pulse{0%,100%{outline-color:var(--accent)}50%{outline-color:#93c5fd}}
+@keyframes apos2-shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-5px)}40%{transform:translateX(5px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
+.apos2-shake{animation:apos2-shake .4s;color:var(--red)!important;font-weight:700;}
 .ctx-item{padding:8px 16px;cursor:pointer;color:var(--text);transition:background .1s;}
 .ctx-item:hover{background:var(--bg3);}
 .ctx-danger{color:var(--red);}
@@ -1597,6 +1599,14 @@ select.inp option{background:var(--bg2);}
         <div style="font-size:12px;color:var(--text3);margin-top:2px">Projete quanto precisa poupar para alcançar sua independência financeira</div>
       </div>
       <div class="ev-toggle-group" style="display:inline-flex;background:var(--bg3);border-radius:12px;padding:4px;gap:3px">
+        <button class="btn primary" id="apos-mode-projecao" onclick="aposTglMode('projecao')" style="font-size:14px;padding:10px 20px;font-weight:700">📈 Rumo à Aposentadoria</button>
+        <button class="btn" id="apos-mode-inverso" onclick="aposTglMode('inverso')" style="font-size:14px;padding:10px 20px;font-weight:700">📉 Pós-Aposentadoria</button>
+      </div>
+    </div>
+
+    <div id="apos-view-projecao">
+    <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+      <div class="ev-toggle-group" style="display:inline-flex;background:var(--bg3);border-radius:12px;padding:4px;gap:3px">
         <button class="btn primary" id="apos-view-table" onclick="aposTglView('table')" style="font-size:14px;padding:10px 20px;font-weight:700">📋 Tabela</button>
         <button class="btn" id="apos-view-chart" onclick="aposTglView('chart')" style="font-size:14px;padding:10px 20px;font-weight:700">📈 Gráfico</button>
       </div>
@@ -1709,6 +1719,127 @@ select.inp option{background:var(--bg2);}
         <div style="position:relative;height:300px"><canvas id="apos-chart2"></canvas></div>
       </div>
     </div>
+    </div><!-- /apos-view-projecao -->
+
+    <!-- ══ VISÃO 2: PÓS-APOSENTADORIA (drawdown) ══ -->
+    <div id="apos-view-inverso" style="display:none">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+        <div class="ev-toggle-group" style="display:inline-flex;background:var(--bg3);border-radius:12px;padding:4px;gap:3px">
+          <button class="btn primary" id="apos2-view-table" onclick="apos2TglView('table')" style="font-size:14px;padding:10px 20px;font-weight:700">📋 Tabela</button>
+          <button class="btn" id="apos2-view-chart" onclick="apos2TglView('chart')" style="font-size:14px;padding:10px 20px;font-weight:700">📈 Gráfico</button>
+        </div>
+      </div>
+
+      <div class="tbl-card" style="margin-bottom:16px">
+        <div style="padding:16px">
+          <div style="font-size:12px;color:var(--text3);margin-bottom:14px">Simule o comportamento do seu patrimônio depois de aposentado. Marque com "🧮 calcular" UM dos 3 campos abaixo (ele fica travado e o app descobre o valor a partir dos outros 4).</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px">
+
+            <!-- Idade inicial (ponto de partida da simulação) -->
+            <div>
+              <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📅 Idade inicial</div>
+              <input class="inp" id="apos2-age-ret" type="number" min="40" max="99" placeholder="65"
+                style="width:100%;font-size:14px" oninput="apos2Calc()">
+            </div>
+
+            <!-- Patrimônio inicial (sempre informado pelo usuário) -->
+            <div>
+              <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🏛️ Patrimônio inicial (R$)</div>
+              <div style="display:flex;gap:6px">
+                <input class="inp" id="apos2-pat-inicial" type="text" placeholder="0" style="flex:1;font-size:14px" oninput="apos2Calc()">
+                <button class="ev-action-btn" onclick="apos2PullPatrimonio()" style="white-space:nowrap">usar atual</button>
+              </div>
+              <a href="#" onclick="event.preventDefault();apos2ToggleIncomeAssetsPanel()" style="font-size:11px;color:var(--accent);display:inline-block;margin-top:6px;text-decoration:none">▾ Escolher quais bens e direitos geram renda</a>
+              <div id="apos2-income-assets-panel" style="display:none;margin-top:6px;padding:8px;background:var(--bg3);border-radius:6px;max-height:160px;overflow-y:auto"></div>
+              <div style="font-size:10px;color:var(--text3);margin-top:3px">Usados só no "usar atual" — investimentos financeiros e contas bancárias sempre contam como geradores de renda; imóvel de moradia, por exemplo, normalmente não.</div>
+            </div>
+
+            <!-- Juros reais esperados (sempre informado pelo usuário) -->
+            <div>
+              <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">📊 Juros reais esperados (% a.a.)</div>
+              <input class="inp" id="apos2-rate-real" type="number" step="0.1" placeholder="4.0" style="width:100%;font-size:14px" oninput="apos2Calc()">
+            </div>
+
+            <!-- Renda não financeira mensal -->
+            <div>
+              <label id="apos2-radiolabel-renda" style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text3);cursor:pointer;margin-bottom:4px">
+                <input type="radio" name="apos2-calc-field" value="renda" onchange="apos2SetCalcField('renda')" style="margin:0">
+                🧮 calcular este campo
+              </label>
+              <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">💵 Renda não financeira mensal (R$)</div>
+              <input class="inp" id="apos2-renda-nao-fin" type="text" placeholder="0" style="width:100%;font-size:14px"
+                oninput="apos2Calc()" onclick="apos2TryEdit('renda')" onkeydown="apos2TryEdit('renda')">
+              <select class="inp" id="apos2-renda-cat" style="width:100%;font-size:11px;margin-top:5px;padding:3px 6px" onchange="apos2UpdateRendaHint()">
+                <option value="">— Escolher categoria de renda —</option>
+              </select>
+              <div id="apos2-renda-hint" style="font-size:11px;color:var(--text3);margin-top:4px;min-height:14px"></div>
+            </div>
+
+            <!-- Idade limite -->
+            <div>
+              <label id="apos2-radiolabel-idade" style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text3);cursor:pointer;margin-bottom:4px">
+                <input type="radio" name="apos2-calc-field" value="idade" onchange="apos2SetCalcField('idade')" style="margin:0" checked>
+                🧮 calcular este campo
+              </label>
+              <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">⏳ Idade limite</div>
+              <input class="inp" id="apos2-age-limit" type="number" min="40" max="120" placeholder="95" style="width:100%;font-size:14px"
+                oninput="apos2Calc()" onclick="apos2TryEdit('idade')" onkeydown="apos2TryEdit('idade')">
+              <div style="font-size:11px;color:var(--text3);margin-top:4px">Até quando quer garantir ter renda para sobreviver</div>
+            </div>
+
+            <!-- Patrimônio desejado na idade limite (herança, opcional) -->
+            <div>
+              <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🎁 Patrimônio desejado na idade limite (R$)</div>
+              <input class="inp" id="apos2-pat-final" type="text" placeholder="0" style="width:100%;font-size:14px" oninput="apos2Calc()" onclick="apos2TryEditPatFinal()">
+              <div style="font-size:11px;color:var(--text3);margin-top:4px">Ex: herança que quer deixar. Deixe 0 se não houver essa preocupação (patrimônio pode zerar).</div>
+              <a href="#" onclick="event.preventDefault();apos2TogglePreserveAssetsPanel()" style="font-size:11px;color:var(--accent);display:inline-block;margin-top:6px;text-decoration:none">▾ Ou selecione ativos específicos a preservar</a>
+              <div id="apos2-preserve-assets-panel" style="display:none;margin-top:6px;padding:8px;background:var(--bg3);border-radius:6px;max-height:160px;overflow-y:auto"></div>
+            </div>
+
+            <!-- Despesa mensal esperada -->
+            <div>
+              <label id="apos2-radiolabel-despesa" style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text3);cursor:pointer;margin-bottom:4px">
+                <input type="radio" name="apos2-calc-field" value="despesa" onchange="apos2SetCalcField('despesa')" style="margin:0">
+                🧮 calcular este campo
+              </label>
+              <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🧾 Despesa mensal esperada (R$)</div>
+              <input class="inp" id="apos2-despesa" type="text" placeholder="0" style="width:100%;font-size:14px"
+                oninput="apos2Calc()" onclick="apos2TryEdit('despesa')" onkeydown="apos2TryEdit('despesa')">
+              <div id="apos2-despesa-hint" style="font-size:11px;color:var(--text3);margin-top:4px;min-height:14px"></div>
+            </div>
+
+          </div>
+        </div>
+      </div><!-- /config card -->
+
+      <!-- Summary KPIs -->
+      <div id="apos2-kpis" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px"></div>
+
+      <div id="apos2-table-view">
+        <div class="tbl-card">
+          <div class="tbl-header">
+            <h3>Projeção anual pós-aposentadoria</h3>
+          </div>
+          <div class="tbl-outer" style="max-height:420px;overflow-x:auto">
+            <table class="ledger" id="apos2-table">
+              <thead><tr>
+                <th>Ano</th><th>Idade</th>
+                <th class="right">Patrimônio (início do ano)</th>
+                <th class="right">Rendimento do ano</th>
+                <th class="right">Retirada líquida do ano</th>
+              </tr></thead>
+              <tbody id="apos2-table-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div id="apos2-chart-view" style="display:none">
+        <div class="tbl-card" style="padding:16px">
+          <div style="position:relative;height:380px"><canvas id="apos2-chart"></canvas></div>
+        </div>
+      </div>
+    </div><!-- /apos-view-inverso -->
 
   </div><!-- /page-aposentadoria -->
 
@@ -3432,7 +3563,7 @@ select.inp option{background:var(--bg2);}
 
 <!-- Transaction -->
 <div class="overlay" id="modal-tx">
-  <div class="modal">
+  <div class="modal" onkeydown="if(event.key==='Enter'&&event.target.tagName!=='BUTTON'&&event.target.tagName!=='TEXTAREA'){event.preventDefault();saveTx();}">
     <div class="modal-hdr">
       <h3 id="modal-tx-title">Novo lançamento</h3>
       <button class="btn-icon" onclick="closeModal('modal-tx')">✕</button>
