@@ -12,6 +12,49 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-14 (continuação) — Segurança: remoção da service_role key hardcoded
+
+### Problema
+`src/sync/supabase-client.js` tinha a chave `service_role` do Supabase
+(acesso admin total, ignora RLS) hardcoded no código-fonte, usada em
+TODAS as chamadas REST (`_rest()` sempre passava `useService: true`).
+Como o Desktop é um app distribuído (instalador Electron), esse código é
+extraível — qualquer pessoa com o instalador conseguiria essa chave e
+ler/editar dados de QUALQUER usuário no Supabase, não só os próprios.
+
+### Correção
+- `src/sync/supabase-client.js`: removida a constante `SUPABASE_SERVICE`
+  inteiramente. `_request()` não recebe mais `useService` — sempre usa
+  `SUPABASE_ANON` como `apikey`, e `Authorization: Bearer <token>` usa o
+  `access_token` da sessão do usuário logado (`_session.access_token`)
+  quando disponível, caindo para a anon key sem token em `/auth/v1`
+  (login/refresh, onde ainda não há sessão). `_rest()` agora injeta
+  `token: _session?.access_token` automaticamente em toda chamada
+  (`upsert`/`select`/`update`/`remove`/`pruneNotIn`/`removeOlderThan`).
+- Isso só é seguro porque o isolamento entre usuários passa a depender de
+  Row Level Security no Supabase — sem RLS, a chave anon sozinha também
+  daria acesso total (bastaria omitir o filtro `user_id`). Criado
+  `supabase/enable_rls.sql` (novo arquivo, idempotente): habilita RLS e
+  cria uma política `auth.uid() = user_id` (FOR ALL, role `authenticated`)
+  em `mobile_balances`, `mobile_transactions`, `mobile_budgets`,
+  `mobile_goals`, `mobile_scheduled`, `mobile_patrimonio`,
+  `mobile_evolution`, `ml_rules`, `user_ai_config`, `quick_entries`,
+  `mobile_reconcile_updates`, `mobile_edit_requests` — todas as tabelas
+  tocadas por `sync-push.js`/`sync-pull.js`. Esse script precisa ser
+  rodado manualmente pelo usuário no SQL Editor do Supabase ANTES desta
+  mudança de código ter efeito em produção (sem RLS ativo, o sync para de
+  funcionar depois da troca, já que a anon key sem RLS nem sem
+  service_role não teria permissão nenhuma nas tabelas).
+- Desktop e mobile já autenticam como o MESMO usuário via Supabase Auth
+  (mesmo email/senha), então a política `auth.uid() = user_id` funciona
+  identicamente para as chamadas feitas pelo desktop e pelas já feitas
+  pelo app mobile (que nunca usou service_role).
+- Não foi necessário nenhum tratamento especial para exposição passada —
+  por instrução explícita do usuário, o único requisito era garantir que
+  a chave pare de ficar disponível daqui pra frente.
+
+---
+
 ## 2026-07-14 — v4.72.0 → v4.72.1 → v4.73.0
 
 ### Aba Aposentadoria — nova visão "Pós-Aposentadoria" (drawdown)

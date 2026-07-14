@@ -566,6 +566,7 @@ function ensureLateColumns() {
     "ALTER TABLE pat_assets ADD COLUMN mutuo_juros_tipo TEXT DEFAULT 'simples'",
     "ALTER TABLE pat_assets ADD COLUMN mutuo_index_type TEXT DEFAULT 'none'",
     'ALTER TABLE pat_assets ADD COLUMN mutuo_dia_incidencia INTEGER DEFAULT 1',
+    'ALTER TABLE pat_assets ADD COLUMN mutuo_sync_category TEXT',
     'ALTER TABLE pat_assets ADD COLUMN irpf_codigo TEXT',
     'ALTER TABLE pat_assets ADD COLUMN irpf_discriminacao TEXT',
     'ALTER TABLE personal_debts ADD COLUMN irpf_codigo TEXT',
@@ -596,6 +597,35 @@ function ensureLateColumns() {
     'ALTER TABLE recurring ADD COLUMN pat_debt_id INTEGER',
   ];
   alters.forEach(sql => { try { db.run(sql); } catch(e) {} });
+
+  // Backfill único: mútuos que já tinham conta vinculada (mutuo_sync_account_id)
+  // antes de mutuo_sync_category existir ficariam sem gerar mais transações
+  // de juros (syncMutuoToBank agora exige os dois) — preserva o comportamento
+  // anterior usando o nome que já era hardcoded, mas agora como categoria de
+  // verdade (registrada via ensureCategoryExists, visível na aba Categorias).
+  // Idempotente: só afeta linhas ainda sem categoria definida.
+  try {
+    const needsBackfill = all(`SELECT id FROM pat_assets WHERE asset_type='mutuo' AND mutuo_sync_account_id IS NOT NULL AND (mutuo_sync_category IS NULL OR mutuo_sync_category='')`);
+    if (needsBackfill.length) {
+      ensureCategoryExists('Juros Recebidos');
+      run(`UPDATE pat_assets SET mutuo_sync_category='Juros Recebidos' WHERE asset_type='mutuo' AND mutuo_sync_account_id IS NOT NULL AND (mutuo_sync_category IS NULL OR mutuo_sync_category='')`);
+    }
+  } catch(e) {}
+
+  // Reconciliação única: qualquer categoria que já exista em transações
+  // reais (lançadas manualmente ou por alguma sincronização automática
+  // antiga, incluindo bugs já corrigidos tipo a categoria literal
+  // "Categoria") mas que nunca tenha sido registrada na aba Categorias —
+  // registra agora. Não mexe nas transações em si, só torna a categoria
+  // visível/gerenciável (renomear, mesclar, apagar) pela tela de
+  // Categorias, em vez de aparecer "do nada" em telas como Evolução (que
+  // lista categorias direto da tabela transactions, sem checar contra a
+  // lista gerenciada pelo usuário). Idempotente — ensureCategoryExists já
+  // não duplica o que já está lá.
+  try {
+    const usedCats = all(`SELECT DISTINCT category FROM transactions WHERE category IS NOT NULL AND category != ''`);
+    usedCats.forEach(r => ensureCategoryExists(r.category));
+  } catch(e) {}
 }
 
 // Cria retroativamente a movimentação "parcela_financiamento" para qualquer
@@ -3167,7 +3197,7 @@ ipcMain.handle('pat:assets-list', () =>
 );
 
 ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, sold_month, sold_value, hidden, financed, financing_total, ownership_pct,
-  mutuo_taxa_juros, mutuo_indexador_base, mutuo_mes_incidencia, mutuo_data_termino, mutuo_sync_account_id, mutuo_juros_tipo, mutuo_index_type, mutuo_dia_incidencia }) => {
+  mutuo_taxa_juros, mutuo_indexador_base, mutuo_mes_incidencia, mutuo_data_termino, mutuo_sync_account_id, mutuo_sync_category, mutuo_juros_tipo, mutuo_index_type, mutuo_dia_incidencia }) => {
   const ownPct = (asset_type === 'societario' && ownership_pct != null && ownership_pct !== '') ? parseFloat(ownership_pct) : null;
   const isMutuo = asset_type === 'mutuo';
   const mJuros   = isMutuo ? (parseFloat(mutuo_taxa_juros) || 0) : null;
@@ -3175,14 +3205,15 @@ ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, 
   const mMes     = isMutuo && mBase === 'anual' ? (parseInt(mutuo_mes_incidencia) || null) : null;
   const mFim     = isMutuo ? (mutuo_data_termino || null) : null; // null = indefinida
   const mConta   = isMutuo ? (mutuo_sync_account_id || null) : null;
+  const mCat     = isMutuo ? (mutuo_sync_category || null) : null;
   const mTipo    = isMutuo ? (mutuo_juros_tipo || 'simples') : null;
   const mIndex   = isMutuo ? (mutuo_index_type || 'none') : null;
   const mDia     = isMutuo ? (Math.min(31, Math.max(1, parseInt(mutuo_dia_incidencia) || 1))) : null;
   if (id) {
     run(`UPDATE pat_assets SET name=?,asset_type=?,trend=?,sort_order=?,sold_month=?,sold_value=?,hidden=?,financed=?,financing_total=?,ownership_pct=?,
-      mutuo_taxa_juros=?,mutuo_indexador_base=?,mutuo_mes_incidencia=?,mutuo_data_termino=?,mutuo_sync_account_id=?,mutuo_juros_tipo=?,mutuo_index_type=?,mutuo_dia_incidencia=? WHERE id=?`,
+      mutuo_taxa_juros=?,mutuo_indexador_base=?,mutuo_mes_incidencia=?,mutuo_data_termino=?,mutuo_sync_account_id=?,mutuo_sync_category=?,mutuo_juros_tipo=?,mutuo_index_type=?,mutuo_dia_incidencia=? WHERE id=?`,
       [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, ownPct,
-       mJuros, mBase, mMes, mFim, mConta, mTipo, mIndex, mDia, id]);
+       mJuros, mBase, mMes, mFim, mConta, mCat, mTipo, mIndex, mDia, id]);
     if (sold_month) {
       db.run('DELETE FROM pat_history WHERE asset_id=? AND month>? AND manual=0', [id, sold_month]);
       save();
@@ -3191,9 +3222,9 @@ ipcMain.handle('pat:asset-save', (_, { id, name, asset_type, trend, sort_order, 
     return { id };
   } else {
     const newId = run(`INSERT INTO pat_assets (name,asset_type,trend,sort_order,sold_month,sold_value,hidden,financed,financing_total,ownership_pct,
-      mutuo_taxa_juros,mutuo_indexador_base,mutuo_mes_incidencia,mutuo_data_termino,mutuo_sync_account_id,mutuo_juros_tipo,mutuo_index_type,mutuo_dia_incidencia) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      mutuo_taxa_juros,mutuo_indexador_base,mutuo_mes_incidencia,mutuo_data_termino,mutuo_sync_account_id,mutuo_sync_category,mutuo_juros_tipo,mutuo_index_type,mutuo_dia_incidencia) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [name, asset_type, trend, sort_order ?? 0, sold_month||null, sold_value||null, hidden?1:0, financed?1:0, financing_total??null, ownPct,
-       mJuros, mBase, mMes, mFim, mConta, mTipo, mIndex, mDia]);
+       mJuros, mBase, mMes, mFim, mConta, mCat, mTipo, mIndex, mDia]);
     const resolvedId = newId || first('SELECT id FROM pat_assets WHERE name=? ORDER BY id DESC LIMIT 1', [name])?.id;
     if (isMutuo && resolvedId) syncMutuoToBank(resolvedId);
     return { id: resolvedId };
@@ -3868,6 +3899,7 @@ function _syncKeysBalanceToBank({ assetId, contractId, accountId, syncDay, categ
   const existing = first('SELECT id FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, keysMarker]);
   if (existing) return { created: 0 };
 
+  ensureCategoryExists(category || 'Financiamento');
   run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_installment_month)
        VALUES (?,?,?,?,?,0,?,?)`,
     [accountId, dueDate, category || 'Financiamento', `${memoPrefix} — Saldo nas chaves`, -Math.abs(keysBalance),
@@ -3962,7 +3994,14 @@ function syncMutuoToBank(assetId) {
           // corretas. A transação BANCÁRIA, porém, nunca é retroativa: criar
           // uma transação "do passado" fabricaria histórico real de conta
           // que nunca existiu de fato.
-          if (asset.mutuo_sync_account_id && monthStr >= todayMonth) {
+          // Categoria é escolhida pelo usuário no formulário do mútuo (campo
+          // "Categoria dos juros recebidos") — sem ela, não sabemos como
+          // classificar, então não criamos a transação bancária ainda (só
+          // quando a conta E a categoria estiverem definidas). Antes, a
+          // categoria vinha hardcoded como 'Juros recebidos', que nunca era
+          // cadastrada de verdade na aba Categorias — por isso aparecia "do
+          // nada" em telas como Evolução.
+          if (asset.mutuo_sync_account_id && asset.mutuo_sync_category && monthStr >= todayMonth) {
             const dueDate = `${monthStr}-${String(diaDoMes(y, mo)).padStart(2,'0')}`;
             const existingTx = first('SELECT id, amount, cleared, date FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, monthStr]);
             if (existingTx) {
@@ -3973,7 +4012,7 @@ function syncMutuoToBank(assetId) {
             } else {
               run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_installment_month)
                    VALUES (?,?,?,?,?,0,?,?)`,
-                [asset.mutuo_sync_account_id, dueDate, 'Juros recebidos', `Juros mútuo — ${asset.name}`, juros, assetId, monthStr]);
+                [asset.mutuo_sync_account_id, dueDate, asset.mutuo_sync_category, `Juros mútuo — ${asset.name}`, juros, assetId, monthStr]);
               created++;
             }
           }
@@ -4062,6 +4101,7 @@ function _syncInstallmentsToBank({ schedule, accountId, syncDay, category, asset
       return;
     }
 
+    ensureCategoryExists(category || 'Financiamento');
     run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_debt_id,pat_installment_month)
          VALUES (?,?,?,?,?,0,?,?,?)`,
       [accountId, dueDate, category || 'Financiamento', memoPrefix, -Math.abs(row.installment),
@@ -5289,6 +5329,7 @@ ipcMain.handle('pat:tx-save', (_, { id, assetId, month, tx_type, total_value, no
       if (tx_date >= today) {
         const sign = PAT_TX_CASH_SIGN[tx_type] ?? 1;
         const asset = first('SELECT name FROM pat_assets WHERE id=?', [assetId]);
+        ensureCategoryExists('Patrimônio');
         const txId = run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_tx_id)
              VALUES (?,?,?,?,?,0,?,?)`,
           [account_id, tx_date, 'Patrimônio', notes || `${PAT_TX_LABELS[tx_type]||tx_type} — ${asset?.name||''}`,
@@ -5744,6 +5785,27 @@ ipcMain.handle('pat:import-history-full', (_, { assets }) => {
 // ── SETTINGS: PASSWORD & DATA DIR ──
 function getCatsPath() {
   return getDbPath().replace('.db', '_categories.json');
+}
+
+// Garante que uma categoria usada automaticamente pelo app (ex: sync de
+// Patrimônio pro banco) exista de fato na lista gerenciada pelo usuário
+// (aba Categorias) — sem isso, a categoria aparecia em telas como Evolução
+// (que lista DISTINCT category direto da tabela transactions) mas nunca na
+// aba Categorias, parecendo "fantasma"/sem explicação.
+function ensureCategoryExists(name) {
+  if (!name) return;
+  try {
+    const filePath = getCatsPath();
+    let cats = [];
+    if (fs.existsSync(filePath)) {
+      try { cats = JSON.parse(fs.readFileSync(filePath, 'utf8')) || []; } catch(e) { cats = []; }
+    }
+    if (!Array.isArray(cats)) cats = [];
+    if (!cats.some(c => String(c).toLowerCase() === name.toLowerCase())) {
+      cats.push(name);
+      fs.writeFileSync(filePath, JSON.stringify(cats));
+    }
+  } catch(e) { console.error('[ensureCategoryExists]', e); }
 }
 
 ipcMain.handle('categories:get', () => {

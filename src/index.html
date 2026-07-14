@@ -1635,8 +1635,7 @@ select.inp option{background:var(--bg2);}
         <div>
           <div id="apos-goal-label" style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">💰 Patrimônio desejado (R$)</div>
           <input class="inp" id="apos-goal-value" type="text" placeholder="Ex: 5.000.000"
-            style="width:100%;font-size:15px;font-weight:600"
-            oninput="aposCalc()">
+            style="width:100%;font-size:15px;font-weight:600">
           <div id="apos-goal-hint" style="font-size:11px;color:var(--text3);margin-top:4px">
             Patrimônio líquido total que deseja acumular
           </div>
@@ -1746,7 +1745,7 @@ select.inp option{background:var(--bg2);}
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🏛️ Patrimônio inicial (R$)</div>
               <div style="display:flex;gap:6px">
-                <input class="inp" id="apos2-pat-inicial" type="text" placeholder="0" style="flex:1;font-size:14px" oninput="apos2Calc()">
+                <input class="inp" id="apos2-pat-inicial" type="text" placeholder="0" style="flex:1;font-size:14px">
                 <button class="ev-action-btn" onclick="apos2PullPatrimonio()" style="white-space:nowrap">usar atual</button>
               </div>
               <a href="#" onclick="event.preventDefault();apos2ToggleIncomeAssetsPanel()" style="font-size:11px;color:var(--accent);display:inline-block;margin-top:6px;text-decoration:none">▾ Escolher quais bens e direitos geram renda</a>
@@ -1768,7 +1767,7 @@ select.inp option{background:var(--bg2);}
               </label>
               <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">💵 Renda não financeira mensal (R$)</div>
               <input class="inp" id="apos2-renda-nao-fin" type="text" placeholder="0" style="width:100%;font-size:14px"
-                oninput="apos2Calc()" onclick="apos2TryEdit('renda')" onkeydown="apos2TryEdit('renda')">
+                onclick="apos2TryEdit('renda')" onkeydown="apos2TryEdit('renda')">
               <select class="inp" id="apos2-renda-cat" style="width:100%;font-size:11px;margin-top:5px;padding:3px 6px" onchange="apos2UpdateRendaHint()">
                 <option value="">— Escolher categoria de renda —</option>
               </select>
@@ -1790,7 +1789,7 @@ select.inp option{background:var(--bg2);}
             <!-- Patrimônio desejado na idade limite (herança, opcional) -->
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🎁 Patrimônio desejado na idade limite (R$)</div>
-              <input class="inp" id="apos2-pat-final" type="text" placeholder="0" style="width:100%;font-size:14px" oninput="apos2Calc()" onclick="apos2TryEditPatFinal()">
+              <input class="inp" id="apos2-pat-final" type="text" placeholder="0" style="width:100%;font-size:14px" onclick="apos2TryEditPatFinal()">
               <div style="font-size:11px;color:var(--text3);margin-top:4px">Ex: herança que quer deixar. Deixe 0 se não houver essa preocupação (patrimônio pode zerar).</div>
               <a href="#" onclick="event.preventDefault();apos2TogglePreserveAssetsPanel()" style="font-size:11px;color:var(--accent);display:inline-block;margin-top:6px;text-decoration:none">▾ Ou selecione ativos específicos a preservar</a>
               <div id="apos2-preserve-assets-panel" style="display:none;margin-top:6px;padding:8px;background:var(--bg3);border-radius:6px;max-height:160px;overflow-y:auto"></div>
@@ -1804,7 +1803,7 @@ select.inp option{background:var(--bg2);}
               </label>
               <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🧾 Despesa mensal esperada (R$)</div>
               <input class="inp" id="apos2-despesa" type="text" placeholder="0" style="width:100%;font-size:14px"
-                oninput="apos2Calc()" onclick="apos2TryEdit('despesa')" onkeydown="apos2TryEdit('despesa')">
+                onclick="apos2TryEdit('despesa')" onkeydown="apos2TryEdit('despesa')">
               <div id="apos2-despesa-hint" style="font-size:11px;color:var(--text3);margin-top:4px;min-height:14px"></div>
             </div>
 
@@ -3062,10 +3061,14 @@ select.inp option{background:var(--bg2);}
               </select>
             </div>
           </div>
-          <div style="margin-top:8px">
-            <div class="field" id="pat-mutuo-sync-account-field" style="margin:0">
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <div class="field" id="pat-mutuo-sync-account-field" style="margin:0;flex:1">
               <label class="lbl">Conta vinculada (lançamento dos juros futuros)</label>
-              <select class="inp" id="pat-mutuo-sync-account"><option value="">— Não sincronizar —</option></select>
+              <select class="inp" id="pat-mutuo-sync-account" onchange="patMutuoSyncAccountChanged()"><option value="">— Não sincronizar —</option></select>
+            </div>
+            <div class="field" id="pat-mutuo-sync-category-field" style="margin:0;flex:1;display:none">
+              <label class="lbl">Categoria dos juros recebidos</label>
+              <select class="inp" id="pat-mutuo-sync-category"></select>
             </div>
           </div>
           <div style="margin-top:8px">

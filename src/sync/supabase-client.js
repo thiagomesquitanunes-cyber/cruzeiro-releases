@@ -9,18 +9,22 @@ const https = require('https');
 
 const SUPABASE_URL    = 'https://nfpjxmwrtwogctocqtxp.supabase.co';
 const SUPABASE_ANON   = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mcGp4bXdydHdvZ2N0b2NxdHhwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0MDU1ODQsImV4cCI6MjA5Njk4MTU4NH0.26t--V7O8RAPMsURHqwu3x19LHIdjJHjKvHpSHMvhGo';
-const SUPABASE_SERVICE = '***REMOVED-SERVICE-ROLE-KEY-REVOKED***';
 
 // ── Estado de sessão (em memória) ──
 let _session = null;
 
 // ─────────────────────────────────────────────────────────────
 // HTTP helper usando https nativo
+//
+// Nunca usa service_role aqui — só a chave anon + (quando disponível)
+// o access_token da sessão do usuário logado via Supabase Auth. O
+// isolamento entre usuários é garantido pelas políticas de RLS no
+// Supabase (auth.uid() = user_id em cada tabela mobile_*/quick_entries/
+// etc. — ver supabase/enable_rls.sql), não por uma chave admin no app.
 // ─────────────────────────────────────────────────────────────
-function _request(urlStr, { method = 'GET', body, token, useService = false } = {}) {
+function _request(urlStr, { method = 'GET', body, token } = {}) {
   return new Promise((resolve, reject) => {
-    const key  = useService ? SUPABASE_SERVICE : SUPABASE_ANON;
-    const auth = token ? `Bearer ${token}` : `Bearer ${key}`;
+    const auth = `Bearer ${token || SUPABASE_ANON}`;
 
     const bodyStr = body ? JSON.stringify(body) : null;
     const url     = new URL(urlStr);
@@ -31,7 +35,7 @@ function _request(urlStr, { method = 'GET', body, token, useService = false } = 
       method,
       headers: {
         'Content-Type':  'application/json',
-        'apikey':        key,
+        'apikey':        SUPABASE_ANON,
         'Authorization': auth,
         'Prefer':        method === 'POST' ? 'return=minimal,resolution=merge-duplicates' : '',
       },
@@ -64,11 +68,11 @@ function _request(urlStr, { method = 'GET', body, token, useService = false } = 
 }
 
 function _rest(path, opts) {
-  return _request(`${SUPABASE_URL}/rest/v1${path}`, { ...opts, useService: true });
+  return _request(`${SUPABASE_URL}/rest/v1${path}`, { ...opts, token: opts?.token || _session?.access_token });
 }
 
 function _auth(path, opts) {
-  return _request(`${SUPABASE_URL}/auth/v1${path}`, { ...opts, useService: false });
+  return _request(`${SUPABASE_URL}/auth/v1${path}`, opts);
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -12103,7 +12103,11 @@ async function saveOpeningBalances() {
     await ff.createTx({
       account_id: a.id,
       date:       today,
-      category:   'Categoria',
+      // Sem categoria — o usuário categoriza depois se quiser. Antes
+      // gravava a string literal "Categoria" (resíduo de placeholder),
+      // que virava uma categoria "fantasma" na Evolução sem nunca
+      // aparecer na aba Categorias de verdade.
+      category:   '',
       memo:       'Ajuste de saldo inicial',
       amount:     diff,
       cleared:    1,
@@ -17209,7 +17213,7 @@ function setupDateMask(input) {
   });
 }
 
-function setupCurrencyInput(el) {
+function setupCurrencyInput(el, onChange) {
   if (!el || el.dataset.currencySetup) return;
   el.dataset.currencySetup = '1';
   el.type = 'text';
@@ -17252,7 +17256,7 @@ function setupCurrencyInput(el) {
     // If value contains math operators, leave raw (don't reformat)
     const raw = el.value;
     const hasMath = /[+\-*/]/.test(raw.replace(/^R\$[\s\u00a0]*/, ''));
-    if (hasMath) return; // let user type freely
+    if (hasMath) { if (onChange) onChange(); return; } // let user type freely, but still notify
     // Formato "caixa eletrônico": todo dígito digitado entra pela direita,
     // empurrando os centavos. O cursor fica sempre no fim. Comprovamos
     // matematicamente que edição posicional no meio do valor é incompatível
@@ -17263,6 +17267,15 @@ function setupCurrencyInput(el) {
     const formatted = format(cents);
     el.value = formatted;
     el.setSelectionRange(formatted.length, formatted.length);
+    // Roda DEPOIS de reformatar (não antes) — um oninput="..." inline no
+    // HTML do próprio campo dispara ANTES deste addEventListener (atributo
+    // inline é registrado no parse do HTML, antes do setupCurrencyInput
+    // rodar via JS), então lê o valor cru/intermediário, ainda sem a
+    // máscara aplicada — causa exatamente o bug de "fica com um zero a mais
+    // ou a menos até mexer em outro campo". Callers que precisam recalcular
+    // a cada tecla devem passar a função via `onChange` aqui, não via
+    // oninput inline no HTML do campo.
+    if (onChange) onChange();
   });
 
   el.addEventListener('keydown', (e) => {
@@ -21463,6 +21476,7 @@ async function openPatAssetModal(id) {
         if (G('pat-mutuo-sync-account')) G('pat-mutuo-sync-account').value = a.mutuo_sync_account_id || '';
         if (G('pat-mutuo-juros-tipo')) G('pat-mutuo-juros-tipo').value = a.mutuo_juros_tipo || 'simples';
         patMutuoJurosTipoChanged();
+        patMutuoSyncAccountChanged(a.mutuo_sync_category);
       }
     }
   }
@@ -21582,12 +21596,26 @@ function patMutuoJurosTipoChanged() {
   const isCompostos = G('pat-mutuo-juros-tipo')?.value === 'compostos';
   const f = G('pat-mutuo-sync-account-field');
   if (f) f.style.display = isCompostos ? 'none' : '';
+  patMutuoSyncAccountChanged();
   const info = G('pat-mutuo-info-box');
   if (info) {
     info.textContent = isCompostos
       ? 'Os juros se acumulam ao valor do mútuo mês a mês (ou ano a ano, conforme o indexador) — a posição é atualizada automaticamente, mas nenhum valor é lançado na conta bancária até o mútuo ser encerrado. Quando isso acontecer, registre o recebimento manualmente (igual ao vender/encerrar qualquer outro bem).'
       : 'Os juros futuros previstos são lançados automaticamente como entrada na conta vinculada (não conferidos), mês a mês até a data de término (ou continuamente, se indefinido).';
   }
+}
+
+// Categoria dos juros só faz sentido (e só é exigida) quando há de fato uma
+// conta vinculada pra sincronizar — sem conta, nada é lançado no banco, e
+// perguntar a categoria seria ruído. Antes disso, a categoria ficava
+// hardcoded como "Juros recebidos" (nunca cadastrada de verdade na aba
+// Categorias) — daí ela aparecer "do nada" em telas como Evolução.
+function patMutuoSyncAccountChanged(preferredCat) {
+  const hasAccount = !!G('pat-mutuo-sync-account')?.value;
+  const isCompostos = G('pat-mutuo-juros-tipo')?.value === 'compostos';
+  const f = G('pat-mutuo-sync-category-field');
+  if (f) f.style.display = (hasAccount && !isCompostos) ? '' : 'none';
+  if (hasAccount && !isCompostos) populateCategorySelect('pat-mutuo-sync-category', preferredCat);
 }
 
 async function savePatAsset() {
@@ -21619,6 +21647,7 @@ async function savePatAsset() {
   const mutuoIndefinida = G('pat-mutuo-indefinida')?.checked ?? true;
   const mutuoTermino = (isMutuoSave && !mutuoIndefinida) ? (G('pat-mutuo-termino')?.value || null) : null;
   const mutuoSyncAccountId = isMutuoSave ? (parseInt(G('pat-mutuo-sync-account')?.value) || null) : null;
+  const mutuoSyncCategory  = isMutuoSave ? (G('pat-mutuo-sync-category')?.value || null) : null;
   const mutuoJurosTipo = isMutuoSave ? (G('pat-mutuo-juros-tipo')?.value || 'simples') : null;
   const mutuoIndexType = isMutuoSave ? (G('pat-mutuo-index-type')?.value || 'none') : null;
   // Mês/valor do mútuo vêm de campos próprios (não dos campos de "à vista",
@@ -21644,7 +21673,7 @@ async function savePatAsset() {
   const currentAsset = id ? _pat.assets.find(a => a.id === id) : null;
   const sortOrder = currentAsset ? currentAsset.sort_order : _pat.assets.length;
   const result = await ff.patAssetSave({ id, name, asset_type: type, trend, sort_order: sortOrder, sold_month: soldMonth, sold_value: soldValue, hidden, financed, financing_total, ownership_pct: ownershipPct,
-    mutuo_taxa_juros: mutuoJuros, mutuo_indexador_base: mutuoBase, mutuo_mes_incidencia: mutuoMesIncidencia, mutuo_data_termino: mutuoTermino, mutuo_sync_account_id: mutuoSyncAccountId, mutuo_juros_tipo: mutuoJurosTipo, mutuo_index_type: mutuoIndexType, mutuo_dia_incidencia: mutuoDiaIncidencia });
+    mutuo_taxa_juros: mutuoJuros, mutuo_indexador_base: mutuoBase, mutuo_mes_incidencia: mutuoMesIncidencia, mutuo_data_termino: mutuoTermino, mutuo_sync_account_id: mutuoSyncAccountId, mutuo_sync_category: mutuoSyncCategory, mutuo_juros_tipo: mutuoJurosTipo, mutuo_index_type: mutuoIndexType, mutuo_dia_incidencia: mutuoDiaIncidencia });
   const assetId = result.id;
 
   // 2a. Save financing installments; set asset value = financing_total at first installment month
@@ -25325,7 +25354,7 @@ async function computeEvMA12LucroData() {
 }
 
 async function aposInit() {
-  setupCurrencyInput(G('apos-goal-value'));
+  setupCurrencyInput(G('apos-goal-value'), aposCalc);
   setupCurrencyInput(G('apos-patrimonio-atual'));
   await aposLoadConfig();
   // Ensure patrimônio tab data is loaded so _patTotalByMonth is available
@@ -25420,6 +25449,10 @@ function apos2TogglePreserveAssetsPanel() {
 function apos2ToggleIncomeAsset(id) {
   if (_apos2IncomeAssetIds.has(id)) _apos2IncomeAssetIds.delete(id); else _apos2IncomeAssetIds.add(id);
   apos2SaveConfig();
+  // Recalcula o "usar atual" na hora — antes só atualizava se o usuário
+  // clicasse em "usar atual" de novo, o que não era nada óbvio depois de
+  // mexer nos checkboxes.
+  apos2PullPatrimonio();
 }
 function apos2TogglePreserveAsset(id) {
   if (_apos2PreserveAssetIds.has(id)) _apos2PreserveAssetIds.delete(id); else _apos2PreserveAssetIds.add(id);
@@ -25670,10 +25703,10 @@ async function apos2LoadConfig() {
 }
 
 async function apos2Init() {
-  setupCurrencyInput(G('apos2-pat-inicial'));
-  setupCurrencyInput(G('apos2-renda-nao-fin'));
-  setupCurrencyInput(G('apos2-despesa'));
-  setupCurrencyInput(G('apos2-pat-final'));
+  setupCurrencyInput(G('apos2-pat-inicial'), apos2Calc);
+  setupCurrencyInput(G('apos2-renda-nao-fin'), apos2Calc);
+  setupCurrencyInput(G('apos2-despesa'), apos2Calc);
+  setupCurrencyInput(G('apos2-pat-final'), apos2Calc);
   await apos2PopulateCategoryDropdown();
   await apos2LoadConfig();
   apos2UpdatePatFinalDisplay(); // se havia ativos a preservar salvos, já trava o campo antes do primeiro cálculo
