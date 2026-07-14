@@ -84,8 +84,13 @@ async function pullQuickEntries(all, run, first, save, userId) {
         throw new Error('Nenhuma conta disponível para importar');
       }
 
-      // Converte centavos → reais e garante sinal negativo (despesa)
-      const amount = -(Math.abs(entry.amount) / 100);
+      // Converte centavos → reais e aplica o sinal conforme o tipo do
+      // lançamento — despesa é sempre negativa, receita sempre positiva
+      // (antes o sinal era sempre forçado negativo, então receitas
+      // lançadas no mobile viravam despesa no desktop).
+      const amount = entryType === 'income'
+        ? Math.abs(entry.amount) / 100
+        : -(Math.abs(entry.amount) / 100);
       const date   = entry.date || new Date().toISOString().slice(0, 10);
 
       // Insere a transação no SQLite
@@ -302,6 +307,71 @@ async function pullReconcileUpdates(all, run, first, save, userId) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 5. Aplica edições de transações feitas no mobile
+// (tela "Editar transação" grava aqui; até agora nada lia essa tabela,
+// então editar no mobile nunca refletia no desktop)
+// ─────────────────────────────────────────────────────────────
+async function pullEditRequests(all, run, first, save, userId) {
+  const requests = await sb.select('mobile_edit_requests',
+    { user_id: userId, status: 'pending' }
+  );
+
+  if (!requests.length) return { applied: 0, errors: 0 };
+
+  let applied = 0;
+  let errors  = 0;
+
+  for (const req of requests) {
+    try {
+      const tx = first('SELECT id, transfer_id FROM transactions WHERE id=?', [req.desktop_id]);
+      if (!tx) {
+        console.log(`[sync:pull] edição ${req.id}: transação ${req.desktop_id} não encontrada — rejeitando`);
+        await sb.update('mobile_edit_requests', { id: req.id }, { status: 'rejected' });
+        errors++;
+        continue;
+      }
+      // Perna de transferência: editar só um lado desalinharia o par —
+      // não suportado por enquanto.
+      if (tx.transfer_id != null) {
+        console.log(`[sync:pull] edição ${req.id}: transação ${req.desktop_id} é perna de transferência — rejeitando`);
+        await sb.update('mobile_edit_requests', { id: req.id }, { status: 'rejected' });
+        errors++;
+        continue;
+      }
+
+      const newMemo   = req.new_memo   != null ? dec(req.new_memo) : null;
+      const newAmount = req.new_amount != null ? Number(dec(req.new_amount)) / 100 : null;
+
+      const sets   = [];
+      const params = [];
+      if (req.new_date)             { sets.push('date=?');     params.push(req.new_date); }
+      if (newMemo != null)          { sets.push('memo=?');     params.push(newMemo); }
+      if (newAmount != null && !isNaN(newAmount)) { sets.push('amount=?'); params.push(newAmount); }
+      if (req.new_category)         { sets.push('category=?'); params.push(req.new_category); }
+
+      if (sets.length) {
+        params.push(req.desktop_id);
+        run(`UPDATE transactions SET ${sets.join(', ')} WHERE id=?`, params);
+      }
+
+      // Não seta applied_at aqui (ao contrário de mobile_reconcile_updates)
+      // por não haver certeza de que essa coluna existe em
+      // mobile_edit_requests — só status, que com certeza existe (é
+      // usado pelo próprio insert do mobile).
+      await sb.update('mobile_edit_requests', { id: req.id }, { status: 'applied' });
+      applied++;
+    } catch (e) {
+      console.error(`[sync:pull] Erro ao aplicar edição ${req.id}:`, e.message);
+      await sb.update('mobile_edit_requests', { id: req.id }, { status: 'rejected' }).catch(() => {});
+      errors++;
+    }
+  }
+
+  if (applied > 0) save();
+  return { applied, errors };
+}
+
+// ─────────────────────────────────────────────────────────────
 // ENTRY POINT
 // ─────────────────────────────────────────────────────────────
 async function pullAll(all, run, first, save, userId) {
@@ -326,6 +396,13 @@ async function pullAll(all, run, first, save, userId) {
   } catch (e) {
     console.error('[sync:pull] reconcile falhou:', e.message);
     results.reconcile = { error: e.message };
+  }
+
+  try {
+    results.editRequests = await pullEditRequests(all, run, first, save, userId);
+  } catch (e) {
+    console.error('[sync:pull] editRequests falhou:', e.message);
+    results.editRequests = { error: e.message };
   }
 
   console.log('[sync:pull] concluído:', results);

@@ -12,6 +12,101 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-14 (continuação 2) — Lote grande de correções de sincronização mobile
+
+Usuário reportou vários bugs comparando desktop x mobile (card de resumo com
+receita/despesa/lucro completamente diferentes do desktop, categorias de
+receita sumidas na Evolução, meta de aposentadoria vazando patrimônio sem
+opt-in, edição no mobile não refletindo no desktop, receita não podia ser
+lançada no mobile). Todos rastreados até `src/sync/sync-push.js` e
+`src/sync/sync-pull.js`; corrigidos nesta sessão, um a um:
+
+### 1. Card de resumo mobile com números errados (causa raiz do lote)
+`pushEvolution()` classificava receita/despesa por SUBcategoria direto — o
+desktop (via `groupAndClassifyByParent()`/`computeSummaryFromByCat()` no
+`renderer.js`, usado de forma IDÊNTICA no Resumo, na Comparação mensal e na
+Evolução) agrupa por categoria-MÃE primeiro (somando os valores brutos de
+todas as subcategorias) e SÓ ENTÃO classifica pelo saldo líquido do grupo —
+uma subcategoria positiva dentro de uma mãe negativa reduz a despesa da mãe,
+em vez de virar receita separada. Sem esse agrupamento, cada subcategoria
+virava um grupo próprio e inflava receita E despesa em vez de se cancelarem
+dentro da mãe. Reescrito `pushEvolution()` pra agrupar por
+`(mês, categoria-mãe)` antes de classificar — idêntico ao renderer.
+
+### 2. Transferências sumidas do extrato mobile
+`pushTransactions()` tinha `AND t.transfer_id IS NULL`, excluindo QUALQUER
+transferência do `mobile_transactions` — a conta no mobile nunca mostrava
+transferências reais. Removido o filtro (transferências agora sincronizam
+normalmente) e adicionado campo `is_transfer` em cada linha, pra continuar
+sendo excluído de cálculos de receita/despesa (isso já era feito à parte,
+correto, em `pushEvolution`).
+
+### 3. Lançamentos futuros só cobriam recorrências registradas
+`pushScheduled()` lia só a tabela `recurring` (definições abstratas), sem
+pegar lançamentos futuros digitados manualmente ou pernas de financiamento
+projetadas. Reescrito pra ler `transactions WHERE date > hoje` (mesma fonte
+do handler `report:future-pending` do próprio desktop — a recorrência já
+materializa suas ocorrências ali), com `is_transfer` também.
+
+### 4. Evolução: 12 meses, sem correção IPCA, MA sempre real
+`pushEvolution()`: (a) corta a saída para os últimos 12 meses (calcula a
+MA12 sobre o histórico completo ANTES de cortar, pra não ficar incompleta
+no início da janela); (b) removida a correção de IPCA inteiramente — mobile
+mostra valores nominais agora, mais simples e menos egress; (c)
+`income_ma`/`expenses_ma` passam a ser SEMPRE a média móvel real,
+independente do toggle `ev_ma` (que é só uma preferência de EXIBIÇÃO da aba
+Evolução do desktop, não deveria condicionar o que o mobile recebe — isso
+também corrigiu a meta de aposentadoria de curto prazo, que dependia desses
+campos). Mobile (`app/(tabs)/evolucao.js`, Android+iOS): filtro
+`.gte('month', ...)` pros últimos 12 meses e aviso de "valores nominais,
+sem correção pela inflação" na tela.
+
+### 5. Meta de aposentadoria vazando patrimônio sem opt-in
+`pushPatrimonio()` só pulava o push quando `syncInvestments=false`, mas não
+apagava dados JÁ sincronizados antes de o usuário desativar a opção —
+ficavam parados no Supabase indefinidamente, vazando pra meta de longo
+prazo no mobile. Agora, quando desativado, apaga ativamente
+`mobile_patrimonio` do usuário (uma vez, via `hasChanged()` guardando o
+estado `'sync_disabled'`).
+
+### 6. `by_category` só guardava categorias de despesa
+`catByMonth` só era populado quando `net<0` (despesa) — categorias de
+receita (Salário, Juros recebidos etc.) nunca apareciam na aba Evolução >
+Por categoria do mobile, e ficavam "zeradas". Corrigido junto com o item 1
+(agora guarda qualquer categoria-mãe com movimento, magnitude sempre
+positiva).
+
+### 7. Edição de transação no mobile não aplicava no desktop
+`mobile_edit_requests` nunca era lida por `sync-pull.js` (a tela já gravava
+lá desde antes, sem efeito nenhum). Novo `pullEditRequests()`: lê pendentes,
+decifra `new_memo`/`new_amount`, aplica `UPDATE transactions` por
+`desktop_id`, marca `status='applied'`/`'rejected'`. Rejeita edição de
+pernas de transferência (editar só um lado desalinharia o par). Testado ao
+vivo nesta sessão — aplicou 2 edições reais pendentes no primeiro sync.
+
+### 8. Receita não podia ser lançada no mobile
+`pullQuickEntries()` forçava sinal negativo (despesa) sempre, mesmo com
+`entry_type='income'` — receita virava despesa no desktop. Corrigido: sinal
+positivo quando `entry_type==='income'`. Mobile (`nova-despesa.js`,
+Android+iOS): removido o bloqueio "Em breve" no toggle Receita — agora
+funcional. `lancar-ia.js` (Android+iOS): `entry_type` agora inferido do
+sinal original do parse da IA (`preview.amount`), antes nunca era enviado.
+
+**Arquivos tocados**: `src/sync/sync-push.js` (pushTransactions,
+pushScheduled, pushPatrimonio, pushEvolution — reescrita grande),
+`src/sync/sync-pull.js` (pullQuickEntries, novo pullEditRequests, wire em
+pullAll). Mobile Android+iOS: `app/(tabs)/evolucao.js`, `app/nova-despesa.js`,
+`app/lancar-ia.js` (mudanças idênticas nas duas plataformas).
+
+**Validado ao vivo** nesta sessão: sync completo (pull+push, 9 passos)
+rodou sem erros contra dados reais no Supabase, usando a sessão já
+autenticada do usuário (sem service_role — ver entrada anterior). O
+pushEvolution recalculado bateu 12 meses corretamente; pushPatrimonio
+detectou `syncInvestments=false` e limpou dados remotos como esperado;
+pullEditRequests aplicou 2 edições reais pendentes.
+
+---
+
 ## 2026-07-14 (continuação) — Segurança: remoção da service_role key hardcoded
 
 ### Problema
