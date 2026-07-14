@@ -2040,6 +2040,15 @@ select.inp option{background:var(--bg2);}
           <span id="pat-total-vs-goal" style="font-size:12px;font-weight:700"></span>
         </div>
         <div style="position:relative;height:220px"><canvas id="pat-chart-total"></canvas></div>
+        <div id="pat-chart-total-legend" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px"></div>
+      </div>
+      <!-- 1b. Delta patrimonial real (líquido de IPCA) -->
+      <div class="tbl-card" style="padding:18px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+          <span style="font-weight:600;font-size:13px">📶 Delta Patrimonial Real (vs. IPCA)</span>
+          <span style="font-size:11px;color:var(--text3)">Variação do mês, descontada a inflação (IPCA) aplicada sobre o patrimônio do mês anterior</span>
+        </div>
+        <div style="position:relative;height:220px"><canvas id="pat-chart-delta"></canvas></div>
       </div>
       <!-- 2. Bens e Direitos -->
       <div class="tbl-card" style="padding:18px;margin-bottom:16px">

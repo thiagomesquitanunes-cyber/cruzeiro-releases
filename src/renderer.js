@@ -5208,9 +5208,9 @@ function renderBankPreview(rows) {
   const countEl = G('bank-preview-count');
   const bodyEl  = G('bank-preview-body');
   if (titleEl) titleEl.textContent = `Prévia — ${filtered.length} transações`;
-  if (countEl) countEl.textContent = `${filtered.length} de ${rows.length} transações${dateFrom ? ` (filtrado a partir de ${dateFrom})` : ''}`;
+  if (countEl) countEl.textContent = `${filtered.length} de ${rows.length} transações${dateFrom ? ` (filtrado a partir de ${fmtDate(dateFrom)})` : ''}`;
   if (bodyEl) bodyEl.innerHTML = filtered.slice(0, 50).map(r =>
-    `<tr><td>${r.date}</td><td>${esc(r.memo||r.desc||'')}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
+    `<tr><td>${fmtDate(r.date)}</td><td>${esc(r.memo||r.desc||'')}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
   ).join('');
 
   // Restore footer buttons
@@ -5609,7 +5609,7 @@ function renderImportEditTable(rows) {
     const lines = interestHits.map(x => {
       const r = rows[x.idx];
       const rateStr = x.hit.rate ? ` — taxa identificada: <strong>${x.hit.rate}</strong>` : ' — taxa não identificada no extrato';
-      return `<div style="margin-top:4px">⚠️ <strong>${esc(x.hit.label)}</strong> em ${r.dateISO} (${fmtBRL(r.amount)})${rateStr}</div>`;
+      return `<div style="margin-top:4px">⚠️ <strong>${esc(x.hit.label)}</strong> em ${fmtDate(r.dateISO)} (${fmtBRL(r.amount)})${rateStr}</div>`;
     }).join('');
     const banner = document.createElement('div');
     banner.id = 'import-debt-interest-banner';
@@ -5699,7 +5699,7 @@ function renderImportEditTable(rows) {
 
     return `<tr data-row-idx="${i}" style="${doneStyle}">
       ${removeCell}
-      <td style="white-space:nowrap;font-size:12px;padding:5px 8px;vertical-align:middle">${r.dateISO}</td>
+      <td style="white-space:nowrap;font-size:12px;padding:5px 8px;vertical-align:middle">${fmtDate(r.dateISO)}</td>
       <td style="font-size:11px;color:var(--text3);padding:4px 8px;vertical-align:middle;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.desc||r.memo||'')}">${esc(r.desc||r.memo||'')}</td>
       ${holderCell}
       <td style="padding:3px 4px;vertical-align:middle">
@@ -6332,14 +6332,14 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
           return `<div style="display:grid;grid-template-columns:1fr 1fr auto;border-bottom:1px solid var(--border);${rowBg}" data-idx="${i}">
             <!-- New record -->
             <div style="padding:7px 10px;border-right:1px solid var(--border2);font-size:12px">
-              <div style="color:var(--text3);font-size:10px">${r.dateISO}</div>
+              <div style="color:var(--text3);font-size:10px">${fmtBRDate(r.dateISO)}</div>
               <div style="font-weight:500">${esc(r.memo||r.desc||'')}</div>
               <div style="${amtCls};font-family:'DM Mono',monospace;font-size:12px">${amtStr}</div>
             </div>
             <!-- Existing record -->
             <div style="padding:7px 10px;font-size:12px;${isDup?'':'color:var(--text3)'}">
               ${isDup
-                ? `<div style="color:var(--text3);font-size:10px">${fmtBRDate(ex0?.date) || r.dateISO} · ${reasonLabel}</div>
+                ? `<div style="color:var(--text3);font-size:10px">${fmtBRDate(ex0?.date) || fmtBRDate(r.dateISO)} · ${reasonLabel}</div>
                    <div style="color:#b45309">${exStr}</div>
                    ${nickTxt}
                    <div style="color:#b45309;font-family:'DM Mono',monospace;font-size:12px">${ex0 ? fmtBRL(ex0.amount) : amtStr}</div>`
@@ -7275,6 +7275,20 @@ let _selectedBroker = null;
 
 async function pickBroker(brokerId) {
   try {
+    // Aviso antes de iniciar qualquer importação de corretora: o "ajuste de
+    // saldo" automático (broker:create-adjustment) compara o ÚLTIMO SALDO
+    // JÁ REGISTRADO na conta de investimentos com o saldo do extrato — se o
+    // usuário ainda não lançou aportes/resgates do período na conta, o
+    // ajuste sai errado (ele "absorve" essas movimentações como se fossem
+    // rentabilidade). Lembrete pedido pelo usuário para evitar esse erro.
+    const okToProceed = await showConfirmDialog(
+      '⚠️ Antes de importar a corretora',
+      `Para o <strong>ajuste de saldo automático</strong> funcionar corretamente, a conta de investimentos precisa ter <strong>todas as movimentações de dinheiro</strong> (aportes, resgates, transferências, etc.) já registradas até o mês do extrato — o app compara o último saldo lançado na conta com o saldo informado pela corretora.<br><br>
+      <strong>Recomendação:</strong> importe primeiro os extratos bancários do mês (até o fim do mês correspondente) e, só depois, os dados da corretora.<br><br>
+      Você já registrou todas as entradas e saídas de dinheiro na conta de investimentos até o mês deste extrato?`,
+      'Sim, já registrei — continuar', false, true);
+    if (!okToProceed) return;
+
     // Close all dropdowns
     ['bank','card','broker'].forEach(t => {
       const d = G(`import-dd-${t}`); if (d) d.style.display = 'none';
@@ -10867,8 +10881,41 @@ async function parseSantanderFaturaPDF(buffer) {
   const [, , em, ey] = periodEnd.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
   const refYearStart = 2000 + parseInt(sy), refMonthStart = parseInt(sm);
   const refYearEnd   = 2000 + parseInt(ey), refMonthEnd   = parseInt(em);
+  const periodEndIso = `${refYearEnd}-${String(refMonthEnd).padStart(2,'0')}-${String(parseInt(periodEnd.split('/')[0])).padStart(2,'0')}`;
+  // Índices absolutos de mês (ano*12+mês, 0-based) cobertos pelo período desta
+  // fatura — usados por resolveInstallmentDate abaixo. Uma fatura "31/12/25 a
+  // 02/02/26" cobre 3 meses-calendário (dez/jan/fev), não só os 2 extremos.
+  const periodStartIdx = refYearStart * 12 + (refMonthStart - 1);
+  const periodEndIdx   = refYearEnd   * 12 + (refMonthEnd   - 1);
 
-  function resolveDate(ddmm) {
+  // Nas seções "Parcelamentos", a coluna "Data" é a data da 1ª PARCELA (não
+  // desta parcela específica, e sem ano — o PDF só traz DD/MM). Calculamos o
+  // mês desta parcela = mês da 1ª parcela + (parcela atual − 1), e escolhemos
+  // o ano da 1ª parcela de forma que o resultado caia dentro do período desta
+  // fatura (é justamente quando esta parcela específica está sendo cobrada —
+  // nunca pode ser uma data futura em relação à própria fatura). Ex.: "Data"
+  // = 11/04 (sem ano) com parcela atual 10/12 → mês desta parcela = abril + 9
+  // = janeiro; como o período desta fatura é 31/12/25 a 02/02/26, só o ano
+  // 2025 pra 1ª parcela faz a 10ª parcela cair em jan/2026 (dentro do
+  // período) — 2026 faria a 10ª parcela cair em jan/2027, no futuro.
+  function resolveInstallmentDate(ddmm, parcelaAtual) {
+    const [d, mFirst] = ddmm.split('/').map(Number);
+    const offset = parcelaAtual - 1;
+    for (let idx = periodEndIdx; idx >= periodStartIdx; idx--) {
+      const firstIdx = idx - offset;
+      if (((firstIdx % 12) + 12) % 12 === mFirst - 1) {
+        const year = Math.floor(idx / 12), month = (idx % 12) + 1;
+        return `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      }
+    }
+    return periodEndIso; // não deveria acontecer com dados consistentes
+  }
+
+  function resolveDate(ddmm, parcelaFrac) {
+    if (parcelaFrac) {
+      const parcelaAtual = parseInt(parcelaFrac.split('/')[0]);
+      if (!isNaN(parcelaAtual)) return resolveInstallmentDate(ddmm, parcelaAtual);
+    }
     const [d, mo] = ddmm.split('/').map(Number);
     // Statements spanning month boundaries: dates matching the period's start
     // month belong to the start year/month, everything else to the end.
@@ -10972,7 +11019,7 @@ async function parseSantanderFaturaPDF(buffer) {
           } else {
             amount = -amount; // Pagamento e Demais Créditos: PDF sign is inverted vs our convention
           }
-          const iso = resolveDate(dateStr);
+          const iso = resolveDate(dateStr, currentSection === 'parcelamento' ? frac : null);
           let memo = descText;
           if (frac) memo += ` ${frac}`;
           if (currentHolder) memo += ` [${currentHolder.replace(/.*-/, '').trim()}]`;
@@ -11220,7 +11267,7 @@ function autoDetectCSV(buffer) {
 function renderWizardAutoResult(config, rows) {
   const body = G('custom-parser-body');
   const preview = rows.slice(0,8).map(r =>
-    `<tr><td>${r.date}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
+    `<tr><td>${fmtDate(r.date)}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
   ).join('');
 
   body.innerHTML = `
@@ -11253,7 +11300,7 @@ function renderWizardAutoResult(config, rows) {
     const displayRows = window._wizardPreviewRows.map(r => ({ ...r, amount: inverted ? -r.amount : r.amount }));
     const tbody = document.querySelector('#custom-parser-body .tbl-outer table tbody');
     if (tbody) tbody.innerHTML = displayRows.map(r =>
-      `<tr><td>${r.date}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
+      `<tr><td>${fmtDate(r.date)}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
     ).join('');
   }
 
@@ -11491,7 +11538,7 @@ async function testManualWizardPdf() {
     }
     _wizardParsed = rows;
     const preview = rows.slice(0,5).map(r =>
-      `<tr><td>${r.date}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
+      `<tr><td>${fmtDate(r.date)}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
     ).join('');
     result.innerHTML = `
       <div class="info-box" style="margin-bottom:8px">✅ ${rows.length} transações encontradas:</div>
@@ -11727,7 +11774,7 @@ async function testManualWizard() {
     }
     _wizardParsed = rows;
     const preview = rows.slice(0,5).map(r =>
-      `<tr><td>${r.date}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
+      `<tr><td>${fmtDate(r.date)}</td><td>${esc(r.memo)}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
     ).join('');
     result.innerHTML = `
       <div class="info-box" style="margin-bottom:8px">✅ ${rows.length} transações encontradas:</div>
@@ -18547,6 +18594,55 @@ function patMakeChart(canvasId, datasets, labels, yLabel) {
   });
 }
 
+// Gráfico de barras (mesmo visual/tooltip dos gráficos de linha do Patrimônio)
+// — usado pelo "Delta Patrimonial Real" (mês a mês, líquido de IPCA).
+function patMakeBarChart(canvasId, data, labels) {
+  const canvas = G(canvasId);
+  if (!canvas || typeof Chart === 'undefined') return null;
+  const shortLabels = labels.map(m => {
+    const [y, mo] = m.split('-');
+    return ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][parseInt(mo)-1] + '/' + y.slice(2);
+  });
+  const colors = data.map(v => v == null ? 'transparent' : v >= 0 ? '#43a047' : '#ef5350');
+  const ctx2d = canvas.getContext('2d');
+  return new Chart(ctx2d, {
+    type: 'bar',
+    data: { labels: shortLabels, datasets: [{
+      label: 'Delta Patrimonial Real',
+      data,
+      backgroundColor: colors,
+      borderRadius: 3,
+      barPercentage: 0.7,
+    }] },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { enabled: false, external: (context) => dashTooltip(context, {
+          getTitle: (dp) => shortLabels[dp[0].dataIndex],
+          getRows:  (dp) => dp.filter(d=>d.parsed.y!=null).map(d => ({
+            color: d.parsed.y >= 0 ? '#43a047' : '#ef5350',
+            label: 'Delta real (líquido de IPCA)',
+            value: fmtBRL(d.parsed.y),
+          })),
+        }) },
+      },
+      scales: {
+        x: { ticks: { font: { size: 10 }, maxTicksLimit: 18 }, grid: { display: false } },
+        y: {
+          grid: { color: themeGridColor() },
+          ticks: {
+            font: { size: 10 },
+            callback: v => 'R$' + (Math.abs(v) >= 1e6 ? (v/1e6).toFixed(1)+'M' : Math.abs(v) >= 1e3 ? (v/1e3).toFixed(0)+'k' : v.toFixed(0))
+          }
+        }
+      },
+      animation: { duration: 600 },
+    }
+  });
+}
+
 function patLegendHtml(datasets) {
   return datasets.map(d =>
     `<span style="display:flex;align-items:center;gap:5px">
@@ -18693,9 +18789,10 @@ function refreshPatrimonioChart() {
     return v !== 0 ? v : null;
   });
   const trimTotal = trimLeading(months, totalRaw);
-  const totalDs = [{
+  const totalSeries = trimTotal.series[0];
+  const totalDs = {
     label: 'Total Patrimônio',
-    data: trimTotal.series[0],
+    data: totalSeries,
     borderColor: '#43a047',
     backgroundColor: 'rgba(99,102,241,.08)',
     borderWidth: 2.5,
@@ -18703,8 +18800,45 @@ function refreshPatrimonioChart() {
     tension: 0.3,
     fill: true,
     spanGaps: false,
-  }];
-  _patCharts.total = patMakeChart('pat-chart-total', totalDs, trimTotal.months, 'BRL');
+  };
+  // Linha de referência do IPCA: parte do mesmo valor inicial do patrimônio e
+  // aplica a inflação acumulada mês a mês (mesmo padrão de acumulação usado
+  // em ipcaCumFn2/patAutoProject) — "quanto valeria o patrimônio inicial se
+  // só tivesse acompanhado a inflação", na mesma escala (BRL) do total real,
+  // pra comparação visual direta.
+  let ipcaAcc = 1;
+  const ipcaLine = totalSeries.map((v, i) => {
+    if (totalSeries[0] == null) return null;
+    if (i > 0) ipcaAcc *= (1 + (_pat.ipcaMonthly[trimTotal.months[i]] ?? 0));
+    return totalSeries[0] * ipcaAcc;
+  });
+  const ipcaDs = {
+    label: 'IPCA (referência)',
+    data: ipcaLine,
+    borderColor: '#9c27b0',
+    borderDash: [6, 4],
+    borderWidth: 2,
+    pointRadius: 0,
+    tension: 0.3,
+    fill: false,
+    spanGaps: false,
+  };
+  _patCharts.total = patMakeChart('pat-chart-total', [totalDs, ipcaDs], trimTotal.months, 'BRL');
+  const totalLeg = G('pat-chart-total-legend');
+  if (totalLeg) totalLeg.innerHTML = patLegendHtml([totalDs, ipcaDs]);
+
+  // ── 1b. Delta patrimonial real (mês a mês, líquido de IPCA) ──
+  // cur - prev seria o delta nominal; subtrair prev*ipcaRate isola quanto o
+  // patrimônio variou ALÉM (ou aquém) da correção monetária do próprio mês —
+  // permite ver, mês a mês, se o patrimônio ganhou ou perdeu da inflação.
+  const deltaRaw = totalSeries.map((v, i) => {
+    if (i === 0) return null;
+    const prev = totalSeries[i - 1], cur = totalSeries[i];
+    if (prev == null || cur == null) return null;
+    const ipcaRate = _pat.ipcaMonthly[trimTotal.months[i]] ?? 0;
+    return cur - prev * (1 + ipcaRate);
+  });
+  _patCharts.delta = patMakeBarChart('pat-chart-delta', deltaRaw, trimTotal.months);
 
   // ── % do patrimônio-alvo (meta de Aposentadoria) ──
   // Mostra, ao lado do título, quanto o valor mais recente do total
@@ -25400,7 +25534,7 @@ async function refreshAccountChart() {
         ? `<span>◆ Projeção em ${projMonths}m: <strong class="${diff>=0?'amt-inc':'amt-exp'}">${fmtBRL(endProj)}</strong> (${diff>=0?'+':''}${fmtBRL(diff)})</span>`
         : '',
       seriesDates.length > 0
-        ? `<span style="color:var(--text3)">${seriesDates[0]} → ${seriesDates[seriesDates.length-1]}</span>`
+        ? `<span style="color:var(--text3)">${fmtDate(seriesDates[0])} → ${fmtDate(seriesDates[seriesDates.length-1])}</span>`
         : '',
     ].filter(Boolean).join('  ·  ');
   }
