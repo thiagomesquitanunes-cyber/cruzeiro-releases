@@ -5914,7 +5914,7 @@ ipcMain.handle('settings:get', () => {
 // A validação de licença agora é feita pelo servidor (Supabase Edge Function).
 // O segredo nunca é distribuído com o instalador.
 const VALIDATE_LICENSE_URL = 'https://nfpjxmwrtwogctocqtxp.supabase.co/functions/v1/validate-license';
-const SUPABASE_ANON_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mcGp4bXdydHdvZ2N0b2NxdHhwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0MDU1ODQsImV4cCI6MjA5Njk4MTU4NH0.26t--V7O8RAPMsURHqwu3x19LHIdjJHjKvHpSHMvhGo';
+const SUPABASE_ANON_KEY    = 'sb_publishable_rCikC0YRWCUwicYs0v7W8Q_k5sniHIl';
 
 const FREE_MONTHS       = 6;
 const INCOME_THRESHOLD  = 3000;

@@ -8,7 +8,7 @@
 const https = require('https');
 
 const SUPABASE_URL    = 'https://nfpjxmwrtwogctocqtxp.supabase.co';
-const SUPABASE_ANON   = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5mcGp4bXdydHdvZ2N0b2NxdHhwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0MDU1ODQsImV4cCI6MjA5Njk4MTU4NH0.26t--V7O8RAPMsURHqwu3x19LHIdjJHjKvHpSHMvhGo';
+const SUPABASE_ANON   = 'sb_publishable_rCikC0YRWCUwicYs0v7W8Q_k5sniHIl';
 
 // ── Estado de sessão (em memória) ──
 let _session = null;

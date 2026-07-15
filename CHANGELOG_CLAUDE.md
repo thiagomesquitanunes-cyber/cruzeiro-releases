@@ -12,6 +12,47 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 — Migração da anon key legada para publishable key + remediação do vazamento
+
+Depois de publicar o fix da service_role key (entrada abaixo), o usuário
+recebeu um alerta do GitGuardian: a service_role key ainda estava exposta
+no histórico git do repositório PÚBLICO `cruzeiro-releases` (eu só tinha
+removido do código atual, nunca reescrevi histórico). Como o repo é
+público, isso é uma exposição real e ativa, não só teórica — qualquer
+scanner de segredo consegue achar.
+
+Investigando a página de API Keys do Supabase, o projeto já tinha migrado
+pro novo sistema de chaves (`publishable`/`secret`, substituindo
+`anon`/`service_role` legadas), com uma `sb_publishable_...` e uma
+`sb_secret_...` já geradas. Isso simplificou a remediação: em vez de
+rotacionar o JWT secret legado (que invalidaria anon E service_role juntos,
+exigindo uma dança de coordenação), bastou trocar a anon key legada pela
+nova publishable key nos 4 lugares onde estava hardcoded — a secret key
+(substituta do service_role) nem precisou ser usada, já que o desktop
+parou de depender de service_role no fix anterior.
+
+- `src/sync/supabase-client.js` (`SUPABASE_ANON`) e `src/main.js`
+  (`SUPABASE_ANON_KEY`, usada pra chamar a edge function
+  `validate-license`): trocadas de JWT legado pra
+  `sb_publishable_rCikC0YRWCUwicYs0v7W8Q_k5sniHIl`.
+- Mesma troca em `Cruzeiro Android/src/lib/supabase.js` e
+  `Cruzeiro iOS/src/lib/supabase.js` (`createClient(SUPABASE_URL,
+  SUPABASE_ANON, ...)`).
+- **Validado ao vivo** antes de publicar: rodei o desktop localmente com a
+  nova key — login (sessão restaurada), pull e push completos, tudo `ok`.
+  A publishable key funciona como substituta direta da anon key legada,
+  tanto no `_request()` manual do desktop (headers `apikey`/`Authorization:
+  Bearer`) quanto no SDK oficial (`@supabase/supabase-js`) usado pelo
+  mobile.
+- Depois de publicar esta versão e fazer `eas update` em Android+iOS, o
+  usuário precisa clicar em "Disable legacy API keys" no Supabase (Settings
+  → API → aba "Legacy anon, service_role API keys") — isso invalida a
+  service_role key vazada de vez, de forma definitiva. Só recomendar isso
+  DEPOIS que os 3 apps já estiverem rodando com a publishable key, senão
+  quebra o sync de quem ainda não atualizou.
+
+---
+
 ## 2026-07-14 (continuação 2) — Lote grande de correções de sincronização mobile
 
 Usuário reportou vários bugs comparando desktop x mobile (card de resumo com
