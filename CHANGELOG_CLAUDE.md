@@ -12,6 +12,97 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 (continuação 6) — v4.77.0: bug crítico de saldo (pernas de transferência apagadas), MA12 mobile, UX da tabela de transações e orçamento
+
+### Bug crítico introduzido pela própria v4.76.2: pernas de transferência recorrente sendo apagadas
+A migração de deduplicação de recorrências (adicionada na v4.76.2) agrupava
+duplicatas só por `(recurring_id, date)` — mas uma recorrência de
+TRANSFERÊNCIA sempre tem 2 linhas legítimas por data (uma em cada conta,
+mesmo `recurring_id`). A migração tratava esse par como duplicata e
+apagava uma das pernas a cada boot, quebrando a transferência (saldo de
+uma das contas ficava errado). Um segundo bug relacionado, em
+`migrateRecurring()` (mais antigo, pré-existente), tinha exatamente o
+mesmo problema e desfazia até a tentativa de reparo. Corrigido:
+- `ensureLateColumns()`: dedup agora agrupa por
+  `(recurring_id, date, account_id)` — só remove duplicata de verdade
+  (mesma conta), nunca as 2 pernas legítimas de uma transferência.
+- `migrateRecurring()`: mesmo fix (`GROUP BY recurring_id, date, account_id`).
+- Nova migração de reparo: detecta pernas de transferência órfãs
+  (`transfer_id` sem par) causadas pela versão anterior e recria a perna
+  que falta a partir da definição da recorrência (`account_id`/
+  `transfer_to_account_id`), só em pernas ainda não conferidas.
+- Testado ao vivo contra o banco real: achadas 3 pernas órfãs (valores
+  de R$2.900 e R$14 duas vezes), reparadas, e confirmada estabilidade
+  total em boots subsequentes (0 duplicatas falsas, 0 órfãs).
+
+### Categoria "categoria" fantasma — causa raiz real
+A correção anterior (tombstone em `_categories_excluded.json`) resolvia
+a categoria reaparecer na aba Categorias, mas não impedia o
+AUTO-PREENCHIMENTO por ML sugerir "categoria" de novo em lançamentos
+NOVOS — a causa era uma regra órfã em `ml_rules` (aprendida antes do
+fix, ex: para o memo "Ajuste de saldo inicial") que nunca foi limpa.
+Corrigido: `categories:exclude` agora zera a categoria de qualquer regra
+de ML que aponte pra um nome excluído, e uma migração retroativa faz o
+mesmo para exclusões já registradas antes desse fix (achada e limpa 1
+regra órfã no banco real: memo "ajuste de saldo inicial" → categoria
+"Categoria").
+
+### Mobile: MA12 lucro da meta de aposentadoria pegando mês errado
+Causa raiz: a query de `pushEvolution` (sync-push.js) não tinha limite
+superior de data — recorrências materializam lançamentos até ~2 anos à
+frente (ex: mesada com fim em 2028), e esses meses futuros entravam no
+cálculo. Como o mobile (`metas.js`) escolhe "o mês atual" pegando a
+linha de maior `month` já sincronizada, ele acabava pegando um mês
+muito no futuro (poucos lançamentos projetados, longe da realidade) em
+vez do mês corrente — dando uma MA12 bem menor que a real (usuário
+reportou R$24.590,16 no mobile vs R$49.850,94 no desktop). Corrigido
+com `AND date <= date('now')` na query de `pushEvolution` (mesmo
+padrão já usado em `pushTransactions`). Validado numericamente contra o
+banco real: sem o filtro, o "mês mais recente" era 2028-06 (MA12 de
+R$766); com o filtro, passa a ser o mês corrente com o valor correto.
+
+### Tabela de transações: seleção, duplo-clique e Esc
+Três bugs com a MESMA causa raiz: a barra de multi-seleção (`#multi-bar`)
+usava `position:sticky`, que ainda ocupa espaço no fluxo normal do
+documento — ao aparecer (0→1 selecionado), ela EMPURRAVA toda a tabela
+pra baixo. Resultado: a linha clicada saía debaixo do cursor (parecia
+que a seleção "não tinha efeito visual", mesmo a cor mudando — só que
+numa posição diferente da que o usuário olhava) e o 2º clique de um
+duplo-clique caía numa linha diferente da 1ª (o alvo se moveu entre os
+2 cliques), fazendo o duplo-clique nunca completar na 1ª tentativa.
+Corrigido trocando `position:sticky` por `position:fixed` (overlay que
+flutua por cima do conteúdo em vez de deslocá-lo). Testado ao vivo via
+CDP: duplo-clique real agora abre o modal de edição corretamente na 1ª
+tentativa, com deslocamento residual de ~4px (antes: ~40-50px).
+Adicionado também: tecla Esc agora cancela a seleção de transações
+(handler novo, respeita modais abertos por cima).
+
+### Orçamento — gráficos: separador receita/despesa + ordenação
+Na visualização "Gráficos" da aba Orçamento (modo "Mês único"):
+adicionado separador visual "📉 Despesas" entre os cards de receita
+(sempre no topo) e despesa (sempre embaixo) — antes ficavam misturados
+na ordem que vinham do banco. Adicionada ordenação configurável (botões
+"%"/"R$"/"A-Z", clique de novo inverte direção), mesma lógica já usada
+no mobile: padrão decrescente por % já transcorrido do planejado.
+`BUDGET_CHART_SORT_KEYS`, `budgetChartToggleSort()`, ambos os grupos
+(receita/despesa) ordenados independentemente pelo mesmo critério.
+
+### Nova transação: data padrão passa a lembrar a última usada por conta
+Antes, o campo de data de um lançamento novo sempre sugeria "hoje".
+Agora: a primeira transação de uma conta ainda sugere hoje, mas depois
+que o usuário muda a data uma vez, as próximas transações NOVAS nessa
+mesma conta passam a sugerir essa última data usada — até o usuário
+mudar de novo. Estado em memória (`_lastTxDateByAccount`, por
+`account_id`), não persiste entre reinícios do app de propósito (é uma
+conveniência de sessão, não uma preferência permanente).
+
+### Publicação
+Versão 4.76.2 → 4.77.0 (minor — inclui funcionalidade nova visível,
+não só correção de bug). Arquivos: `src/main.js`, `src/renderer.js`,
+`src/index.html`, `src/sync/sync-push.js`.
+
+---
+
 ## 2026-07-15 (continuação 5) — v4.76.2: transações recorrentes duplicando + categoria fantasma "categoria" + retentativa de assinatura macOS
 
 ### Transações recorrentes duplicando sozinhas

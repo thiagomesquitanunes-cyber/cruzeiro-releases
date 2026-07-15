@@ -612,28 +612,35 @@ function ensureLateColumns() {
     }
   } catch(e) {}
 
-  // Limpeza retroativa: consolida duplicatas de (recurring_id, date) já
-  // existentes por causa do bug corrigido nesta versão em
+  // Limpeza retroativa: consolida duplicatas de (recurring_id, date,
+  // account_id) já existentes por causa do bug corrigido nesta versão em
   // syncRecurringTxns (regenerava uma transação nova pra uma data que já
-  // tinha uma, mesmo já conferida, a cada boot/login). Conservadora: NUNCA
+  // tinha uma, mesmo já conferida, a cada boot/login). O agrupamento
+  // inclui account_id de propósito — uma recorrência de TRANSFERÊNCIA
+  // sempre tem 2 linhas legítimas por data (uma em cada conta, mesmo
+  // recurring_id), o que não é bug nenhum; agrupar só por
+  // (recurring_id, date) tratava esse par legítimo como duplicata e
+  // apagava uma perna da transferência a cada boot (o boot seguinte,
+  // via syncRecurringTxns, recriava a perna que faltava — dando a
+  // impressão de que a "limpeza" nunca convergia). Conservadora: NUNCA
   // apaga uma transação já conferida (cleared=1) — só remove as extras
-  // NÃO conferidas de um grupo, mantendo no máximo 1 por (recurring_id,
-  // date). Grupos onde todas as linhas já estão conferidas ficam
-  // intocados (arriscado demais adivinhar qual apagar) — só logados, pra
-  // revisão manual se necessário. Idempotente: depois da 1ª limpeza não
-  // há mais duplicatas a achar.
+  // NÃO conferidas de um grupo, mantendo no máximo 1 por
+  // (recurring_id, date, account_id). Grupos onde todas as linhas já
+  // estão conferidas ficam intocados (arriscado demais adivinhar qual
+  // apagar) — só logados, pra revisão manual se necessário. Idempotente:
+  // depois da 1ª limpeza não há mais duplicatas de verdade a achar.
   try {
     const dupGroups = all(`
-      SELECT recurring_id, date, COUNT(*) as n, SUM(cleared) as clearedCount
+      SELECT recurring_id, date, account_id, COUNT(*) as n, SUM(cleared) as clearedCount
       FROM transactions
       WHERE recurring_id IS NOT NULL
-      GROUP BY recurring_id, date
+      GROUP BY recurring_id, date, account_id
       HAVING COUNT(*) > 1
     `);
     let removedDups = 0, skippedAllCleared = 0;
     dupGroups.forEach(g => {
       if (g.clearedCount >= g.n) { skippedAllCleared++; return; }
-      const rows = all('SELECT id, cleared FROM transactions WHERE recurring_id=? AND date=? ORDER BY cleared DESC, id ASC', [g.recurring_id, g.date]);
+      const rows = all('SELECT id, cleared FROM transactions WHERE recurring_id=? AND date=? AND account_id=? ORDER BY cleared DESC, id ASC', [g.recurring_id, g.date, g.account_id]);
       rows.slice(1).forEach(r => {
         if (r.cleared === 1) return; // nunca apaga uma conferida
         run('DELETE FROM transactions WHERE id=?', [r.id]);
@@ -642,6 +649,38 @@ function ensureLateColumns() {
     });
     if (removedDups > 0) console.log(`[migração] removidas ${removedDups} transação(ões) duplicada(s) de recorrência (não conferidas)`);
     if (skippedAllCleared > 0) console.log(`[migração] ${skippedAllCleared} grupo(s) de duplicatas com todas as linhas conferidas — não mexidas, revisar manualmente`);
+  } catch(e) {}
+
+  // Repara pernas órfãs de transferência recorrente: efeito colateral da
+  // PRIMEIRA versão da limpeza acima (antes de incluir account_id no
+  // agrupamento), que tratava as 2 pernas legítimas de uma transferência
+  // recorrente (mesma data, mesmo recurring_id, contas diferentes) como
+  // duplicata e apagava uma delas — quebrando a transferência (1 perna
+  // sumida, saldo de uma das contas batendo errado). Recria a perna que
+  // falta a partir da recorrência original (conta em falta = a que não é
+  // a da perna sobrevivente, dentre account_id/transfer_to_account_id).
+  // Só mexe em pernas ainda não conferidas (cleared=1 fica pra revisão
+  // manual — não há como saber com segurança o valor certo da perna que
+  // faltou). Idempotente: depois da 1ª execução não há mais órfã a achar.
+  try {
+    const orphanLegs = all(`
+      SELECT t1.id, t1.recurring_id, t1.date, t1.account_id, t1.transfer_id, t1.cleared, t1.amount, t1.memo, t1.category
+      FROM transactions t1
+      WHERE t1.transfer_id IS NOT NULL AND t1.recurring_id IS NOT NULL
+        AND (SELECT COUNT(*) FROM transactions t2 WHERE t2.transfer_id = t1.transfer_id) = 1
+    `);
+    let repairedOrphans = 0, skippedClearedOrphans = 0;
+    orphanLegs.forEach(o => {
+      if (o.cleared === 1) { skippedClearedOrphans++; return; }
+      const rec = first('SELECT account_id, transfer_to_account_id FROM recurring WHERE id=?', [o.recurring_id]);
+      if (!rec || !rec.transfer_to_account_id) return;
+      const missingAccountId = o.account_id === rec.account_id ? rec.transfer_to_account_id : rec.account_id;
+      run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared,transfer_id,recurring_id) VALUES (?,?,?,?,?,?,?,?)`,
+        [missingAccountId, o.date, o.category, o.memo, -o.amount, o.cleared, o.transfer_id, o.recurring_id]);
+      repairedOrphans++;
+    });
+    if (repairedOrphans > 0) console.log(`[migração] recriada(s) ${repairedOrphans} perna(s) órfã(s) de transferência recorrente`);
+    if (skippedClearedOrphans > 0) console.log(`[migração] ${skippedClearedOrphans} perna(s) órfã(s) já conferida(s) — não mexidas, revisar manualmente`);
   } catch(e) {}
 
   // Reconciliação única: qualquer categoria que já exista em transações
@@ -675,7 +714,12 @@ function ensureLateColumns() {
     if (fs.existsSync(excludedPath)) {
       try { excludedList = JSON.parse(fs.readFileSync(excludedPath, 'utf8')) || []; } catch(e) { excludedList = []; }
     }
-    const excludedCats = new Set((Array.isArray(excludedList) ? excludedList : []).map(c => String(c).toLowerCase()));
+    // "categoria" (minúscula, sem acento) é literalmente o resíduo do bug
+    // antigo de placeholder — trata como excluída sempre, mesmo que o
+    // usuário nunca tenha passado pela tela de exclusão nesta instalação.
+    excludedList = Array.from(new Set([...(Array.isArray(excludedList) ? excludedList : []), 'categoria']));
+    fs.writeFileSync(excludedPath, JSON.stringify(excludedList));
+    const excludedCats = new Set(excludedList.map(c => String(c).toLowerCase()));
     const accountNames = new Set(all('SELECT name FROM accounts').map(a => String(a.name).toLowerCase()));
     const usedCats = all(`SELECT DISTINCT category FROM transactions WHERE category IS NOT NULL AND category != ''`);
     usedCats
@@ -693,6 +737,19 @@ function ensureLateColumns() {
         const cleaned = cats.filter(c => !accountNames.has(String(c).toLowerCase()));
         if (cleaned.length !== cats.length) fs.writeFileSync(catsPath, JSON.stringify(cleaned));
       }
+    }
+
+    // Limpeza retroativa das regras de ML: qualquer regra aprendida
+    // ANTES do fix acima que ainda sugira uma categoria hoje excluída (ex:
+    // "categoria") continuava fazendo o auto-preenchimento "trazer de
+    // volta" a categoria fantasma em lançamentos novos, mesmo com a
+    // transação de origem já sem esse texto — o gatilho não era a
+    // transação em si, era a regra de sugestão automática por memorando.
+    const badMlRules = all('SELECT keyword, category FROM ml_rules WHERE category IS NOT NULL AND category != \'\'')
+      .filter(r => excludedCats.has(String(r.category).toLowerCase()));
+    if (badMlRules.length) {
+      badMlRules.forEach(r => run('UPDATE ml_rules SET category=\'\' WHERE keyword=?', [r.keyword]));
+      console.log(`[migração] ${badMlRules.length} regra(s) de ML com categoria excluída limpa(s)`);
     }
   } catch(e) {}
 }
@@ -1589,6 +1646,12 @@ function migrateRecurring() {
   try { db.run("UPDATE inv_assets SET category='valor_em_caixa' WHERE category='caixa'"); } catch(e) {}
   // Fix: remove duplicate uncleared past recurring transactions (keep cleared ones, delete extra uncleared)
   // This cleans up the bug where syncRecurringTxns generated entries from next_date instead of today
+  // O agrupamento inclui account_id de propósito — uma recorrência de
+  // TRANSFERÊNCIA tem 2 linhas legítimas por (recurring_id, date), uma em
+  // cada conta; agrupar só por (recurring_id, date) tratava esse par como
+  // duplicata e apagava uma perna a cada login, desfazendo o reparo de
+  // pernas órfãs feito em ensureLateColumns() (que roda logo antes desta
+  // função, no mesmo fluxo de login:check).
   try {
     db.run(`DELETE FROM transactions
       WHERE cleared=0
@@ -1597,7 +1660,7 @@ function migrateRecurring() {
         AND id NOT IN (
           SELECT MIN(id) FROM transactions
           WHERE cleared=0 AND recurring_id IS NOT NULL AND date < date('now')
-          GROUP BY recurring_id, date
+          GROUP BY recurring_id, date, account_id
         )`);
   } catch(e) {}
   // Track dates manually deleted from a recurring series (so syncRecurring respects them)
@@ -6021,6 +6084,17 @@ ipcMain.handle('categories:exclude', (_, { names }) => {
       if (n && !excluded.some(e => String(e).toLowerCase() === String(n).toLowerCase())) excluded.push(n);
     });
     fs.writeFileSync(excludedPath, JSON.stringify(excluded));
+    // Limpa também as regras de ML (ml_rules) que sugeririam essa categoria
+    // sozinhas em transações futuras/novas — sem isso, apagar a categoria
+    // "some" da aba Categorias mas continua sendo AUTO-SUGERIDA pelo
+    // preenchimento automático (predição por memorando) toda vez que o
+    // usuário digita um memo parecido, dando a impressão de que ela "volta
+    // sozinha" mesmo em lançamentos completamente novos.
+    (names || []).forEach(n => {
+      if (!n) return;
+      run('UPDATE ml_rules SET category=\'\' WHERE LOWER(category)=LOWER(?)', [n]);
+    });
+    save();
     return { ok: true };
   } catch(e) { return { ok: false, error: e.message }; }
 });

@@ -551,12 +551,21 @@ async function pushEvolution(all, userId, getDbPath, fs) {
   const catConfig = cfg.ev_catConfig || [];
 
   // ── 1. Query por mês+SUBcategoria — idêntica ao desktop ──
+  // AND date <= date('now') de propósito: sem esse limite, meses FUTUROS
+  // (recorrências materializadas até ~5 anos à frente, ex: mesada com
+  // fim em 2028) entravam no array `months` — e como o mobile
+  // (metas.js) escolhe o "mês atual" pegando a linha de maior `month`
+  // já sincronizada (order by month desc limit 1), acabava pegando um
+  // mês bem no futuro (pouquíssimos lançamentos projetados) em vez do
+  // mês corrente de verdade — dando uma MA12 completamente diferente
+  // da que o desktop mostra (computeEvMA12LucroData já filtra
+  // `m <= curM2` por este mesmo motivo).
   const catRows = all(`
     SELECT substr(date,1,7) as month, category,
       SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END) as expenses,
       SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) as income
     FROM transactions
-    WHERE date >= '2000-01-01' AND transfer_id IS NULL
+    WHERE date >= '2000-01-01' AND date <= date('now') AND transfer_id IS NULL
       AND (category IS NOT NULL AND category != '')
       AND LOWER(category) NOT LIKE '%transfer%'
     GROUP BY month, category

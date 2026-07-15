@@ -349,6 +349,11 @@ let sortBy      = 'date';
 let sortOrder   = 'desc';
 let editingTxId = null;
 let editingAccId= null;
+// Última data usada ao criar um lançamento manual em cada conta — a
+// primeira transação de uma conta ainda assume hoje, mas depois que o
+// usuário muda a data uma vez, as próximas transações NOVAS nessa mesma
+// conta passam a sugerir essa última data (até o usuário mudar de novo).
+let _lastTxDateByAccount = {};
 let selBank     = 'itau';
 let selectedRows= new Set();
 let searchQuery = '';
@@ -443,6 +448,17 @@ let colConfig = [
       if (currentPage === 'overview') await refreshOverview();
       if (currentPage === 'evolucao') refreshEvolucao();
       refreshUndoBtn();
+    }
+  });
+
+  // Esc key on document: cancela a seleção de transações (só quando não
+  // há modal aberto por cima — nesse caso o Esc já fecha o modal via seu
+  // próprio handler local, e não deve também mexer na seleção por baixo).
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && selectedRows.size > 0 && currentPage === 'account') {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+      if (document.querySelector('.overlay.open')) return;
+      clearSelection();
     }
   });
   await loadEvolucaoConfig();
@@ -3272,7 +3288,7 @@ function toggleSort(col) {
 function openTxModal(tx=null) {
   editingTxId = tx?.id || null;
   G('modal-tx-title').textContent = tx ? 'Editar lançamento' : 'Novo lançamento';
-  G('tx-date').value     = tx ? tx.date : todayStr();
+  G('tx-date').value     = tx ? tx.date : (_lastTxDateByAccount[currentAccountId] || todayStr());
   G('tx-expense').value  = tx && tx.amount < 0 ? Math.abs(tx.amount) : '';
   G('tx-income').value   = tx && tx.amount >= 0 ? tx.amount : '';
   G('tx-memo').value     = tx?.memo || '';
@@ -3512,6 +3528,7 @@ async function saveTx() {
   } else {
     await ff.createTx({ account_id, date, amount, memo, category,
       pat_asset_id: patAssetId||null, pat_tx_id: patTxId||null, pat_debt_id: debtId||null });
+    _lastTxDateByAccount[account_id] = date;
     toast(t('msg_tx_created'));
   }
   if (memo || category) ff.mlLearn({ desc: memo, memo, category, amount });
@@ -16145,12 +16162,37 @@ let _budgetChartMonth = '';       // YYYY-MM — mês selecionado no modo rosca
 let _budgetChartPeriod = 12;      // 6 | 12 | 24 | 36 | 'all'
 let _budgetBarCharts = {};        // canvasId -> Chart.js instance para o modo barras
 
+// Ordenação dos gráficos de rosca (modo "Mês único") — mesma lógica usada
+// no mobile (aba Orçamento): por padrão, % já transcorrido do planejado,
+// decrescente (quem estourou primeiro, ou está mais perto de estourar,
+// aparece primeiro). Botão troca o critério; clicar de novo no mesmo
+// critério inverte a direção.
+const BUDGET_CHART_SORT_KEYS = {
+  pct:     (b, actual, planned) => (planned > 0 ? actual / planned : -Infinity),
+  planned: (b, actual, planned) => planned || 0,
+  name:    (b) => (b.category || '').toLowerCase(),
+};
+let _budgetChartSortBy  = 'pct';
+let _budgetChartSortDir = 'desc';
+
+function budgetChartToggleSort(key) {
+  if (_budgetChartSortBy === key) { _budgetChartSortDir = _budgetChartSortDir === 'desc' ? 'asc' : 'desc'; }
+  else { _budgetChartSortBy = key; _budgetChartSortDir = 'desc'; }
+  ['pct','planned','name'].forEach(k => {
+    G(`bcs-${k}`)?.classList.toggle('primary', k === _budgetChartSortBy);
+    const arrow = G(`bcs-${k}-arrow`);
+    if (arrow) arrow.textContent = k === _budgetChartSortBy ? (_budgetChartSortDir === 'desc' ? '↓' : '↑') : '';
+  });
+  refreshBudget();
+}
+
 function budgetChartMode(mode) {
   _budgetChartMode = mode;
   G('budget-chart-type-single').classList.toggle('primary', mode === 'single');
   G('budget-chart-type-series').classList.toggle('primary', mode === 'series');
   G('budget-chart-month-nav').style.display  = mode === 'single' ? 'flex' : 'none';
   G('budget-chart-period-nav').style.display = mode === 'series' ? 'flex' : 'none';
+  if (G('budget-chart-sort-nav')) G('budget-chart-sort-nav').style.display = mode === 'single' ? 'flex' : 'none';
   refreshBudget();
 }
 
@@ -16226,7 +16268,8 @@ function renderBudgetCharts(ctx) {
 function renderBudgetSingleMonth(budgets, actualFor, effLimitOf) {
   const month = _budgetChartMonth;
   const grid  = G('budget-charts-grid');
-  grid.innerHTML = budgets.map(b => {
+
+  const cardHtml = (b) => {
     const planned = b._t === 'income' ? b.monthly_limit : effLimitOf(b);
     const actual  = actualFor(b.category, month, b._t, b.consolidate_subs !== 0);
     const pct     = planned > 0 ? (actual / planned * 100) : 0;
@@ -16245,7 +16288,47 @@ function renderBudgetSingleMonth(budgets, actualFor, effLimitOf) {
       </div>
       <div style="font-size:12px;color:var(--text2);text-align:center">${fmtBRL(actual)} de ${fmtBRL(planned)}</div>
     </div>`;
-  }).join('');
+  };
+
+  // Ordena cada grupo (receita e despesa) separadamente pelo critério
+  // ativo — mesma lógica do mobile. "pct" e "planned" dependem de
+  // actual/planned recalculados aqui pra cada budget (o mobile já tem
+  // esses valores prontos no registro; no desktop vêm de actualFor/
+  // effLimitOf, que dependem do mês selecionado).
+  const sortGroup = (arr) => [...arr].sort((a, b2) => {
+    const plannedA = a._t === 'income' ? a.monthly_limit : effLimitOf(a);
+    const plannedB = b2._t === 'income' ? b2.monthly_limit : effLimitOf(b2);
+    const actualA  = actualFor(a.category, month, a._t, a.consolidate_subs !== 0);
+    const actualB  = actualFor(b2.category, month, b2._t, b2.consolidate_subs !== 0);
+    const va = BUDGET_CHART_SORT_KEYS[_budgetChartSortBy](a, actualA, plannedA);
+    const vb = BUDGET_CHART_SORT_KEYS[_budgetChartSortBy](b2, actualB, plannedB);
+    const cmp = va < vb ? -1 : va > vb ? 1 : 0;
+    return _budgetChartSortDir === 'desc' ? -cmp : cmp;
+  });
+
+  const incomeBudgets  = sortGroup(budgets.filter(b => b._t === 'income'));
+  const expenseBudgets = sortGroup(budgets.filter(b => b._t === 'expense'));
+
+  if (!incomeBudgets.length && !expenseBudgets.length) {
+    grid.innerHTML = `<div class="info-box" style="text-align:center;padding:40px;grid-column:1/-1">
+      <div style="font-size:36px;margin-bottom:8px">🍩</div>
+      <div style="font-weight:600">Nenhuma categoria de planejamento ainda</div>
+    </div>`;
+    return;
+  }
+
+  // Separador horizontal entre receitas (linha de cima) e despesas
+  // (linha de baixo) — grid-column:1/-1 força o próximo card a começar
+  // numa nova linha do grid, mesmo com "auto-fill".
+  const divider = (incomeBudgets.length && expenseBudgets.length)
+    ? `<div style="grid-column:1/-1;display:flex;align-items:center;gap:10px;margin:4px 0;color:var(--text3);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px">
+        <span style="flex:1;height:1px;background:var(--border)"></span>
+        📉 Despesas
+        <span style="flex:1;height:1px;background:var(--border)"></span>
+      </div>`
+    : '';
+
+  grid.innerHTML = incomeBudgets.map(cardHtml).join('') + divider + expenseBudgets.map(cardHtml).join('');
 }
 
 function renderBudgetSeries(budgets, actualFor, effLimitOf, byMonth) {

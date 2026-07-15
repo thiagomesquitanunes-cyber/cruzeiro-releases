@@ -515,7 +515,18 @@ table.ledger tbody tr.future td .amt-inc{color:#4ade80 !important;}
 .multi-select-bar{
   display:none;padding:8px 14px;background:var(--accent);color:#fff;
   align-items:center;gap:10px;font-size:13px;font-weight:600;
-  position:sticky;top:0;z-index:50;
+  /* position:fixed (não sticky) de propósito — sticky ainda ocupa espaço
+     no fluxo normal do documento, então quando a barra aparecia (0→1
+     selecionado) ela EMPURRAVA toda a tabela pra baixo. A linha que o
+     usuário acabara de clicar saía debaixo do cursor: parecia que a
+     seleção "não tinha efeito visual" (a cor até mudava, só que numa
+     posição diferente da que o usuário estava olhando) e o 2º clique de
+     um duplo-clique caía numa linha diferente da 1ª (o alvo se moveu
+     entre os dois cliques), fazendo o duplo-clique nunca completar na
+     1ª tentativa. Como overlay fixo, a barra flutua por cima do
+     conteúdo em vez de deslocá-lo — nada na tabela muda de posição. */
+  position:fixed;top:0;left:var(--sidebar-w);right:0;z-index:120;
+  box-shadow:0 2px 10px rgba(0,0,0,.18);
 }
 .multi-select-bar.show{display:flex;}
 
@@ -1932,6 +1943,15 @@ select.inp option{background:var(--bg2);}
             <button class="btn xs" id="bcp-36" onclick="budgetChartSetPeriod(36)">36m</button>
             <button class="btn xs" id="bcp-all" onclick="budgetChartSetPeriod('all')">Tudo</button>
           </div>
+        </div>
+      </div>
+      <!-- Ordenação dos gráficos — visível no modo rosca (mês único) -->
+      <div id="budget-chart-sort-nav" style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+        <span style="font-size:12px;color:var(--text3)">Ordenar por</span>
+        <div class="ev-toggle-group" style="display:inline-flex;background:var(--bg3);border-radius:10px;padding:3px;gap:2px">
+          <button class="btn xs primary" id="bcs-pct" onclick="budgetChartToggleSort('pct')">% <span id="bcs-pct-arrow">↓</span></button>
+          <button class="btn xs" id="bcs-planned" onclick="budgetChartToggleSort('planned')">R$ <span id="bcs-planned-arrow"></span></button>
+          <button class="btn xs" id="bcs-name" onclick="budgetChartToggleSort('name')">A-Z <span id="bcs-name-arrow"></span></button>
         </div>
       </div>
       <div id="budget-charts-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px"></div>
