@@ -622,9 +622,32 @@ function ensureLateColumns() {
   // lista categorias direto da tabela transactions, sem checar contra a
   // lista gerenciada pelo usuário). Idempotente — ensureCategoryExists já
   // não duplica o que já está lá.
+  //
+  // Exclui nomes que batem com uma conta cadastrada: bug identificado do
+  // importador QIF (ver parseQIFMultiAccount) gravava o nome da conta
+  // CONTRAPARTE de uma transferência como se fosse categoria — sem essa
+  // exclusão, essa reconciliação ficava reintroduzindo contas bancárias,
+  // cartões e contas de investimento na aba Categorias como se fossem
+  // categorias de verdade.
   try {
+    const accountNames = new Set(all('SELECT name FROM accounts').map(a => String(a.name).toLowerCase()));
     const usedCats = all(`SELECT DISTINCT category FROM transactions WHERE category IS NOT NULL AND category != ''`);
-    usedCats.forEach(r => ensureCategoryExists(r.category));
+    usedCats
+      .filter(r => !accountNames.has(String(r.category).toLowerCase()))
+      .forEach(r => ensureCategoryExists(r.category));
+
+    // Limpeza única: remove da lista JÁ PERSISTIDA (_categories.json)
+    // qualquer entrada que hoje bata com o nome de uma conta — cobre quem
+    // já tinha rodado a reconciliação antiga (sem essa exclusão) e ficou
+    // com contas "presas" na aba Categorias. Não mexe nas transações.
+    const catsPath = getCatsPath();
+    if (fs.existsSync(catsPath)) {
+      const cats = JSON.parse(fs.readFileSync(catsPath, 'utf8')) || [];
+      if (Array.isArray(cats)) {
+        const cleaned = cats.filter(c => !accountNames.has(String(c).toLowerCase()));
+        if (cleaned.length !== cats.length) fs.writeFileSync(catsPath, JSON.stringify(cleaned));
+      }
+    }
   } catch(e) {}
 }
 
@@ -929,23 +952,60 @@ ipcMain.handle('financial:import', (_, { text, ext }) => {
     return existingAccounts.find(a => normAcc(a.name) === nname) || null;
   }
 
-  const ins = `INSERT INTO transactions (account_id,date,category,memo,amount,cleared) VALUES (?,?,?,?,?,?)`;
+  const ins = `INSERT INTO transactions (account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,?,?)`;
   const checkDup = `SELECT id FROM transactions WHERE account_id=? AND date=? AND ABS(amount-?)<=0.01 AND memo=? LIMIT 1`;
   let totalInserted = 0, skipped = 0, duplicates = 0;
   const unknownAccounts = [];
 
+  // ── Detecta e vincula transferências marcadas pelo QIF (L[Conta]) ──
+  // Achata todas as transações de todas as contas numa lista só, pra poder
+  // casar cada perna de transferência com sua contraparte em OUTRA conta do
+  // mesmo arquivo (mesma data, valor oposto, e a conta bate com o nome
+  // marcado). Pares casados ganham um transfer_id novo compartilhado — igual
+  // a uma transferência criada manualmente pela UI (tx:transfer). Perna sem
+  // contraparte encontrada (conta não fez parte deste import, ou não foi
+  // reconhecida) cai pra lançamento avulso, sem contaminar a categoria com o
+  // nome da conta — fica sem categoria, pra o usuário classificar depois,
+  // igual a qualquer lançamento importado sem categoria reconhecida.
+  const flat = [];
+  Object.entries(byAccount).forEach(([accName, txns]) => {
+    txns.forEach(t => flat.push({ ...t, _accName: accName }));
+  });
+  let nextTransferId = first('SELECT COALESCE(MAX(transfer_id),0) as m FROM transactions')?.m || 0;
+  flat.forEach(t => { t._used = false; });
+  flat.forEach(t => {
+    if (t._used || !t.transferAccount) return;
+    const counterpart = flat.find(o =>
+      !o._used && o !== t && o.date === t.date &&
+      Math.abs(Math.abs(o.amount) - Math.abs(t.amount)) <= 0.01 &&
+      Math.sign(o.amount) === -Math.sign(t.amount) &&
+      normAcc(o._accName) === normAcc(t.transferAccount)
+    );
+    if (counterpart) {
+      nextTransferId++;
+      t._used = true; counterpart._used = true;
+      t._transferId = nextTransferId; counterpart._transferId = nextTransferId;
+      t.category = ''; counterpart.category = '';
+    }
+  });
+
   db.run('BEGIN');
   try {
-    for (const [accName, txns] of Object.entries(byAccount)) {
-      const acc = findAccount(accName);
-      if (!acc) { unknownAccounts.push(accName); skipped += txns.length; continue; }
-      for (const t of txns) {
-        if (!t.date) { skipped++; continue; }
-        const dup = first(checkDup, [acc.id, t.date, t.amount, t.memo]);
-        if (dup) { duplicates++; continue; }
-        db.run(ins, [acc.id, t.date, t.category||'', t.memo||'', t.amount, t.cleared?1:0]);
-        totalInserted++;
-      }
+    for (const t of flat) {
+      if (!t.date) { skipped++; continue; }
+      const acc = findAccount(t._accName);
+      if (!acc) { if (!unknownAccounts.includes(t._accName)) unknownAccounts.push(t._accName); skipped++; continue; }
+      const dup = first(checkDup, [acc.id, t.date, t.amount, t.memo]);
+      if (dup) { duplicates++; continue; }
+      // Transferência sem contraparte encontrada: não usa o nome da conta
+      // como categoria (era o bug) — fica sem categoria, e o memo guarda a
+      // pista de qual conta seria, pra facilitar reconciliação manual.
+      const category = t._transferId ? '' : (t.transferAccount ? '' : (t.category || ''));
+      const memo = (!t._transferId && t.transferAccount)
+        ? `${t.memo || 'Transferência'} (${t.transferAccount})`
+        : (t.memo || '');
+      db.run(ins, [acc.id, t.date, category, memo, t.amount, t.cleared?1:0, t._transferId || null]);
+      totalInserted++;
     }
     db.run('COMMIT');
   } catch(e) { db.run('ROLLBACK'); throw e; }
@@ -980,7 +1040,13 @@ ipcMain.handle('qif:import', (_, { qifText }) => {
       for (const t of txns) {
         const dup = first(checkDup, [acc.id, t.date, t.amount, t.memo]);
         if (dup) { duplicates++; continue; }
-        db.run(ins, [acc.id, t.date, t.category, t.memo, t.amount, t.cleared ? 1 : 0]);
+        // Não usa t.transferAccount como categoria — ver financial:import
+        // (caminho ativo da UI) pra explicação completa e o vínculo por
+        // transfer_id feito lá. Este handler parece não ser mais usado pela
+        // UI atual, mas mantém a mesma correção defensivamente.
+        const category = t.transferAccount ? '' : (t.category || '');
+        const memo = t.transferAccount ? `${t.memo || 'Transferência'} (${t.transferAccount})` : (t.memo || '');
+        db.run(ins, [acc.id, t.date, category, memo, t.amount, t.cleared ? 1 : 0]);
         totalInserted++;
       }
     }
@@ -1823,6 +1889,7 @@ function parseQIFMultiAccount(text) {
         byAccount[currentAccount].push({
           date:     cur.date || '',
           category: cur.category || '',
+          transferAccount: cur.transferAccount || null,
           memo:     cur.memo || '',
           amount:   cur.amount || 0,
           cleared:  cur.cleared || false,
@@ -1835,14 +1902,25 @@ function parseQIFMultiAccount(text) {
     if (tag === 'D') cur.date     = parseQIFDate(val);
     else if (tag === 'T') cur.amount   = parseQIFAmount(val);
     else if (tag === 'M') cur.memo     = val;
-    else if (tag === 'L') cur.category = val.replace(/^\[|\]$/g, '');
+    else if (tag === 'L') {
+      // Convenção QIF: "L[Nome da Conta]" (com colchetes) marca o lançamento
+      // como TRANSFERÊNCIA para/de outra conta — não é uma categoria de
+      // verdade. Um arquivo com múltiplas contas grava a mesma transferência
+      // duas vezes (uma em cada conta), cada perna com o nome da conta
+      // CONTRAPARTE entre colchetes. Sem essa distinção, o nome da conta
+      // contraparte acabava virando "categoria" (ex: "Itaú", "Cartão BTG"
+      // aparecendo na aba Categorias como se fossem gastos de verdade).
+      const bracketed = val.match(/^\[(.*)\]$/);
+      if (bracketed) { cur.transferAccount = bracketed[1].trim(); cur.category = ''; }
+      else { cur.category = val; }
+    }
     else if (tag === 'C') cur.cleared  = val === 'X' || val === '*';
     // P (payee) and N (check num) ignored
   }
   // Last pending transaction
   if (cur.date) {
     if (!byAccount[currentAccount]) byAccount[currentAccount] = [];
-    byAccount[currentAccount].push({ date:cur.date||'', category:cur.category||'', memo:cur.memo||'', amount:cur.amount||0, cleared:cur.cleared||false });
+    byAccount[currentAccount].push({ date:cur.date||'', category:cur.category||'', transferAccount:cur.transferAccount||null, memo:cur.memo||'', amount:cur.amount||0, cleared:cur.cleared||false });
   }
   return byAccount;
 }
@@ -1862,6 +1940,11 @@ function normKey(s) { return (s||'').toLowerCase().normalize('NFD').replace(/[\u
 // ── BACKUP ──
 function getBackupDir() {
   const settings = loadSettings();
+  // backupDir é opcional e independente de dataDir — permite manter backup
+  // em local FISICAMENTE diferente dos dados (ex: dados numa pasta local,
+  // backup numa pasta de nuvem, ou vice-versa), pra não ter dados e backup
+  // sujeitos ao mesmo risco de perda (mesmo disco/pasta).
+  if (settings.backupDir) return settings.backupDir;
   const base = settings.dataDir
     ? settings.dataDir
     : (app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '..'));
@@ -4003,10 +4086,16 @@ function syncMutuoToBank(assetId) {
           // nada" em telas como Evolução.
           if (asset.mutuo_sync_account_id && asset.mutuo_sync_category && monthStr >= todayMonth) {
             const dueDate = `${monthStr}-${String(diaDoMes(y, mo)).padStart(2,'0')}`;
-            const existingTx = first('SELECT id, amount, cleared, date FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, monthStr]);
+            const existingTx = first('SELECT id, amount, cleared, date, category FROM transactions WHERE pat_asset_id=? AND pat_installment_month=?', [assetId, monthStr]);
             if (existingTx) {
-              if (existingTx.cleared !== 1 && (Math.abs((existingTx.amount ?? 0) - juros) > 0.005 || existingTx.date !== dueDate)) {
-                run('UPDATE transactions SET amount=?, date=? WHERE id=?', [juros, dueDate, existingTx.id]);
+              // Além de valor/data, também realinha a categoria — se o
+              // usuário trocou a "Categoria dos juros recebidos" no
+              // formulário do mútuo, os lançamentos futuros já criados
+              // precisam refletir a nova escolha. Lançamentos já
+              // conferidos (cleared=1) nunca são tocados, propositalmente.
+              if (existingTx.cleared !== 1 && (Math.abs((existingTx.amount ?? 0) - juros) > 0.005
+                  || existingTx.date !== dueDate || existingTx.category !== asset.mutuo_sync_category)) {
+                run('UPDATE transactions SET amount=?, date=?, category=? WHERE id=?', [juros, dueDate, asset.mutuo_sync_category, existingTx.id]);
                 updated++;
               }
             } else {
@@ -7044,6 +7133,32 @@ ipcMain.handle('settings:set-data-dir', async () => {
 ipcMain.handle('settings:clear-data-dir', () => {
   const s = loadSettings();
   delete s.dataDir;
+  saveSettings(s);
+  return { ok: true };
+});
+
+ipcMain.handle('settings:set-backup-dir', async () => {
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Escolher pasta de backup (separada da pasta de dados)',
+    properties: ['openDirectory'],
+  });
+  if (result.canceled || !result.filePaths.length) return { ok: false };
+  const dir = result.filePaths[0];
+
+  const s = loadSettings();
+  s.backupDir = dir;
+  saveSettings(s);
+
+  // Faz um backup imediato na nova pasta, pra não ficar sem nenhum backup
+  // ali até o próximo backup automático programado.
+  try { doBackup(); } catch(e) {}
+
+  return { ok: true, dir };
+});
+
+ipcMain.handle('settings:clear-backup-dir', () => {
+  const s = loadSettings();
+  delete s.backupDir;
   saveSettings(s);
   return { ok: true };
 });

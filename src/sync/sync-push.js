@@ -160,6 +160,7 @@ async function pushTransactions(all, userId, syncInvestments) {
   const from = new Date();
   from.setDate(from.getDate() - 90);
   const fromDate = from.toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
 
   // Por padrão, exclui transações de contas de investimento (mesma regra
   // de pushBalances) — evita vazar extrato de aportes/resgates mesmo que
@@ -172,13 +173,17 @@ async function pushTransactions(all, userId, syncInvestments) {
   // aba Evolução (isso é filtrado à parte, em pushEvolution). O campo
   // is_transfer deixa o mobile identificar e excluir essas linhas de
   // qualquer soma que fizer.
+  // t.date <= hoje é essencial: sem esse limite, lançamentos futuros
+  // (recorrências já materializadas, juros de mútuo projetados etc.)
+  // vazavam pra cá também — futuros só devem aparecer via pushScheduled
+  // (mobile_scheduled), na aba "lançamentos futuros" do mobile.
   const txns = all(`
     SELECT t.*, a.name as account_name
     FROM transactions t
     JOIN accounts a ON a.id = t.account_id
-    WHERE t.date >= ? ${investmentFilter}
+    WHERE t.date >= ? AND t.date <= ? ${investmentFilter}
     ORDER BY t.date DESC
-  `, [fromDate]);
+  `, [fromDate, today]);
 
   const rows = txns.map(t => {
     // Separa categoria e subcategoria (formato "Categoria:Subcategoria")
@@ -605,14 +610,36 @@ async function pushEvolution(all, userId, getDbPath, fs) {
 
   // ── Média móvel de 12 meses — SEMPRE, sobre o histórico completo
   // (antes de cortar para os últimos 12 meses enviados) ──
+  //
+  // O desktop (computeEvMA12LucroData, usado pela Aposentadoria/"Poupança
+  // realizada") calcula o LUCRO líquido mês a mês primeiro (receita menos
+  // despesa) e SÓ ENTÃO tira a média móvel desse saldo — não a média de
+  // receita menos a média de despesa. movAvg12 descarta meses com valor
+  // exatamente 0 da janela; aplicado separadamente a receita e despesa,
+  // cada série pode descartar um conjunto de meses DIFERENTE (ex: um mês
+  // com despesa zerada mas receita normal), fazendo
+  // income_ma - expenses_ma divergir do valor real do desktop. Para
+  // garantir que a diferença bata exatamente, calcula-se a MA do lucro
+  // líquido primeiro (idêntico ao desktop) e depois deriva-se income_ma/
+  // expenses_ma usando o MESMO conjunto de meses (máscara) dessa MA —
+  // assim a subtração sempre resulta no valor correto, mesmo mantendo os
+  // dois campos separados (necessários pro gráfico da Evolução no mobile).
   function movAvg12(arr, i) {
     const w = arr.slice(Math.max(0, i - 11), i + 1).filter(v => v !== 0 && !isNaN(v));
     return w.length ? w.reduce((s, v) => s + v, 0) / w.length : 0;
   }
-  const incArr = months.map(m => byMonth[m].income);
-  const expArr = months.map(m => byMonth[m].expenses);
-  const incMA  = months.map((_, i) => movAvg12(incArr, i));
-  const expMA  = months.map((_, i) => movAvg12(expArr, i));
+  function movAvg12Masked(arr, maskArr, i) {
+    const idxs = [];
+    for (let j = Math.max(0, i - 11); j <= i; j++) {
+      if (maskArr[j] !== 0 && !isNaN(maskArr[j])) idxs.push(j);
+    }
+    return idxs.length ? idxs.reduce((s, j) => s + arr[j], 0) / idxs.length : 0;
+  }
+  const incArr    = months.map(m => byMonth[m].income);
+  const expArr    = months.map(m => byMonth[m].expenses);
+  const lucroArr  = incArr.map((v, i) => v - expArr[i]);
+  const incMA = months.map((_, i) => movAvg12Masked(incArr, lucroArr, i));
+  const expMA = months.map((_, i) => movAvg12Masked(expArr, lucroArr, i));
 
   // ── 6. Corta para os últimos 12 meses só agora, na montagem das
   // linhas enviadas — a MA acima já usou o histórico completo ──

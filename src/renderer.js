@@ -17081,6 +17081,11 @@ async function refreshBackup() {
   if (dirEl) dirEl.textContent = settings.dataDir || 'Pasta padrão do sistema';
   if (clearBtn) clearBtn.style.display = settings.dataDir ? '' : 'none';
 
+  const backupDirEl = G('settings-backup-dir');
+  const clearBackupBtn = G('settings-clear-backup-dir-btn');
+  if (backupDirEl) backupDirEl.textContent = settings.backupDir || 'Mesma pasta dos dados (subpasta "backups")';
+  if (clearBackupBtn) clearBackupBtn.style.display = settings.backupDir ? '' : 'none';
+
   // Password state
   const pwCurrentRow = G('settings-pw-current-row');
   const removePwBtn  = G('settings-remove-pw-btn');
@@ -17134,6 +17139,20 @@ async function pickDataDir() {
 async function clearDataDir() {
   await ff.settingsClearDataDir();
   toast('✅ Usando pasta padrão do sistema');
+  refreshBackup();
+}
+
+async function pickBackupDir() {
+  const result = await ff.settingsSetBackupDir();
+  if (result.ok) {
+    toast(`✅ Pasta de backup alterada para: ${result.dir}`);
+    refreshBackup();
+  }
+}
+
+async function clearBackupDir() {
+  await ff.settingsClearBackupDir();
+  toast('✅ Backup voltou a usar a pasta dos dados');
   refreshBackup();
 }
 
@@ -25745,6 +25764,12 @@ async function apos2Init() {
   setupCurrencyInput(G('apos2-pat-final'), apos2Calc);
   await apos2PopulateCategoryDropdown();
   await apos2LoadConfig();
+  // O campo mostra "4.0" como placeholder, mas placeholder nunca é o
+  // .value real do input — sem isso, o cálculo lia string vazia (rate=0)
+  // até o usuário clicar e digitar algo, mesmo já vendo "4.0" na tela.
+  // Preenche de verdade com o padrão, igual ao texto exibido, só quando
+  // não há valor salvo (config antiga já continua funcionando normal).
+  if (!G('apos2-rate-real')?.value?.toString()?.trim()) G('apos2-rate-real').value = '4.0';
   apos2UpdatePatFinalDisplay(); // se havia ativos a preservar salvos, já trava o campo antes do primeiro cálculo
   const radio = document.querySelector(`input[name="apos2-calc-field"][value="${_apos2CalcField}"]`);
   if (radio) radio.checked = true;

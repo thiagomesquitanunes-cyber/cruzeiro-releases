@@ -12,6 +12,105 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 (continuação 4) — Lote de bugs pós-fix de sincronização + Moedinha/banner
+
+### Regressão própria: lançamentos futuros vazando pro extrato mobile
+`pushTransactions` (sync-push.js) nunca teve limite superior de data —
+`WHERE t.date >= ?` sem `AND t.date <= hoje`. Lançamentos futuros reais
+(recorrências materializadas, juros de mútuo projetados) apareciam na
+aba "lançamentos" do mobile em vez de só em "lançamentos futuros".
+Corrigido com `AND t.date <= ?` (hoje).
+
+### MA12 do lucro divergindo entre desktop e mobile
+Causa raiz: o desktop (`computeEvMA12LucroData`) calcula o LUCRO líquido
+mês a mês primeiro (receita−despesa) e só então tira a média móvel de
+12 meses — não a diferença de duas médias calculadas separadamente. Meu
+`pushEvolution` fazia `income_ma - expenses_ma` com cada uma usando seu
+próprio filtro de "descartar mês com valor zero" (a mesma função
+`movAvg12` do desktop, mas aplicada separadamente a cada série) — os dois
+filtros podem descartar meses DIFERENTES, quebrando a equivalência
+matemática. Corrigido: calcula a MA do lucro líquido primeiro (idêntica
+ao desktop) e deriva `income_ma`/`expenses_ma` usando a MESMA máscara de
+meses dessa MA, garantindo que a subtração sempre bata com o valor do
+desktop. Validado numericamente contra os dados reais (diferença ~0,
+antes era uma divergência de dezenas de milhares de reais). A diferença
+residual esperada agora é só a correção de IPCA (desktop corrige, mobile
+mostra nominal por decisão desta sessão).
+
+### Mudança de categoria do mútuo não propagava pros lançamentos futuros
+`syncMutuoToBank` (main.js) já verificava `cleared!==1` antes de
+atualizar uma transação futura existente, mas o UPDATE só tocava
+`amount`/`date` — nunca `category`. Trocar a "categoria dos juros
+recebidos" no formulário do mútuo não refletia nos lançamentos já
+criados. Corrigido: UPDATE agora inclui `category`, e a condição de
+"precisa atualizar" também considera categoria divergente. Lançamentos
+já conferidos continuam intocados, como já era.
+
+### Aba Categorias mostrando contas bancárias/cartões/investimentos
+Achada via agente de investigação: bug no parser QIF genérico
+(`parseQIFMultiAccount`, usado pelo importador universal). No formato
+QIF, `L[Nome]` (com colchetes) é a convenção padrão pra marcar
+transferência entre contas — o parser removia os colchetes
+incondicionalmente e tratava o nome como categoria normal. Um QIF
+multi-conta (ex: export do Quicken/GnuCash) grava cada transferência
+duas vezes, uma em cada conta, cada perna com o nome da conta
+CONTRAPARTE entre colchetes — por isso apareciam pares como
+Itaú↔"Cartão BTG"/Cartão BTG↔"Itaú" (pagamento de fatura) e
+Itaú↔"XP"/XP↔"Itaú" (resgate de investimento) na aba Categorias.
+- Parser: colchetes agora viram `transferAccount` em vez de `category`.
+- `financial:import`: nova lógica de pareamento — casa as duas pernas
+  (mesma data, valor oposto, conta bate com o nome marcado) e cria um
+  `transfer_id` compartilhado, igual a uma transferência manual. Perna
+  sem par encontrado fica sem categoria (nunca mais com nome de conta),
+  com a conta mencionada no memo pra facilitar reconciliação manual.
+  Mesma correção defensiva em `qif:import` (parece não ser mais chamado
+  pela UI atual, mas por segurança).
+- Reconciliação de categorias "fantasma" (`ensureLateColumns`): agora
+  exclui nomes que batem com conta cadastrada, e faz uma limpeza única
+  do `_categories.json` já persistido, removendo entradas contaminadas
+  por imports anteriores a este fix. Não mexe nos dados históricos das
+  transações em si — só some da lista gerenciada.
+
+### Pasta de backup separada da pasta de dados
+Novo card em Configurações (`⚙️ → 📦 Pasta de backup`) — `backupDir`
+independente de `dataDir` em settings. `getBackupDir()` prioriza
+`backupDir` quando definido. Handlers `settings:set-backup-dir`/
+`settings:clear-backup-dir` (mesmo padrão de `set-data-dir`).
+
+### Aposentadoria — juros reais (4%) não considerado sem interação
+`apos2-rate-real` mostrava "4.0" só como placeholder (nunca é o `.value`
+real de um input) — cálculo lia string vazia (rate=0) até o usuário
+digitar algo, mesmo já vendo "4.0" na tela. Visão 1 (Rumo à
+Aposentadoria) já tinha essa proteção; Pós-Aposentadoria não.
+`apos2Init()` agora preenche de verdade com '4.0' quando não há valor
+salvo, igual ao texto exibido.
+
+### Moedinha aprende Pós-Aposentadoria + banner de boas-vindas
+Ver entradas de changelog anteriores (mesmo dia) para detalhes — batch
+de conteúdo educativo + novo modal de primeira abertura.
+
+### Mobile (Android + iOS): ordenação de categorias no Orçamento
+`app/(tabs)/orcamento.js`: padrão passa a ser % já transcorrido do
+planejado, decrescente. Chips "%"/"R$"/"A-Z" pra trocar critério — tocar
+de novo no já ativo inverte a direção (↓/↑).
+
+**Arquivos tocados**: `src/sync/sync-push.js` (pushTransactions,
+pushEvolution), `src/main.js` (syncMutuoToBank, parseQIFMultiAccount,
+financial:import, qif:import, ensureLateColumns, getBackupDir + 2 novos
+handlers), `src/renderer.js` (apos2Init, pickBackupDir/clearBackupDir,
+refreshBackup, GUIDE_PAGES/GUIDE_TIPS.aposentadoria — este último já
+documentado antes), `src/index.html` (card de pasta de backup),
+`src/preload.js` (2 novos bridges). Mobile: `app/(tabs)/orcamento.js`
+(Android + iOS, idêntico).
+
+**Validado ao vivo** via CDP: card de backup renderiza corretamente,
+campo de juros reais confirmado com `.value` real ("4", não vazio),
+aba Categorias sem nenhum nome de conta (verificado contra os dados
+reais do dev, que tinham a contaminação reproduzida). MA12 validado
+numericamente (diferença ~0 entre metodologia nova e a do desktop).
+
+---
+
 ## 2026-07-15 (continuação 3) — Preparação da assinatura de código macOS
 
 Usuário obteve conta paga de desenvolvedor Apple. Preparado (mas ainda

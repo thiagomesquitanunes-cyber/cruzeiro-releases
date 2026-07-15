@@ -176,6 +176,8 @@ const api = {
   settingsSetPassword: (d)   => ipcRenderer.invoke('settings:set-password', d),
   settingsSetDataDir:  ()    => ipcRenderer.invoke('settings:set-data-dir'),
   settingsClearDataDir:()    => ipcRenderer.invoke('settings:clear-data-dir'),
+  settingsSetBackupDir:  ()  => ipcRenderer.invoke('settings:set-backup-dir'),
+  settingsClearBackupDir:()  => ipcRenderer.invoke('settings:clear-backup-dir'),
   // Login window handlers
   checkPassword:       (pw)  => ipcRenderer.invoke('login:check', pw),
   loginOk:             ()    => ipcRenderer.invoke('settings:login-ok'),
