@@ -368,7 +368,7 @@ async function pushGoals(all, userId) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 5. Lançamentos futuros (qualquer transação com data > hoje)
+// 5. Lançamentos futuros (transações com data > hoje, até 60 dias à frente)
 //
 // Antes só sincronizava a tabela `recurring` (definições abstratas de
 // recorrência), o que deixava de fora lançamentos futuros digitados
@@ -378,18 +378,28 @@ async function pushGoals(all, userId) {
 // igual ao handler report:future-pending do desktop — então usar a
 // mesma fonte garante paridade total com o que a aba "Contas" mostra
 // como futuro.
+//
+// LIMITE DE 60 DIAS: a materialização de parcelas de financiamento/
+// mútuo cria uma linha de `transactions` por mês do CONTRATO INTEIRO
+// (ex: um financiamento de 30 anos gera ~360 linhas futuras reais na
+// tabela). Sem limite superior de data, TODAS essas linhas eram
+// enviadas pro Supabase a cada sync — a maior fonte identificada de
+// egress desnecessário do app (o mobile só precisa mostrar um
+// horizonte curto de "o que vem por aí", não o cronograma completo de
+// décadas). 60 dias é mais que suficiente pro caso de uso mobile.
 // ─────────────────────────────────────────────────────────────
 async function pushScheduled(all, userId, syncInvestments) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today   = new Date().toISOString().slice(0, 10);
+  const horizon = new Date(Date.now() + 60 * 86400000).toISOString().slice(0, 10);
   const investmentFilter = syncInvestments ? '' : `AND a.type != 'investment'`;
 
   const txns = all(`
     SELECT t.*, a.name as account_name
     FROM transactions t
     JOIN accounts a ON a.id = t.account_id
-    WHERE t.date > ? ${investmentFilter}
+    WHERE t.date > ? AND t.date <= ? ${investmentFilter}
     ORDER BY t.date ASC
-  `, [today]);
+  `, [today, horizon]);
 
   const rows = txns.map(t => ({
     user_id:      userId,

@@ -12,6 +12,57 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 (continuação 8) — v4.77.2: reduz egress do Supabase (horizonte de 60 dias em `mobile_scheduled`)
+
+### Contexto
+Usuário reportou egress do Supabase ainda alto (440MB/dia, depois
+177MB/dia) mesmo após otimizações anteriores. Investigação (agente
+Explore) identificou a causa principal: `pushScheduled` (sync-push.js)
+enviava TODAS as transações futuras sem limite de data — e a
+materialização de parcelas de financiamento/mútuo cria uma linha de
+`transactions` por mês do CONTRATO INTEIRO (um financiamento de 30 anos
+gera ~360 linhas futuras). Toda essa massa de dados ia pro Supabase a
+cada sync do desktop, mesmo o mobile só precisando mostrar um horizonte
+curto de "o que vem por aí".
+
+### Fix: horizonte de 60 dias em `pushScheduled`
+`src/sync/sync-push.js`, `pushScheduled`: query agora tem
+`AND t.date <= ?` (hoje + 60 dias), além do `date > hoje` que já
+existia. `pruneNotIn` (já existente) cuida de remover do Supabase
+qualquer linha que saia da janela de 60 dias em syncs futuros. Testado
+contra o banco real: de 230 lançamentos futuros sem limite pra 123 com
+o corte de 60 dias — ~46% de redução só nessa tabela, ainda maior em
+contas com financiamentos de prazo mais longo.
+
+### Legendas explicando os limites de sincronização (mobile)
+Pra não parecer que dados "sumiram", adicionadas legendas explicando os
+cortes temporais já existentes:
+- `app/conta/[name].js` (Android + iOS): aba "Futuros" da tela de conta
+  ganhou a legenda "Mostrando os próximos 60 dias — lançamentos futuros
+  mais distantes ficam só no desktop." (novo estilo `syncHint`).
+- `app/(tabs)/evolucao.js` (Android + iOS): complementado o disclaimer
+  já existente (sobre valores nominais/sem IPCA) com uma linha sobre o
+  corte de 12 meses já em vigor (`pushEvolution` — ver changelog de
+  sessões anteriores).
+
+### Não implementado nesta rodada (registrado como pendente)
+Segunda otimização discutida mas ainda não feita: o push usa hash da
+tabela inteira pra detectar mudança (`hasChanged`), então uma edição
+pontual tende a reenviar `balances`/`budgets`/`goals`/`evolution`
+completos de novo, não só a linha alterada. Diffing por linha reduziria
+egress ainda mais, mas é uma mudança de arquitetura maior — avaliar se
+ainda é necessária depois de medir o efeito do fix desta versão.
+Migração pra Supabase Realtime (task #11 da lista do projeto) segue
+como alternativa de mais longo prazo, ainda não iniciada.
+
+### Publicação
+Versão 4.77.1 → 4.77.2 (patch). Arquivo: `src/sync/sync-push.js`.
+Mobile (Android/iOS, mesmo commit lógico nos dois): `app/conta/[name].js`,
+`app/(tabs)/evolucao.js` — publicado via `eas update --branch production`
+(OTA, sem novo build).
+
+---
+
 ## 2026-07-15 (continuação 7) — v4.77.1: lista de ML truncada, seleção em linhas futuras, gráficos de orçamento com rollover vazando
 
 ### Aba Aprendizado ML mostrando bem menos regras que o total
