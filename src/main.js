@@ -612,6 +612,38 @@ function ensureLateColumns() {
     }
   } catch(e) {}
 
+  // Limpeza retroativa: consolida duplicatas de (recurring_id, date) já
+  // existentes por causa do bug corrigido nesta versão em
+  // syncRecurringTxns (regenerava uma transação nova pra uma data que já
+  // tinha uma, mesmo já conferida, a cada boot/login). Conservadora: NUNCA
+  // apaga uma transação já conferida (cleared=1) — só remove as extras
+  // NÃO conferidas de um grupo, mantendo no máximo 1 por (recurring_id,
+  // date). Grupos onde todas as linhas já estão conferidas ficam
+  // intocados (arriscado demais adivinhar qual apagar) — só logados, pra
+  // revisão manual se necessário. Idempotente: depois da 1ª limpeza não
+  // há mais duplicatas a achar.
+  try {
+    const dupGroups = all(`
+      SELECT recurring_id, date, COUNT(*) as n, SUM(cleared) as clearedCount
+      FROM transactions
+      WHERE recurring_id IS NOT NULL
+      GROUP BY recurring_id, date
+      HAVING COUNT(*) > 1
+    `);
+    let removedDups = 0, skippedAllCleared = 0;
+    dupGroups.forEach(g => {
+      if (g.clearedCount >= g.n) { skippedAllCleared++; return; }
+      const rows = all('SELECT id, cleared FROM transactions WHERE recurring_id=? AND date=? ORDER BY cleared DESC, id ASC', [g.recurring_id, g.date]);
+      rows.slice(1).forEach(r => {
+        if (r.cleared === 1) return; // nunca apaga uma conferida
+        run('DELETE FROM transactions WHERE id=?', [r.id]);
+        removedDups++;
+      });
+    });
+    if (removedDups > 0) console.log(`[migração] removidas ${removedDups} transação(ões) duplicada(s) de recorrência (não conferidas)`);
+    if (skippedAllCleared > 0) console.log(`[migração] ${skippedAllCleared} grupo(s) de duplicatas com todas as linhas conferidas — não mexidas, revisar manualmente`);
+  } catch(e) {}
+
   // Reconciliação única: qualquer categoria que já exista em transações
   // reais (lançadas manualmente ou por alguma sincronização automática
   // antiga, incluindo bugs já corrigidos tipo a categoria literal
@@ -629,11 +661,25 @@ function ensureLateColumns() {
   // exclusão, essa reconciliação ficava reintroduzindo contas bancárias,
   // cartões e contas de investimento na aba Categorias como se fossem
   // categorias de verdade.
+  // Categorias que o usuário já excluiu deliberadamente pela aba Categorias
+  // (deleteCategory) — nunca eram lembradas: como essa reconciliação só
+  // olha pra `transactions.category` (nunca alterada pelo excluir, de
+  // propósito, pra não reescrever histórico), qualquer transação antiga
+  // que ainda tivesse aquele texto literal (ex: "categoria", de um bug já
+  // corrigido há muito tempo) fazia a categoria REAPARECER no boot
+  // seguinte — parecia que o app "recriava sozinha" toda vez que o
+  // usuário apagava.
   try {
+    let excludedList = [];
+    const excludedPath = getExcludedCatsPath();
+    if (fs.existsSync(excludedPath)) {
+      try { excludedList = JSON.parse(fs.readFileSync(excludedPath, 'utf8')) || []; } catch(e) { excludedList = []; }
+    }
+    const excludedCats = new Set((Array.isArray(excludedList) ? excludedList : []).map(c => String(c).toLowerCase()));
     const accountNames = new Set(all('SELECT name FROM accounts').map(a => String(a.name).toLowerCase()));
     const usedCats = all(`SELECT DISTINCT category FROM transactions WHERE category IS NOT NULL AND category != ''`);
     usedCats
-      .filter(r => !accountNames.has(String(r.category).toLowerCase()))
+      .filter(r => !accountNames.has(String(r.category).toLowerCase()) && !excludedCats.has(String(r.category).toLowerCase()))
       .forEach(r => ensureCategoryExists(r.category));
 
     // Limpeza única: remove da lista JÁ PERSISTIDA (_categories.json)
@@ -649,6 +695,10 @@ function ensureLateColumns() {
       }
     }
   } catch(e) {}
+}
+
+function getExcludedCatsPath() {
+  return getDbPath().replace('.db', '_categories_excluded.json');
 }
 
 // Cria retroativamente a movimentação "parcela_financiamento" para qualquer
@@ -1618,11 +1668,26 @@ function syncRecurringTxns(rec) {
   // Remove ALL uncleared future transactions for this recurring (including past-next_date)
   run('DELETE FROM transactions WHERE recurring_id=? AND cleared=0 AND date>=date("now")', [rec.id]);
 
-  // Insert fresh, skipping excluded dates
+  // Datas que JÁ têm uma transação real pra essa recorrência (qualquer
+  // status) — sobretudo as CONFERIDAS (cleared=1), que o DELETE acima
+  // nunca apaga de propósito. Sem checar isso, o loop abaixo regenerava
+  // a mesma data de novo (o algoritmo sempre recalcula a partir de
+  // next_date, que nunca avança/persiste, sem saber que aquela ocorrência
+  // já existe) — criava uma segunda transação `cleared=0` do lado da
+  // original já conferida. Essa função roda em toda abertura do app com
+  // senha local (via login:check), então o problema reaparecia sozinho.
+  let existingDates = new Set();
+  try {
+    const rows = all('SELECT DISTINCT date FROM transactions WHERE recurring_id=?', [rec.id]);
+    rows.forEach(r => existingDates.add(r.date));
+  } catch(e) {}
+
+  // Insert fresh, skipping excluded and já existentes
   const dates = generateFutureDates(rec);
   let inserted = 0;
   dates.forEach(date => {
     if (excludedDates.has(date)) return; // skip manually excluded
+    if (existingDates.has(date)) return; // já existe uma transação pra essa data (ex: conferida)
     if (rec.transfer_to_account_id) {
       // Recurring transfer: create both legs with a shared transfer_id
       const maxRow = first('SELECT COALESCE(MAX(transfer_id),0) as m FROM transactions');
@@ -2992,7 +3057,17 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
   let replaced = 0;
   if (Array.isArray(replaceIds) && replaceIds.length) {
     for (const rid of replaceIds) {
-      try { run('DELETE FROM transactions WHERE id=? AND recurring_id IS NOT NULL AND cleared=0', [rid]); replaced++; } catch(e) {}
+      try {
+        db.run('DELETE FROM transactions WHERE id=? AND recurring_id IS NOT NULL AND cleared=0', [rid]);
+        // getRowsModified() confirma se o DELETE realmente apagou algo — sem
+        // isso, se a provisão já tivesse sido substituída/regenerada com
+        // outro id (ex: syncRecurringTxns rodou de novo entre o dry-run e a
+        // confirmação), o DELETE virava um no-op silencioso (SQLite não
+        // reclama de WHERE sem match), mas a transação nova era inserida do
+        // mesmo jeito — resultando na provisão antiga + a nova, duplicadas.
+        if (db.getRowsModified() > 0) { replaced++; save(); }
+        else console.warn(`[bank:import] "substituir" não encontrou a provisão id=${rid} (pode já ter sido regenerada) — seguindo sem remover`);
+      } catch(e) {}
     }
   }
 
@@ -5923,6 +5998,29 @@ ipcMain.handle('categories:save', (_, { categories }) => {
     // Remove from settings if still there (cleanup migration)
     const s = loadSettings();
     if (s.categories) { delete s.categories; saveSettings(s); }
+    return { ok: true };
+  } catch(e) { return { ok: false, error: e.message }; }
+});
+
+// Registra nomes que o usuário excluiu deliberadamente pela aba Categorias
+// — a reconciliação de "categorias usadas em transações" (ensureLateColumns)
+// passa a nunca mais recriar esses nomes sozinha, mesmo que transações
+// antigas ainda tenham esse texto literal no campo category (não reescrito
+// de propósito, pra não alterar histórico). Sem isso, apagar uma categoria
+// "fantasma" (ex: "categoria", de um bug antigo) parecia não funcionar —
+// ela reaparecia sozinha no próximo boot.
+ipcMain.handle('categories:exclude', (_, { names }) => {
+  try {
+    const excludedPath = getExcludedCatsPath();
+    let excluded = [];
+    if (fs.existsSync(excludedPath)) {
+      try { excluded = JSON.parse(fs.readFileSync(excludedPath, 'utf8')) || []; } catch(e) { excluded = []; }
+    }
+    if (!Array.isArray(excluded)) excluded = [];
+    (names || []).forEach(n => {
+      if (n && !excluded.some(e => String(e).toLowerCase() === String(n).toLowerCase())) excluded.push(n);
+    });
+    fs.writeFileSync(excludedPath, JSON.stringify(excluded));
     return { ok: true };
   } catch(e) { return { ok: false, error: e.message }; }
 });

@@ -12,6 +12,82 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 (continuação 5) — v4.76.2: transações recorrentes duplicando + categoria fantasma "categoria" + retentativa de assinatura macOS
+
+### Transações recorrentes duplicando sozinhas
+`syncRecurringTxns` (main.js) apaga as transações futuras não conferidas
+(`cleared=0`) de uma recorrência e regenera a partir de
+`generateFutureDates()`, que recalcula as datas a partir de uma âncora
+que nunca avança. Isso por si só não duplicava nada — o problema
+aparecia quando já existia uma transação NÃO-futura pra aquela mesma
+data (ex: o usuário importou um extrato bancário e a importação criou
+uma linha pra aquela recorrência, ou uma linha já tinha sido conferida
+antes de virar "passada"): o regen recriava a data sem checar se já
+havia uma transação daquela recorrência naquele dia, gerando duplicata
+— inclusive quando o usuário resolvia um conflito de importação
+("pular" ou "substituir"), porque a duplicata surgia depois, no próximo
+boot/sync, não na hora do import. Corrigido com um `existingDates` (via
+`SELECT DISTINCT date FROM transactions WHERE recurring_id=?`) checado
+antes de cada insert do loop de geração, ao lado do `excludedDates` que
+já existia.
+
+Além do fix preventivo, adicionada uma migração retroativa em
+`ensureLateColumns()` que limpa duplicatas já existentes: agrupa por
+`(recurring_id, date)`, ignora grupos onde TODAS as linhas já estão
+conferidas (arriscado demais adivinhar qual manter — fica só um aviso
+no log pedindo revisão manual), e nos demais grupos mantém a linha de
+maior prioridade (`ORDER BY cleared DESC, id ASC`) apagando o resto,
+nunca apagando uma linha conferida. Testado ao vivo contra o banco real
+de dev: 42 duplicatas encontradas, 36 removidas automaticamente, 6
+grupos (100% conferidos) deixados pra revisão manual — validado que a
+migração é idempotente (rodar de novo não remove nada a mais) e que o
+fix preventivo realmente impede novas duplicatas depois de um ciclo
+completo de boot/sync.
+
+### Categoria apagada virando "categoria" fantasma sozinha
+Ao apagar a categoria de um lançamento deliberadamente (deixando em
+branco), ela reaparecia sozinha depois. Causa: `deleteCategory()` nunca
+tocava `transactions.category` — só removia a categoria da lista
+gerenciada. A rotina de reconciliação em `ensureLateColumns()`
+(a mesma que re-registra categorias "orgânicas" achadas nas transações,
+adicionada pro bug #10 desta mesma sessão) via o texto residual em
+transações antigas e recriava a categoria como se fosse nova, na
+próxima inicialização. Corrigido com um mecanismo de "tombstone":
+`deleteCategory()` agora coleta os nomes removidos e chama o novo IPC
+`categories:exclude`, que grava num arquivo `_categories_excluded.json`
+(dedup case-insensitive). A reconciliação de `ensureLateColumns()` passa
+a excluir tanto nomes de conta quanto nomes na lista de exclusão antes
+de auto-registrar qualquer categoria "órfã" encontrada nas transações.
+Novo helper `getExcludedCatsPath()`. Bridges no preload:
+`categoriesExclude`.
+
+### Segunda tentativa de corrigir o travamento do build macOS
+O build travou de novo no mesmo passo (~13min, cancelado pelo usuário)
+mesmo depois do fix anterior (keychain sem prompt de GUI). Diagnóstico
+revisado: o `.p12` usado no signing foi gerado localmente via OpenSSL a
+partir de um `.cer` baixado direto do portal da Apple — diferente de um
+`.p12` exportado pelo Keychain Access num Mac, esse não carrega o
+certificado intermediário da cadeia de confiança ("Developer ID
+Certification Authority" G2). Sem essa peça na keychain, o `codesign`
+tenta buscar o intermediário NA REDE (AIA fetch) toda vez que assina —
+e esse tipo de busca de rede é conhecido por travar/demorar demais em
+runners headless de CI. Corrigido baixando e importando
+`DeveloperIDG2CA.cer` (URL oficial da Apple) na keychain ANTES de
+importar o certificado final. Também adicionado `timeout-minutes: 25`
+no job `build-macos` como rede de segurança independente da causa raiz
+(se travar de novo por qualquer motivo, falha rápido em vez de rodar
+até o limite de 6h do GitHub Actions). Ainda não testado pelo usuário
+neste momento — próximo passo é o usuário disparar um novo build (tag
+de versão) e reportar o resultado.
+
+### Publicação
+Versão 4.76.1 → 4.76.2 (patch — só correções de bug, sem funcionalidade
+nova visível). Arquivos tocados: `src/main.js`, `src/renderer.js`
+(coleta de nomes removidos em `deleteCategory`), `src/preload.js`
+(bridge `categoriesExclude`), `.github/workflows/build.yml`.
+
+---
+
 ## 2026-07-15 (continuação 4) — Lote de bugs pós-fix de sincronização + Moedinha/banner
 
 ### Regressão própria: lançamentos futuros vazando pro extrato mobile

@@ -34,6 +34,11 @@ jobs:
   build-macos:
     name: Build macOS
     runs-on: macos-14
+    # Trava de segurança: sem isso, se o codesign travar de novo por
+    # qualquer motivo, o job fica rodando (e consumindo minutos do plano)
+    # até o limite padrão do GitHub Actions (6h), em vez de falhar rápido
+    # e dar um erro claro.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,6 +73,21 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Certificado intermediário da Apple ("Developer ID Certification
+          # Authority" G2) — o .p12 que geramos localmente (via OpenSSL, a
+          # partir do .cer baixado direto do portal) só tem o certificado
+          # FINAL + chave privada, sem essa peça intermediária da cadeia de
+          # confiança (diferente de um .p12 exportado pelo Keychain Access
+          # num Mac, que já inclui a cadeia inteira automaticamente). Sem
+          # ela na keychain local, o codesign precisa buscá-la NA REDE
+          # (AIA fetch) toda vez que assina algo — e é exatamente esse tipo
+          # de busca de rede que trava/demora demais em runners de CI,
+          # travando o build indefinidamente no passo de assinatura.
+          curl -fsSL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN_PATH" -A -t cert
+          rm -f "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+
           security import "$CERT_PATH" -P "$CSC_KEY_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')

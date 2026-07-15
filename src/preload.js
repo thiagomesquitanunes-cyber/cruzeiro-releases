@@ -162,6 +162,7 @@ const api = {
   financialImport:     (d)   => ipcRenderer.invoke('financial:import', d),
   categoriesGet:       ()    => ipcRenderer.invoke('categories:get'),
   categoriesSave:      (d)   => ipcRenderer.invoke('categories:save', d),
+  categoriesExclude:   (d)   => ipcRenderer.invoke('categories:exclude', d),
   brokerMappingsGet:   ()    => ipcRenderer.invoke('broker:mappings-get'),
   brokerAccountPrefGet:(d)   => ipcRenderer.invoke('broker:account-pref-get', d),
   brokerAccountPrefSet:(d)   => ipcRenderer.invoke('broker:account-pref-set', d),

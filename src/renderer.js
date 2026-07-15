@@ -323,13 +323,20 @@ async function deleteCategory(name) {
     : `Excluir a categoria "${name}"?`;
   if (!await showConfirmDialog(msg, '', 'Confirmar', true)) return;
   const before = CATS_RAW.length;
+  const removed = [];
   // Remove the category and any sub-categories
   for (let i = CATS_RAW.length - 1; i >= 0; i--) {
     if (CATS_RAW[i] === name || CATS_RAW[i].startsWith(name + ':')) {
+      removed.push(CATS_RAW[i]);
       CATS_RAW.splice(i, 1);
     }
   }
   saveCategories();
+  // Marca como excluída de propósito — sem isso, se alguma transação
+  // antiga ainda tiver esse texto literal no campo category (histórico
+  // não é reescrito ao excluir), a categoria "fantasma" reaparecia
+  // sozinha no próximo boot (reconciliação automática em main.js).
+  ff.categoriesExclude({ names: removed }).catch(() => {});
   refreshCategories();
   toast(`🗑 ${before - CATS_RAW.length} categoria(s) removida(s)`);
 }
