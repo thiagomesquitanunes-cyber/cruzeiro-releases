@@ -47,12 +47,40 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Cria e configura um keychain próprio pra esse job, seguindo a
+      # receita oficial da Apple pra assinatura de código no GitHub
+      # Actions. Sem isso, o codesign pode travar INDEFINIDAMENTE (não dá
+      # erro, só nunca termina) esperando um prompt gráfico de senha do
+      # keychain que nunca aparece num runner sem tela — o
+      # `set-key-partition-list` é o que evita esse prompt, autorizando
+      # codesign/productbuild a usar a chave sem confirmação interativa.
+      - name: Import Apple certificate
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/cruzeiro-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          CERT_PATH=$RUNNER_TEMP/cruzeiro-cert.p12
+
+          echo "$CSC_LINK" | base64 --decode -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CSC_KEY_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+
+          echo "CSC_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          rm -f "$CERT_PATH"
+
       - name: Build & publish macOS
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          # Assinatura de código (Developer ID Application) — obrigatório
-          # pra instalar sem aviso de "desenvolvedor não identificado".
-          CSC_LINK: ${{ secrets.CSC_LINK }}
+          # CSC_KEYCHAIN (setado no passo anterior) diz pro electron-builder
+          # usar o keychain já pronto/desbloqueado, em vez de tentar criar
+          # e importar o certificado de novo por conta própria.
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           # Notarização — dois métodos possíveis, o electron-builder usa
           # o que estiver preenchido (API Key tem prioridade se ambos
