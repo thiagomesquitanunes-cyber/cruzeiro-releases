@@ -12,6 +12,32 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 (continuação) — Limpeza do histórico git + fim da remediação do vazamento
+
+Sequência final da remediação do vazamento da service_role key (ver
+entrada abaixo): usuário confirmou ter clicado em "Disable legacy API
+keys" no Supabase — a chave vazada está definitivamente inválida agora,
+independente de qualquer coisa no código ou histórico.
+
+Como reforço de higiene (a chave já estava morta, mas continuava visível
+em texto puro no histórico público do repo `cruzeiro-releases`, o que
+geraria alertas de scanner pra sempre): usei `git-filter-repo`
+(`pip install git-filter-repo`, `--replace-text` com a chave antiga →
+placeholder) num clone temporário, cobrindo TODOS os commits e as 67 tags
+do repositório. Diferente do reset de histórico anterior ("Reinicia
+histórico sem dados sensíveis"), essa abordagem preserva a estrutura de
+commits e todas as tags — só troca o conteúdo do blob que continha a
+chave. Verificado antes do push que nenhum commit em `--all` continha
+mais o trecho característico do JWT (`"role":"service_role"` em base64).
+Force-push de `main` e de todas as 67 tags. Confirmado depois, via API do
+GitHub, que os Releases e seus assets (instaladores .exe/.dmg que os apps
+já instalados usam pro auto-update) continuam intactos — Releases
+referenciam tags pelo NOME, e os assets binários ficam armazenados à
+parte do git, então reescrever os commits por trás das tags não afeta
+downloads/auto-update já publicados.
+
+---
+
 ## 2026-07-15 — Migração da anon key legada para publishable key + remediação do vazamento
 
 Depois de publicar o fix da service_role key (entrada abaixo), o usuário
