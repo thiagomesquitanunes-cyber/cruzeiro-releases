@@ -702,6 +702,38 @@ select.inp option{background:var(--bg2);}
 .guide-tip-back{background:none;border:1px solid var(--border);color:var(--text2);font-size:11.5px;cursor:pointer;
   padding:5px 10px;border-radius:8px;margin-bottom:10px;}
 .guide-tip-back:hover{background:var(--bg3);}
+/* ═══ Banner de boas-vindas ═══ */
+#welcome-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:20000;animation:wb-fade .25s;}
+@keyframes wb-fade{from{opacity:0}to{opacity:1}}
+#welcome-card{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:560px;max-width:calc(100vw - 32px);
+  max-height:calc(100vh - 48px);overflow-y:auto;background:var(--bg2);border-radius:18px;z-index:20001;
+  box-shadow:0 20px 60px rgba(0,0,0,.35);animation:wb-pop .3s cubic-bezier(.34,1.56,.64,1);}
+@keyframes wb-pop{from{opacity:0;transform:translate(-50%,-50%) scale(.92)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+#welcome-header{background:linear-gradient(135deg,#00695c,#00897b);color:#fff;padding:28px 28px 22px;
+  border-radius:18px 18px 0 0;text-align:center;}
+#welcome-header svg{filter:drop-shadow(0 4px 10px rgba(0,0,0,.25));margin-bottom:8px;}
+#welcome-header h2{margin:0 0 8px;font-size:22px;font-weight:800;}
+#welcome-header p{margin:0;font-size:13.5px;line-height:1.5;color:rgba(255,255,255,.92);max-width:420px;margin:0 auto;}
+#welcome-body{padding:20px 28px;}
+.welcome-step{display:flex;gap:12px;padding:10px 0;}
+.welcome-step-num{flex-shrink:0;width:26px;height:26px;border-radius:50%;background:var(--green-bg);color:var(--green);
+  font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center;border:1.5px solid var(--green-lt);}
+.welcome-step-text{flex:1;}
+.welcome-step-text strong{font-size:14px;color:var(--text);display:block;margin-bottom:2px;}
+.welcome-step-text p{margin:0 0 4px;font-size:12.5px;color:var(--text2);line-height:1.5;}
+.welcome-step-text a{font-size:12.5px;color:var(--accent);cursor:pointer;font-weight:600;text-decoration:none;}
+.welcome-step-text a:hover{text-decoration:underline;}
+.welcome-divider{display:flex;align-items:center;gap:8px;margin:16px 0 8px;padding:10px 12px;background:var(--warn-bg);
+  border:1px solid #fde68a;border-radius:10px;font-size:12.5px;color:var(--text2);}
+.welcome-settings-link{display:block;text-align:center;margin-top:16px;padding:10px;border-radius:10px;
+  background:var(--accent-bg);border:1px solid var(--accent-lt);color:var(--accent);font-weight:700;
+  font-size:13px;cursor:pointer;text-decoration:none;}
+.welcome-settings-link:hover{background:var(--accent-lt);}
+#welcome-footer{padding:18px 28px 26px;text-align:center;}
+#welcome-footer button{background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:12px;
+  font-weight:700;font-size:14.5px;padding:11px 28px;cursor:pointer;box-shadow:0 3px 10px rgba(56,142,60,.35);
+  transition:transform .12s;}
+#welcome-footer button:hover{transform:scale(1.03);}
 #tour-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0);transition:background .4s;z-index:19001;}
 #tour-spotlight{position:fixed;border-radius:10px;box-shadow:0 0 0 9999px rgba(0,0,0,.55);transition:all .45s cubic-bezier(.4,0,.2,1);z-index:19002;pointer-events:none;}
 #tour-card{position:fixed;z-index:19003;background:var(--bg2);border-radius:14px;box-shadow:0 8px 40px rgba(0,0,0,.28);padding:0;width:360px;max-width:calc(100vw - 32px);pointer-events:all;transition:all .3s;}
@@ -4113,6 +4145,97 @@ select.inp option{background:var(--bg2);}
       </g>
     </svg>
     <span id="guide-badge" style="display:none">!</span>
+  </div>
+</div>
+
+<!-- ═══ Banner de boas-vindas (primeira abertura) ═══ -->
+<div id="welcome-banner" style="display:none">
+  <div id="welcome-backdrop" onclick="closeWelcomeBanner()"></div>
+  <div id="welcome-card">
+    <div id="welcome-header">
+      <svg viewBox="0 0 120 120" width="80" height="80" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="wm-gold" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#ffd54f"/><stop offset="100%" stop-color="#f9a825"/>
+          </linearGradient>
+          <linearGradient id="wm-gold2" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#fff3c4"/><stop offset="100%" stop-color="#ffd54f"/>
+          </linearGradient>
+          <linearGradient id="wm-grn" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#66bb6a"/><stop offset="100%" stop-color="#a5d6a7"/>
+          </linearGradient>
+        </defs>
+        <g>
+          <rect x="88" y="84" width="7" height="22" rx="3" fill="url(#wm-grn)"/>
+          <rect x="98" y="72" width="7" height="34" rx="3" fill="url(#wm-grn)"/>
+          <rect x="108" y="60" width="7" height="46" rx="3" fill="url(#wm-grn)"/>
+        </g>
+        <g>
+          <circle cx="56" cy="60" r="44" fill="#00695c"/>
+          <circle cx="56" cy="60" r="44" fill="none" stroke="url(#wm-gold)" stroke-width="8"/>
+          <circle cx="56" cy="60" r="33" fill="none" stroke="url(#wm-gold2)" stroke-width="1.5" opacity=".55"/>
+          <circle cx="42" cy="50" r="6" fill="#fff"/><circle cx="70" cy="50" r="6" fill="#fff"/>
+          <circle cx="44" cy="51" r="3" fill="#1a1a1a"/><circle cx="72" cy="51" r="3" fill="#1a1a1a"/>
+          <path d="M 42 68 Q 56 80 70 68" fill="none" stroke="url(#wm-gold)" stroke-width="4" stroke-linecap="round"/>
+          <text x="56" y="98" text-anchor="middle" font-family="Georgia,serif" font-size="15" font-weight="700" fill="url(#wm-gold)" opacity=".9">C$</text>
+        </g>
+      </svg>
+      <h2>Bem-vindo(a) ao Cruzeiro! 🎉</h2>
+      <p>Oi, eu sou a <strong>Moedinha</strong> — vou te ajudar a começar com o pé direito. Antes de mais nada, dois passos rápidos:</p>
+    </div>
+    <div id="welcome-body">
+      <div class="welcome-step">
+        <span class="welcome-step-num">1</span>
+        <div class="welcome-step-text">
+          <strong>Crie suas contas</strong>
+          <p>Banco, cartão de crédito, dinheiro em espécie — cada fonte de dinheiro vira uma conta.</p>
+          <a onclick="closeWelcomeBanner();openNewAccount()">+ Criar conta agora</a>
+        </div>
+      </div>
+      <div class="welcome-step">
+        <span class="welcome-step-num">2</span>
+        <div class="welcome-step-text">
+          <strong>Organize suas categorias</strong>
+          <p>Ajuste ou crie categorias e subcategorias do jeito que fizer sentido pra sua vida financeira.</p>
+          <a onclick="closeWelcomeBanner();goPage('categories')">🏷 Ver categorias</a>
+        </div>
+      </div>
+      <div class="welcome-divider">
+        <span>⚠️ Antes de importar dados ou lançar transações, vá em <strong>Configurações</strong> e:</span>
+      </div>
+      <div class="welcome-step">
+        <span class="welcome-step-num">i</span>
+        <div class="welcome-step-text">
+          <strong>Escolha onde guardar seus dados</strong>
+          <p>Prefira uma pasta sincronizada em nuvem (Dropbox, Google Drive, OneDrive) — assim você não corre o risco de perder tudo por um problema no computador.</p>
+        </div>
+      </div>
+      <div class="welcome-step">
+        <span class="welcome-step-num">ii</span>
+        <div class="welcome-step-text">
+          <strong>Defina uma senha de acesso</strong>
+          <p>Opcional, mas criptografa seus dados — recomendado se você guarda o arquivo em algum serviço de nuvem.</p>
+        </div>
+      </div>
+      <div class="welcome-step">
+        <span class="welcome-step-num">iii</span>
+        <div class="welcome-step-text">
+          <strong>Registre sua chave de IA</strong>
+          <p>Necessária para usar o "Lançar com IA" e a categorização automática por inteligência artificial.</p>
+        </div>
+      </div>
+      <div class="welcome-step">
+        <span class="welcome-step-num">iv</span>
+        <div class="welcome-step-text">
+          <strong>Faça login do App Mobile</strong>
+          <p>Use o mesmo usuário e senha cadastrados no site para sincronizar com o Cruzeiro no seu celular (iPhone ou Android).</p>
+        </div>
+      </div>
+      <a class="welcome-settings-link" onclick="closeWelcomeBanner();goPage('backup')">⚙️ Ir para Configurações agora</a>
+    </div>
+    <div id="welcome-footer">
+      <button onclick="closeWelcomeBanner()">Entendi, vamos começar! 🚀</button>
+    </div>
   </div>
 </div>
 

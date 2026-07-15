@@ -13736,13 +13736,26 @@ async function checkFirstRun() {
   try {
     const s = await ff.settingsGet();
     if (!s.tourDone) {
-      // Novo fluxo: em vez do tour em etapas, a Moedinha se apresenta
-      guideFirstRun();
+      // Primeira abertura: banner de boas-vindas (modal grande, visual) em
+      // vez do tour em etapas antigo ou do balão pequeno da Moedinha —
+      // ensina os passos iniciais de configuração de uma vez só.
+      showWelcomeBanner();
+      guideInit(); // Moedinha já fica disponível minimizada no canto por trás do banner
       await ff.settingsSave({ ...s, tourDone: true });
     } else {
       guideInit(); // aparece minimizado no canto, sem incomodar
     }
   } catch(e) {}
+}
+
+// ── Banner de boas-vindas (primeira abertura do app) ──────────────────────
+function showWelcomeBanner() {
+  const el = G('welcome-banner');
+  if (el) el.style.display = '';
+}
+function closeWelcomeBanner() {
+  const el = G('welcome-banner');
+  if (el) el.style.display = 'none';
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -13841,9 +13854,9 @@ const GUIDE_PAGES = {
   },
   aposentadoria: {
     title: 'Aposentadoria',
-    intro: 'Planeje sua independência financeira com projeções realistas. 🏖️',
+    intro: 'Planeje sua independência financeira com projeções realistas — antes e depois de se aposentar. 🏖️',
     checks: [
-      { label: 'Configurar o plano', tip: 'Preencha idade, patrimônio-alvo (ou renda desejada) e taxa real — o app calcula quanto poupar por mês.',
+      { label: 'Configurar o plano', tip: 'Preencha idade, patrimônio-alvo (ou renda desejada) e taxa real — o app calcula quanto poupar por mês. Veja o toggle "📉 Pós-Aposentadoria" no topo pra simular o consumo do patrimônio depois de parar de trabalhar.',
         done: () => _guideState().visitedApos === true },
     ],
   },
@@ -14349,6 +14362,29 @@ const GUIDE_TIPS = {
       </ul>
       <p>💡 Com o tempo, a parte do "rendimento do patrimônio" cresce e passa a fazer a maior parte do trabalho — é exatamente esse ponto de virada, quando o rendimento sozinho já cobre tudo que você precisa (inclusive suas despesas, depois de aposentado), que marca a "aposentadoria financeira" de verdade.</p>
       <p>A coluna <strong>"% da meta"</strong> mostra o quanto do patrimônio-alvo você já atingiu (real, nos anos passados; projetado, nos futuros) em cada ano.</p>` },
+
+    { q: 'O que é a visão "📉 Pós-Aposentadoria"?',
+      a: `<p>É a visão espelhada: em vez de simular <strong>quanto poupar até se aposentar</strong>, ela simula <strong>quanto tempo o patrimônio dura DEPOIS</strong> — o consumo dele, mês a mês, já sem mais aportes do seu trabalho.</p>
+      <p>Use o toggle no topo da aba pra alternar entre as duas visões ("🚀 Rumo à Aposentadoria" e "📉 Pós-Aposentadoria") a qualquer momento — são cálculos independentes, cada um com seus próprios campos.</p>
+      <p>Os campos aqui são: idade inicial, <strong>patrimônio inicial</strong> (com atalho "usar atual", que puxa direto da aba Patrimônio), <strong>juros reais</strong> esperados, <strong>renda não financeira mensal</strong> (aluguel, pensão, etc.), <strong>idade limite</strong> (até quando o dinheiro precisa durar) e <strong>despesa mensal esperada</strong>.</p>` },
+
+    { q: 'Como funciona o botão 🧮 ao lado de alguns campos na Pós-Aposentadoria?',
+      a: `<p>Exatamente <strong>3 campos</strong> podem ser calculados automaticamente pelo app, um de cada vez: <strong>renda não financeira</strong>, <strong>idade limite</strong> e <strong>despesa mensal</strong>. Clique no 🧮 ao lado do campo que você quer que o app descubra — os outros dois viram entrada manual.</p>
+      <p>Exemplo: se você já sabe quanto pretende gastar por mês e até que idade quer que o dinheiro dure, marque "idade limite" ou "despesa mensal" como calculável (o que sobrar) e o app resolve pra você.</p>
+      <p><strong>Patrimônio inicial</strong> e <strong>juros reais</strong> nunca entram nessa rotação — são sempre informados manualmente, já que são o ponto de partida do cálculo, não uma incógnita.</p>
+      <p>💡 O campo marcado pra cálculo fica travado (não dá pra digitar nele) — se tentar clicar, o rótulo "chacoalha" pra lembrar que ele é o resultado, não a entrada.</p>` },
+
+    { q: 'O que é o "Patrimônio desejado na idade limite" e como preencher?',
+      a: `<p>É quanto você quer que <strong>sobre</strong> de patrimônio quando chegar na idade limite — pode ser uma herança que quer deixar, uma reserva de segurança, ou simplesmente <strong>0</strong>, se não houver problema em consumir tudo.</p>
+      <p>Tem duas formas de definir esse valor:</p>
+      <ul>
+        <li><strong>Digitar direto</strong> um valor em reais no campo.</li>
+        <li><strong>"Ou selecione ativos específicos a preservar"</strong>: em vez de digitar um número, você escolhe bens e direitos concretos da aba Patrimônio (um imóvel, uma reserva de emergência específica) que NÃO devem ser consumidos — o app soma o valor deles automaticamente e usa como meta.</li>
+      </ul>` },
+
+    { q: 'O que significa "Escolher quais bens e direitos geram renda"?',
+      a: `<p>Ao lado do patrimônio inicial, esse link deixa você marcar ativos da aba Patrimônio que já geram (ou vão gerar) renda própria — um imóvel alugado, por exemplo. Ativos marcados entram no cálculo como fonte adicional de renda, complementando a "renda não financeira mensal" e reduzindo o quanto o patrimônio financeiro puro precisa render pra bancar suas despesas.</p>
+      <p>💡 Marcar/desmarcar um ativo aqui atualiza o patrimônio inicial e o cálculo na hora — não precisa apertar nenhum botão de "recalcular".</p>` },
   ],
 
   categories: [

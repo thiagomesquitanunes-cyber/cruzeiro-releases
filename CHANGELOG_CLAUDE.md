@@ -12,6 +12,50 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 (continuação 2) — Moedinha ensina Pós-Aposentadoria + banner de boas-vindas
+
+### Moedinha: conteúdo sobre "Pós-Aposentadoria"
+`GUIDE_PAGES.aposentadoria` (`src/renderer.js:13842`) e `GUIDE_TIPS.aposentadoria`
+(`src/renderer.js:14326`) atualizados. A visão "📉 Pós-Aposentadoria" (drawdown,
+implementada em sessão anterior) não tinha nenhum conteúdo educativo na
+Moedinha ainda. Adicionadas 4 novas perguntas no cardápio de dicas: o que é
+a visão, como funciona o botão 🧮 de campo calculável (só 1 de 3 por vez:
+renda não financeira / idade limite / despesa mensal), como preencher o
+"Patrimônio desejado na idade limite" (digitar ou selecionar ativos a
+preservar), e o que faz "Escolher quais bens e direitos geram renda".
+Termos usados batem exatamente com os rótulos da UI (conferido em
+`src/index.html:1747-1808`).
+
+### Banner de boas-vindas (primeira abertura)
+Antes, a primeira abertura do app só disparava `guideFirstRun()` — um
+balão de chat pequeno da Moedinha no canto, com uma mensagem fixa de
+3 passos. Pedido do usuário: um banner maior, visual, usando as cores do
+app e a imagem da Moedinha, cobrindo além dos passos básicos (criar conta,
+criar categoria) também as 4 configurações iniciais recomendadas antes de
+importar dados/lançar transações (pasta de dados em nuvem, senha de
+acesso, chave de IA, login do app mobile).
+
+- `src/index.html`: novo bloco `#welcome-banner` (modal centralizado,
+  backdrop escurecido, SVG grande da Moedinha reaproveitado do
+  `#guide-mascot`, cards numerados 1/2 e i-iv, link direto pra
+  Configurações). CSS correspondente logo após o CSS existente da
+  Moedinha.
+- `src/renderer.js`: `checkFirstRun()` agora chama `showWelcomeBanner()`
+  no lugar de `guideFirstRun()` na primeira execução (a Moedinha
+  continua disponível minimizada no canto por trás do banner, via
+  `guideInit()`, sem precisar do balão de apresentação — ficaria
+  redundante). Novas funções `showWelcomeBanner()`/`closeWelcomeBanner()`.
+  `guideFirstRun()` continua existindo no código (não removida), só não é
+  mais chamada no boot — pode ser removida numa limpeza futura se
+  confirmado que não há mais uso.
+- Testado ao vivo via CDP (reset temporário de `tourDone` no
+  `_settings.json` local, screenshot do banner completo, restaurado ao
+  final) — renderiza corretamente, scroll interno funciona, todos os
+  links de ação (criar conta, ver categorias, ir pra Configurações)
+  presentes.
+
+---
+
 ## 2026-07-15 (continuação) — Limpeza do histórico git + fim da remediação do vazamento
 
 Sequência final da remediação do vazamento da service_role key (ver
