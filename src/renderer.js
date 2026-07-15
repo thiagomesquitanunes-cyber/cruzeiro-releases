@@ -11969,7 +11969,7 @@ async function refreshML() {
     if (!groups[k].length) return;
     html+=`<div style="margin-bottom:16px"><div style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><span style="width:10px;height:10px;border-radius:50%;background:${color};display:inline-block"></span><strong style="font-size:13px">${lbl}</strong><span style="font-size:12px;color:var(--text3)">${groups[k].length} regra${groups[k].length>1?'s':''}</span></div>
     <div class="tbl-card"><div class="tbl-outer"><table class="ledger"><thead><tr><th>Palavra-chave</th><th>Memorando</th><th>Categoria</th><th class="center">Usos</th><th class="right">Valor médio</th><th></th></tr></thead><tbody>
-    ${groups[k].slice(0,20).map(r=>{
+    ${groups[k].map(r=>{
       const mean=r.n_val>0?fmtBRL(r.sum_val/r.n_val):'—';
       const kw = esc(r.keyword).replace(/'/g,"\\'");
       return `<tr>
@@ -16259,18 +16259,23 @@ function renderBudgetCharts(ctx) {
   _budgetCharts = {};
 
   if (_budgetChartMode === 'single') {
-    renderBudgetSingleMonth(all, actualFor, effLimitOf);
+    renderBudgetSingleMonth(all, actualFor);
   } else {
     renderBudgetSeries(all, actualFor, effLimitOf, byMonth);
   }
 }
 
-function renderBudgetSingleMonth(budgets, actualFor, effLimitOf) {
+function renderBudgetSingleMonth(budgets, actualFor) {
   const month = _budgetChartMonth;
   const grid  = G('budget-charts-grid');
 
+  // planned = SEMPRE b.monthly_limit puro (sem rollover) — mesma base que
+  // a tabela usa pro "% atual" (renderBudgetTable/catRow). effLimitOf
+  // inclui o saldo de rollover, que é só uma folga extra de meses
+  // anteriores; somá-lo aqui faria o % do gráfico divergir do % mostrado
+  // na tabela pra mesma categoria.
   const cardHtml = (b) => {
-    const planned = b._t === 'income' ? b.monthly_limit : effLimitOf(b);
+    const planned = b.monthly_limit;
     const actual  = actualFor(b.category, month, b._t, b.consolidate_subs !== 0);
     const pct     = planned > 0 ? (actual / planned * 100) : 0;
     const color   = b._t === 'income'
@@ -16296,8 +16301,8 @@ function renderBudgetSingleMonth(budgets, actualFor, effLimitOf) {
   // esses valores prontos no registro; no desktop vêm de actualFor/
   // effLimitOf, que dependem do mês selecionado).
   const sortGroup = (arr) => [...arr].sort((a, b2) => {
-    const plannedA = a._t === 'income' ? a.monthly_limit : effLimitOf(a);
-    const plannedB = b2._t === 'income' ? b2.monthly_limit : effLimitOf(b2);
+    const plannedA = a.monthly_limit;
+    const plannedB = b2.monthly_limit;
     const actualA  = actualFor(a.category, month, a._t, a.consolidate_subs !== 0);
     const actualB  = actualFor(b2.category, month, b2._t, b2.consolidate_subs !== 0);
     const va = BUDGET_CHART_SORT_KEYS[_budgetChartSortBy](a, actualA, plannedA);

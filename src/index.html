@@ -494,6 +494,14 @@ table.ledger tbody tr.selected td{background:var(--accent-lt);}
 table.ledger tbody tr.future td{color:var(--future-text);background:var(--future-bg);}
 table.ledger tbody tr.future td .amt-exp{color:#f0a435 !important;}
 table.ledger tbody tr.future td .amt-inc{color:#4ade80 !important;}
+/* Selecionar uma linha "futura" (recorrência ainda não realizada) — a
+   regra .future acima tem a MESMA especificidade de table.ledger
+   tbody tr.selected td (linha ~491), então, empatadas, vencia quem
+   vem depois no arquivo (.future), fazendo o azul de seleção nunca
+   aparecer nas linhas futuras — que são a maioria em contas com muitas
+   recorrências. Esta regra, mais específica (2 classes), sempre vence
+   as duas de cima independente da ordem. */
+table.ledger tbody tr.future.selected td{background:var(--accent-lt);color:var(--text);}
 .future-divider td{
   background:var(--accent-bg) !important;
   padding:4px 10px;font-size:11px;font-weight:700;

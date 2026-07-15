@@ -12,6 +12,64 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 (continuação 7) — v4.77.1: lista de ML truncada, seleção em linhas futuras, gráficos de orçamento com rollover vazando
+
+### Aba Aprendizado ML mostrando bem menos regras que o total
+O card de estatísticas no topo já mostrava a contagem certa
+(`rules.length`), mas a listagem por grupo de confiança (alta/média/
+baixa) tinha um `.slice(0,20)` hardcoded — cada grupo só renderizava as
+20 primeiras regras, mesmo quando existiam muito mais. Removido o corte;
+a lista agora mostra todas as regras de cada grupo.
+
+### Seleção de transação não iluminava linhas "futuras"
+Achado ao investigar o relato de que Ctrl+clique pra multi-seleção
+"conta certo mas não ilumina": `table.ledger tbody tr.future td` e
+`table.ledger tbody tr.selected td` (CSS) têm a MESMA especificidade —
+empatadas, vence quem vem depois no arquivo, e `.future` vem depois de
+`.selected`. Resultado: qualquer linha futura (recorrência ainda não
+realizada — maioria numa conta com muitas recorrências) que fosse
+selecionada nunca ficava azul, mesmo com a seleção logicamente correta
+(contador certo, exclusão funcionando). Adicionada uma regra mais
+específica `tr.future.selected td` que sempre vence as duas de cima,
+independente da ordem no arquivo. Validado ao vivo via CDP: antes do
+fix, linha futura selecionada tinha fundo cinza (`--future-bg`); depois,
+fundo azul (`--accent-lt`) como qualquer outra linha selecionada.
+(A investigação também confirmou, via simulação de Ctrl realista com
+Input.dispatchKeyEvent segurando a tecla, que o mecanismo de
+multi-seleção em si já estava correto desde o fix anterior — o problema
+era só essa colisão de CSS.)
+
+### Gráficos do Orçamento usavam planejamento COM rollover (tabela usa sem)
+Bug introduzido pela própria feature de gráficos desta sessão: a tabela
+de Orçamento (`renderBudgetTable`/`catRow`) sempre calcula o "% atual"
+contra `b.monthly_limit` puro, de propósito — rollover é tratado como
+extra à parte, nunca somado no denominador do percentual (comentário já
+existente no código explicando essa decisão). Os gráficos novos
+(`renderBudgetSingleMonth`), porém, usavam `effLimitOf(b)` (que inclui o
+rollover) — fazendo o % de uma categoria com rollover ativo divergir
+entre tabela e gráfico pra mesma categoria/mês. Corrigido: gráficos
+agora usam `b.monthly_limit` puro também, igual à tabela. Validado ao
+vivo comparando a categoria "Carro" (rollover ativo): 4% em ambas as
+visões após o fix.
+
+### Decisão registrada: `npm run clean-data` NÃO roda antes de publicar
+O usuário pediu inicialmente pra rodar `clean-data` antes de toda
+publicação (medo de dados pessoais irem no build). Investigação:
+`build.files` no `package.json` (electron-builder) é uma allowlist
+explícita que não inclui a raiz do projeto onde ficam os dados, esses
+arquivos já estão no `.gitignore`, e o build de verdade roda via GitHub
+Actions com clone limpo — não há caminho real de vazamento. Como esta
+máquina usa o banco de dados REAL do usuário no dia a dia, rodar
+`clean-data` aqui apagaria dados reais pra proteger contra um risco que
+não existe. Decisão do usuário, ao ser confrontado com essa análise: não
+rodar automaticamente (ver memória permanente salva sobre isso).
+
+### Publicação
+Versão 4.77.0 → 4.77.1 (patch — só correções de bug). Arquivos:
+`src/index.html`, `src/renderer.js`.
+
+---
+
 ## 2026-07-15 (continuação 6) — v4.77.0: bug crítico de saldo (pernas de transferência apagadas), MA12 mobile, UX da tabela de transações e orçamento
 
 ### Bug crítico introduzido pela própria v4.76.2: pernas de transferência recorrente sendo apagadas
