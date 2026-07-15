@@ -97,7 +97,11 @@
         }
       ],
       "category": "public.app-category.finance",
-      "artifactName": "Cruzeiro-${version}-${arch}-mac.zip"
+      "artifactName": "Cruzeiro-${version}-${arch}-mac.zip",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "assets/entitlements.mac.plist",
+      "entitlementsInherit": "assets/entitlements.mac.plist"
     }
   }
 }

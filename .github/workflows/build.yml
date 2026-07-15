@@ -50,5 +50,18 @@ jobs:
       - name: Build & publish macOS
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+          # Assinatura de código (Developer ID Application) — obrigatório
+          # pra instalar sem aviso de "desenvolvedor não identificado".
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          # Notarização — dois métodos possíveis, o electron-builder usa
+          # o que estiver preenchido (API Key tem prioridade se ambos
+          # estiverem setados). Se nenhum estiver configurado, o build
+          # segue sem notarizar (assinado, mas sem o selo extra da Apple).
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: npm run publish:mac

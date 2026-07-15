@@ -12,6 +12,39 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-15 (continuação 3) — Preparação da assinatura de código macOS
+
+Usuário obteve conta paga de desenvolvedor Apple. Preparado (mas ainda
+NÃO ativo — falta o usuário cadastrar os secrets) o pipeline de
+assinatura + notarização do build macOS:
+
+- Gerado localmente (via openssl, já que a máquina é Windows): chave
+  privada + CSR → usuário fez upload no portal da Apple → baixou o
+  certificado "Developer ID Application: Thiago Mesquita Nunes
+  (5LRFP45LW2)" → convertido pra `.p12` (senha aleatória) → base64.
+  Entregue ao usuário em `C:\Users\tmnunes\Desktop\CruzeiroSigningSetup\`
+  (CSC_LINK.txt, CSC_KEY_PASSWORD.txt, LEIA-ME.txt com instruções) —
+  arquivos sensíveis, não versionados, o usuário deve apagar depois de
+  cadastrar como secrets no GitHub e depois de baixados.
+- `.github/workflows/build.yml`: job `build-macos` agora passa
+  `CSC_LINK`/`CSC_KEY_PASSWORD` (assinatura) e
+  `APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` OU
+  `APPLE_API_KEY`/`APPLE_API_KEY_ID`/`APPLE_API_ISSUER` (notarização,
+  qualquer um dos dois métodos — electron-builder detecta o que estiver
+  preenchido). Removido `CSC_IDENTITY_AUTO_DISCOVERY: false` (que
+  desativava a assinatura explicitamente).
+- `package.json` → `build.mac`: adicionado `hardenedRuntime: true`,
+  `gatekeeperAssess: false` e `entitlements`/`entitlementsInherit`
+  apontando pro novo `assets/entitlements.mac.plist` — exigências da
+  Apple pra notarização funcionar.
+- **Pendente do usuário**: cadastrar os secrets no GitHub (ver
+  LEIA-ME.txt) e escolher entre os dois métodos de notarização (senha
+  de app específica — mais fácil de achar — ou API Key do App Store
+  Connect). Só depois disso um novo `npm run publish` vai gerar o build
+  macOS já assinado/notarizado.
+
+---
+
 ## 2026-07-15 (continuação 2) — Moedinha ensina Pós-Aposentadoria + banner de boas-vindas
 
 ### Moedinha: conteúdo sobre "Pós-Aposentadoria"
