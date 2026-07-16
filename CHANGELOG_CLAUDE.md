@@ -12,6 +12,61 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-16 (continuação 15) — v4.78.2: push do sync não sobrescrevia dados errados no Supabase após trocar de conta/pasta de dados
+
+### O que aconteceu (relato do usuário)
+Usuário, sem querer, tinha a "Pasta de dados" apontando pro banco de
+teste ("Usuário Fake", criado numa sessão anterior pra tirar screenshots
+da App Store) e digitou o e-mail/senha da conta REAL dele em
+Configurações → App Mobile — isso empurrou os dados fake pro Supabase da
+conta real. Ao voltar a pasta de dados pro banco real e logar de novo com
+o mesmo e-mail/senha, esperando que o sync sobrescrevesse os dados fake
+com os reais, **o sync não substituía nada** — os dados fake continuavam
+lá.
+
+### Causa raiz
+`sync-push.js` usa um cache de hash por tabela (`_sync_hashes.json`,
+salvo do lado do arquivo do banco local) pra não reenviar dados que não
+mudaram desde o último push — otimização de egress. Esse cache só sabe
+"os dados LOCAIS mudaram desde a última vez que ESTE banco local fez
+push?" — ele não tem noção de qual conta Supabase (`user_id`) recebeu
+aquele push. Sequência exata do bug:
+1. Com a pasta de dados no banco fake, o push usa o hash-cache DAQUELE
+   banco (arquivo físico diferente) — vazio/novo, então envia tudo pro
+   Supabase da conta real.
+2. Ao voltar a pasta de dados pro banco real, o push volta a usar o
+   hash-cache DO BANCO REAL — que já existia de sincronizações
+   anteriores (antes do imprevisto), com o hash dos dados reais.
+3. Como os dados reais LOCAIS não mudaram desde a última vez que o banco
+   real sincronizou (o problema todo aconteceu só com o banco fake), o
+   hash bate → `hasChanged()` diz "nada mudou" → o push inteiro é
+   pulado, silenciosamente — os dados fake continuam intactos no
+   Supabase.
+
+Esse bug pode acontecer com QUALQUER troca de identidade Supabase (troca
+de pasta de dados, troca de usuário local do Desktop, ou até o "trocar de
+usuário" do mobile implementado nesta mesma sessão) sempre que os dados
+locais do lado que "volta" não tiverem mudado desde o último push
+legítimo deles.
+
+### Fix
+`initHashCache(dbPath, userId)` (`sync-push.js`) agora recebe também o
+`userId` (já disponível em `pushAll`, vem de `sb.getUserId()`) e guarda
+esse id dentro do próprio cache (`_hashCache.__userId`). Se o `userId` do
+push atual for diferente do que está gravado no cache (incluindo caches
+antigos, de antes desse fix, que nunca guardaram `__userId` —
+tratados como "diferente" por segurança), o cache inteiro é descartado
+antes de continuar — força um reenvio completo de todas as tabelas, que
+já sobrescreve (upsert) e limpa (`pruneNotIn`) qualquer resquício da
+sincronização errada. Autocorretivo: não exige apagar arquivo nenhum
+manualmente — a primeira sincronização depois de atualizar pra essa
+versão já resolve sozinha.
+
+### Arquivos tocados
+`src/sync/sync-push.js` (`initHashCache`, chamada em `pushAll`).
+
+---
+
 ## 2026-07-16 (continuação 14) — v4.78.1: trocar de usuário no mobile + bug crítico de sessão Supabase cruzada entre usuários locais do Desktop
 
 ### O que foi pedido

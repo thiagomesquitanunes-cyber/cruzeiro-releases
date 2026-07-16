@@ -61,6 +61,13 @@ function _request(urlStr, { method = 'GET', body, token } = {}) {
       });
     });
 
+    // Sem isso, uma conexão que trava (rede instável, servidor não responde)
+    // deixa a Promise pendurada pra sempre — nem resolve nem rejeita — e
+    // como o sync roda toda a fila de pushAll() em sequência (await por
+    // tabela), UM request travado congela a sincronização inteira sem
+    // nenhum erro no log, dando a impressão de que "não está fazendo nada".
+    req.setTimeout(30000, () => req.destroy(new Error(`Supabase ${method} ${url.pathname} → timeout (30s)`)));
+
     req.on('error', reject);
     if (bodyStr) req.write(bodyStr);
     req.end();

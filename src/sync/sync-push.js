@@ -56,15 +56,41 @@ const fs     = require('fs');
 let _hashCachePath = null;
 let _hashCache     = {};
 
-function initHashCache(dbPath) {
+// userId é opcional (retrocompatibilidade com chamadores antigos) — quando
+// informado, protege contra o seguinte cenário real: o usuário troca a
+// "Pasta de dados" (ou o usuário local) e sincroniza um banco diferente
+// (ex: um usuário de teste/fake) com a MESMA conta Supabase por engano, e
+// depois volta pro banco/usuário certo. Como o cache de hash é só "os dados
+// LOCAIS mudaram desde o último push?", sem saber pra QUAL conta Supabase
+// aquele push foi feito, ele não percebia que o Supabase estava com os
+// dados errados (do banco de teste) — os dados locais corretos não tinham
+// mudado desde o ÚLTIMO push bem-sucedido deles mesmos, então o hash batia
+// e o push seguinte era pulado inteiro, deixando os dados errados intactos
+// na nuvem. Guardando o userId junto com o hash: se o próximo push for pra
+// uma conta DIFERENTE da última vez que este arquivo de cache foi escrito,
+// o cache inteiro é descartado — força reenvio completo, que já sobrescreve
+// (upsert) e limpa (pruneNotIn) qualquer resquício da sincronização errada.
+function initHashCache(dbPath, userId) {
   _hashCachePath = dbPath.replace('.db', '_sync_hashes.json');
   try {
     if (fs.existsSync(_hashCachePath)) {
       _hashCache = JSON.parse(fs.readFileSync(_hashCachePath, 'utf8'));
+    } else {
+      _hashCache = {};
     }
   } catch (e) {
     _hashCache = {};
   }
+  // "!== userId" (não só a checagem de mismatch) cobre também caches
+  // antigos, de antes desta correção existir, que nunca guardaram
+  // __userId — sem essa cobertura, um cache pré-existente "contaminado"
+  // (como o do usuário que gerou este fix) nunca seria invalidado
+  // automaticamente, exigindo apagar o arquivo manualmente.
+  if (userId && _hashCache.__userId !== userId) {
+    console.log('[sync:push] conta Supabase mudou (ou cache antigo sem identidade registrada) — forçando reenvio completo');
+    _hashCache = {};
+  }
+  if (userId) _hashCache.__userId = userId;
 }
 
 function saveHashCache() {
@@ -775,7 +801,7 @@ async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPa
   // Inicializa cache de hashes (persiste entre sessões para evitar re-envio
   // de dados que não mudaram — reduz drasticamente o Egress do Supabase).
   if (typeof getDbPath === 'function') {
-    initHashCache(getDbPath());
+    initHashCache(getDbPath(), userId);
   }
 
   const steps = [
