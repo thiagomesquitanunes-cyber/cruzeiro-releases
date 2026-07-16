@@ -6463,11 +6463,26 @@ async function confirmDupAndImport() {
   if (directReplaceRows.length) {
     G('bank-result').innerHTML = `<div class="info-box">⏳ Substituindo ${directReplaceRows.length} provisão(ões) de recorrência…</div>`;
     try {
-      await applyDirectReplacements(directReplaceRows, accountId, checkDailySaldo);
+      const { blocked } = await applyDirectReplacements(directReplaceRows, accountId, checkDailySaldo);
       directReplaceRows.forEach(({ row }) => {
         _importAudit?.accounted.push({ gi: row._gi, accountId: row.accountId ?? accountId, amount: row.amount, kind: 'replaced', memo: row.memo, dateISO: row.dateISO });
       });
-      toast(`🔄 ${directReplaceRows.length} provisão(ões) substituída(s) pelo valor real — nada a revisar nelas.`);
+      const okCount = directReplaceRows.length - (blocked?.length || 0);
+      if (okCount > 0) toast(`🔄 ${okCount} provisão(ões) substituída(s) pelo valor real — nada a revisar nelas.`);
+      // A provisão já estava conferida (ou foi removida/regenerada) entre a
+      // detecção da duplicata e agora — a linha do extrato NÃO foi
+      // inserida de propósito, pra não duplicar. Avisa explicitamente,
+      // já que "nada aconteceu" com essas linhas silenciosamente seria
+      // confuso (pareceria que a importação "sumiu" com elas).
+      if (blocked?.length) {
+        showConfirmDialog(
+          `${blocked.length} lançamento(s) não foram importados`,
+          `A provisão de recorrência correspondente já estava conferida (ou foi removida) quando a substituição rodou — importar de novo criaria duplicata, então essas linhas foram puladas:<br><br>` +
+          blocked.map(b => `• ${esc(fmtDate(b.date))} — ${esc(b.memo || '(sem memo)')} — ${esc(fmtBRL(b.amount))}`).join('<br>') +
+          `<br><br>Se algum desses lançamentos realmente falta, confira a conta e o Extrato manualmente.`,
+          'Entendi', false, true
+        ).catch(() => {});
+      }
     } catch(e) {
       toast('Erro ao substituir provisão: ' + e.message);
     }
@@ -6511,14 +6526,21 @@ async function applyDirectReplacements(directReplaceRows, accountId, checkDailyS
     });
     if (existingId) g.replaceIds.push(existingId);
   }
+  // Acumula os casos em que o backend não conseguiu apagar a provisão (já
+  // conferida entre o momento em que a duplicata foi detectada e agora) —
+  // nesses casos a linha NÃO foi inserida (pra não duplicar), então avisa
+  // o usuário em vez de deixar como se tivesse sido substituída normalmente.
+  const blocked = [];
   for (const [accId, g] of groups) {
     if (!g.rows.length) continue;
-    await ff.bankImport({
+    const result = await ff.bankImport({
       accountId: accId, rows: g.rows,
       checkDailySaldo: checkDailySaldo && accId === accountId,
       skipIds: [], dryRun: false, replaceIds: g.replaceIds,
     });
+    if (result?.blockedByReplace?.length) blocked.push(...result.blockedByReplace);
   }
+  return { blocked };
 }
 
 // ══════════════════════════════════════════════════════════════════════

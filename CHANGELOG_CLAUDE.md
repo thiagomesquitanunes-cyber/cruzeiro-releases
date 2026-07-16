@@ -12,6 +12,44 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-16 (continuação 11) — v4.77.5: "substituir provisão" duplicava lançamento quando a provisão já estava conferida
+
+### Causa raiz
+Usuário identificou o padrão exato: ao importar um extrato, quando o
+app detecta que uma linha bate com uma provisão de recorrência (ainda
+não conferida) e o usuário confirma "🔄 Substituir provisão", o
+backend (`bank:import`) tenta apagar a provisão antes de inserir a
+transação real. Um fix de sessão anterior já detectava quando esse
+DELETE não apagava nada (`db.getRowsModified() === 0` — ex: a provisão
+já tinha sido conferida nesse meio-tempo, protegida contra exclusão, OU
+já tinha sido regenerada com outro id), mas só logava um aviso no
+console — a transação nova era inserida DO MESMO JEITO, ficando
+duplicada ao lado da provisão antiga (agora órfã, já conferida).
+
+### Fix
+`bank:import` (main.js): `replaceIds` e `rows` são arrays PARALELOS
+(mesmo índice — ver `applyDirectReplacements` no renderer, que monta os
+dois juntos). Agora, quando o DELETE de um `replaceIds[k]` não apaga
+nada, a linha correspondente `rows[k]` é EXCLUÍDA da inserção (via
+`toInsertFiltered`), em vez de só logar um aviso — evita a duplicata na
+origem. O resultado retorna um novo campo `blockedByReplace` (data/
+memo/valor de cada linha bloqueada), e o renderer agora mostra um
+diálogo explicando ao usuário quais linhas não foram importadas e por
+quê (antes ficava silencioso — pareceria que a importação "esqueceu"
+essas linhas sem explicação).
+
+Validado ao vivo via IPC direto: um lançamento recorrente já conferido
+(`cleared=1`) usado como alvo de "substituir" — antes do fix teria
+duplicado; depois do fix, `inserted:0`, `blockedByReplace` populado
+corretamente, contagem de transações da conta inalterada, transação
+original intocada.
+
+### Publicação
+Versão 4.77.4 → 4.77.5 (patch — bug crítico de dados). Arquivos:
+`src/main.js`, `src/renderer.js`.
+
+---
+
 ## 2026-07-16 (continuação 10) — v4.77.4: card "Despesas vs. planejado" da Visão Geral divergindo do Orçamento + prep Windows Store
 
 ### Card "📉 Despesas vs. planejado" (Visão Geral) com o mesmo bug já corrigido no Orçamento

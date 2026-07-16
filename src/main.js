@@ -3117,28 +3117,49 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
   // Substituição de provisões de recorrência: antes de inserir a transação
   // REAL importada, remove a provisão correspondente (que tinha valor/data
   // apenas estimados). Sem isso, ou ficaria duplicado, ou ficaria o valor errado.
+  //
+  // `replaceIds` e `rows` (portanto `toInsert`, que preserva o índice
+  // original `i`) são arrays PARALELOS — replaceIds[k] é a provisão que a
+  // linha rows[k] deveria substituir (ver applyDirectReplacements no
+  // renderer, que monta os dois juntos, na mesma ordem). Isso permite
+  // linkar uma falha de exclusão à linha exata que ela deveria liberar.
   let replaced = 0;
+  const failedReplaceRowIdx = new Set();
   if (Array.isArray(replaceIds) && replaceIds.length) {
-    for (const rid of replaceIds) {
+    for (let k = 0; k < replaceIds.length; k++) {
+      const rid = replaceIds[k];
       try {
         db.run('DELETE FROM transactions WHERE id=? AND recurring_id IS NOT NULL AND cleared=0', [rid]);
-        // getRowsModified() confirma se o DELETE realmente apagou algo — sem
-        // isso, se a provisão já tivesse sido substituída/regenerada com
-        // outro id (ex: syncRecurringTxns rodou de novo entre o dry-run e a
+        // getRowsModified() confirma se o DELETE realmente apagou algo —
+        // sem isso, se a provisão já tivesse sido CONFERIDA (cleared=1,
+        // protegida contra exclusão) ou substituída/regenerada com outro
+        // id (ex: syncRecurringTxns rodou de novo entre o dry-run e a
         // confirmação), o DELETE virava um no-op silencioso (SQLite não
-        // reclama de WHERE sem match), mas a transação nova era inserida do
-        // mesmo jeito — resultando na provisão antiga + a nova, duplicadas.
+        // reclama de WHERE sem match) — mas a transação nova era inserida
+        // do mesmo jeito, resultando na provisão antiga (agora órfã) + a
+        // nova, duplicadas. Agora, quando isso acontece, a linha
+        // correspondente NÃO é inserida (a provisão já conferida já
+        // representa o lançamento real — inserir de novo duplicaria).
         if (db.getRowsModified() > 0) { replaced++; save(); }
-        else console.warn(`[bank:import] "substituir" não encontrou a provisão id=${rid} (pode já ter sido regenerada) — seguindo sem remover`);
+        else {
+          console.warn(`[bank:import] "substituir" não encontrou a provisão id=${rid} (já conferida ou removida) — pulando a linha correspondente pra não duplicar`);
+          failedReplaceRowIdx.add(k);
+        }
       } catch(e) {}
     }
   }
+  const blockedByReplace = failedReplaceRowIdx.size
+    ? toInsert.filter(t => failedReplaceRowIdx.has(t.i)).map(t => ({ date: t.date, memo: t.r.memo || t.r.desc || '', amount: t.r.amount }))
+    : [];
+  const toInsertFiltered = failedReplaceRowIdx.size
+    ? toInsert.filter(t => !failedReplaceRowIdx.has(t.i))
+    : toInsert;
 
   // Insert all approved rows
   let inserted = 0;
   db.run('BEGIN');
   try {
-    for (const { date, r } of toInsert) {
+    for (const { date, r } of toInsertFiltered) {
       db.run('INSERT INTO transactions (account_id,date,category,memo,amount,cleared) VALUES (?,?,?,?,?,0)',
         [accountId, date, r.category || '', r.memo || r.desc || '', r.amount]);
       inserted++;
@@ -3168,7 +3189,7 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
   }
 
   save();
-  return { inserted, replaced: (typeof replaced !== 'undefined' ? replaced : 0), duplicates: 0, dailyMismatches };
+  return { inserted, replaced: (typeof replaced !== 'undefined' ? replaced : 0), duplicates: 0, dailyMismatches, blockedByReplace };
 });
 
 function toISO(dmy) {
