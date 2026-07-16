@@ -98,6 +98,17 @@ async function initDB() {
     SQL = await initSqlJs();
   }
 
+  // _dbKey/_dbSalt são variáveis de módulo únicas, compartilhadas por TODOS
+  // os usuários locais deste Desktop. Sem resetar aqui, trocar para um
+  // usuário local cujo banco NÃO é criptografado herdava silenciosamente a
+  // chave do usuário anterior — e o próximo save() criptografava o banco em
+  // texto puro do novo usuário com a chave (e senha) de outra pessoa,
+  // tornando os dados dele inacessíveis pra ele mesmo. Se o banco desta
+  // conta FOR criptografado, o fluxo abaixo (_dbPendingDecrypt) já define
+  // um _dbKey novo e correto assim que a senha certa for informada.
+  _dbKey  = null;
+  _dbSalt = null;
+
   const dp = getDbPath();
   if (fs.existsSync(dp)) {
     const buf = fs.readFileSync(dp);
@@ -6161,6 +6172,11 @@ ipcMain.handle('users:select', async (_, { id }) => {
   _currentUserId = id || null;
   _loggingIn = true;
   if (selectUserWin) { selectUserWin.destroy(); selectUserWin = null; }
+  // sb._session é uma variável de módulo única, compartilhada por todos os
+  // usuários locais deste Desktop — sem limpar aqui, um usuário local que
+  // nunca configurou o sync mobile herdaria silenciosamente a sessão
+  // Supabase do usuário anterior (ver clearSession() em supabase-client.js).
+  sb.clearSession();
   try {
     await mainStartupFlow();
   } finally {

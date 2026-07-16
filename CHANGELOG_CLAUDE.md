@@ -12,6 +12,84 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-16 (continuação 14) — v4.78.1: trocar de usuário no mobile + bug crítico de sessão Supabase cruzada entre usuários locais do Desktop
+
+### O que foi pedido
+"O app mobile precisa permitir a troca de usuário (se o login tiver
+múltiplos usuários) nas configurações (exigindo a senha quando
+pertinente), e o sync precisa ocorrer sempre com o dado do usuário que se
+logar (no desktop ou no mobile)."
+
+### Mobile (iOS + Android — código compartilhado em app/ e src/)
+`src/hooks/useAuth.js`: nova lista `knownAccounts` (só e-mails, NUNCA
+senha/token, em `SecureStore` sob `cruzeiro_known_accounts`) de contas já
+usadas neste aparelho. Não mantemos sessões paralelas em memória — trocar
+de conta (`switchAccount(email, pwd)`) é sempre um `signOut()` limpo
+(tranca a chave de criptografia, apaga a senha guardada, desativa
+biometria da conta anterior) seguido de um `signIn()` novo, que SEMPRE
+pede a senha de novo. Isso é deliberado: evita ter que gerenciar múltiplos
+refresh tokens Supabase em paralelo (superfície de bug muito maior) e
+garante que nenhum estado da conta anterior (regras de ML, config de IA,
+chave de criptografia) sobrevive pra sessão nova, já que `loadUserData()`
+dentro de `signIn()` recarrega tudo do zero.
+
+`app/(tabs)/configuracoes.js`: card "Conta" ganhou lista "Trocar de
+usuário" (contas conhecidas, exceto a atual, com botões Entrar/Esquecer) e
+"+ Adicionar outra conta" — formulário inline reaproveitando os estilos já
+usados pela edição da chave de IA.
+
+Investigação prévia (sem bugs encontrados, documentada pra não repetir a
+checagem): `_rules` (ml.js) e `_aiConfig` (ai.js) são caches em memória no
+nível do módulo, mas já são sobrescritos a cada `loadUserData()`/`signIn`
+— seguros. `_dataKey` (crypto-utils.js) já é travado por `lockDataKey()`
+no `signOut()` existente — seguro. Sem AsyncStorage nem React Query no
+projeto. Snapshot dos widgets de tela inicial é resetado na próxima vez
+que a Home carrega após a troca (pode ficar 1-2s desatualizado até o app
+reabrir — aceitável).
+
+### Desktop — bug crítico encontrado durante a investigação (não fazia
+### parte do pedido original, mas é exatamente o mesmo risco do lado desktop)
+
+Ao investigar "o sync precisa ocorrer sempre com o dado do usuário que se
+logar... no desktop", percebi que a troca de usuário LOCAL do Desktop
+(`users:select`, feature da v4.78.0) tinha o mesmo problema estrutural:
+duas variáveis de módulo ÚNICAS, compartilhadas por TODOS os usuários
+locais do mesmo Desktop, nunca eram resetadas ao trocar de usuário:
+
+1. **`sb._session`** (`sync/supabase-client.js`): se o usuário local pro
+   qual você trocasse nunca tivesse configurado o sync mobile (sem
+   `supabaseRefreshToken` salvo nas settings dele), `mainStartupFlow()`
+   simplesmente pulava o bloco de restauração de sessão — e a sessão
+   Supabase do usuário ANTERIOR ficava ativa. Qualquer sincronização
+   disparada nesse estado escreveria os dados financeiros do usuário
+   atual na conta Supabase de OUTRA PESSOA. Fix: novo `sb.clearSession()`
+   (limpa só em memória, sem chamar o endpoint de logout — não queremos
+   invalidar o refresh token do usuário anterior), chamado no início do
+   handler `users:select`, antes de `mainStartupFlow()`.
+2. **`_dbKey`/`_dbSalt`** (main.js — chave de criptografia do banco
+   LOCAL): se o usuário anterior tinha o banco protegido por senha
+   (`_dbKey` setado) e você trocasse para um usuário local cujo banco NÃO
+   é criptografado, `initDB()` nunca resetava essas variáveis — o próximo
+   `save()` criptografaria silenciosamente o banco em texto puro do novo
+   usuário usando a CHAVE (e senha) de outra pessoa, tornando os dados
+   dele inacessíveis pra ele mesmo. Fix: `initDB()` agora reseta
+   `_dbKey = null; _dbSalt = null;` logo no início, antes de checar se o
+   banco da conta atual está criptografado (se estiver, o fluxo de
+   `_dbPendingDecrypt` já define uma chave nova e correta assim que a
+   senha certa é informada).
+
+Ambos os bugs só se manifestam com 2+ usuários locais no mesmo Desktop
+(feature nova da v4.78.0) — não afetam quem usa um único usuário
+"Principal", que é o caso da esmagadora maioria dos usuários atuais.
+
+### Arquivos tocados
+- `Cruzeiro iOS` / `Cruzeiro Android` (espelhados): `src/hooks/useAuth.js`,
+  `app/(tabs)/configuracoes.js`.
+- `Cruzeiro Desktop`: `src/sync/supabase-client.js` (`clearSession`),
+  `src/main.js` (`initDB()`, handler `users:select`).
+
+---
+
 ## 2026-07-16 (continuação 13) — v4.78.0: excluir usuário (multi-usuário do mesmo Desktop)
 
 ### O que foi pedido

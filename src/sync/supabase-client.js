@@ -117,6 +117,18 @@ function getSession() { return _session; }
 function getUserId()  { return _session?.user?.id || null; }
 function isLoggedIn() { return !!_session?.access_token; }
 
+// Descarta a sessão em memória SEM chamar o endpoint de logout do Supabase
+// (isso invalidaria o refresh token, derrubando o usuário do mobile também,
+// o que não é a intenção aqui). Usado só ao trocar de usuário local no
+// mesmo Desktop (ver users:select em main.js) — _session é uma variável de
+// módulo única, compartilhada por TODOS os usuários locais desse Desktop;
+// sem limpá-la explicitamente antes de tentar restaurar a sessão do novo
+// usuário, um usuário que nunca configurou o sync mobile (sem
+// supabaseRefreshToken) herdava silenciosamente a sessão do usuário
+// anterior, e uma sincronização nesse estado escreveria os dados dele na
+// conta Supabase de OUTRA pessoa.
+function clearSession() { _session = null; }
+
 // ─────────────────────────────────────────────────────────────
 // Operações REST
 // ─────────────────────────────────────────────────────────────
@@ -174,7 +186,7 @@ async function pruneNotIn(table, userId, column, currentValues) {
 }
 
 module.exports = {
-  login, logout, refreshSession,
+  login, logout, refreshSession, clearSession,
   getSession, getUserId, isLoggedIn,
   upsert, select, update, remove, pruneNotIn, removeOlderThan,
   SUPABASE_URL,
