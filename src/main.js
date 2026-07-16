@@ -6169,12 +6169,88 @@ ipcMain.handle('users:select', async (_, { id }) => {
   return { ok: true };
 });
 
+// Apaga TODOS os arquivos de dados de um usuário (banco + sidecars — todos
+// derivados de getDbPath() com sufixos diferentes: categorias, senha de
+// recuperação, backup de emergência, cache de hash do sync, etc.). Usa o
+// mesmo prefixo que doBackup() já usa pra distinguir os arquivos de cada
+// usuário na mesma pasta ("cruzeiro_data_<id>..." vs "cruzeiro_data...",
+// tomando cuidado pro usuário padrão não apagar os sidecars de um usuário
+// nomeado cujo prefixo também começa com "cruzeiro_data"). Backups (pasta
+// separada) e "_import_pending.json" (arquivo global, não tem sufixo de
+// usuário) são deliberadamente preservados — não fazem parte da "identidade"
+// do usuário, e apagar os backups removeria a única rede de segurança caso
+// a exclusão tenha sido um erro.
+function deleteUserDataFiles(id) {
+  const settings = loadSettings(id);
+  const base = settings.dataDir
+    ? settings.dataDir
+    : (app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..'));
+  if (fs.existsSync(base)) {
+    const prefix = id ? `cruzeiro_data_${id}` : 'cruzeiro_data';
+    fs.readdirSync(base).forEach(f => {
+      if (!f.startsWith(prefix)) return;
+      if (!id && /^_usr_/.test(f.slice(prefix.length))) return; // sidecar de outro usuário
+      try { fs.unlinkSync(path.join(base, f)); } catch(e) {}
+    });
+  }
+  try {
+    const sp = getSettingsPath(id);
+    if (fs.existsSync(sp)) fs.unlinkSync(sp);
+  } catch(e) {}
+}
+
+// Exclui definitivamente o usuário ATUALMENTE LOGADO (nunca outro — sem
+// isso, bastaria conhecer o id de outro usuário registrado neste mesmo PC
+// pra apagar os dados dele sem saber a senha). Exige a senha do usuário se
+// ele tiver uma configurada (mesma checagem usada em settings:set-password).
+ipcMain.handle('users:delete', (_, { id, password }) => {
+  if (id !== _currentUserId) {
+    return { ok: false, error: 'Só é possível excluir o usuário que está logado no momento.' };
+  }
+  const s = loadSettings();
+  if (_dbKey || s.passwordHash) {
+    if (_dbKey) {
+      const dp = getDbPath();
+      if (fs.existsSync(dp) && isDBEncrypted(dp)) {
+        try {
+          decryptDBWithPassword(fs.readFileSync(dp), password || '');
+        } catch(e) {
+          return { ok: false, error: 'Senha incorreta' };
+        }
+      }
+    } else if (s.passwordHash) {
+      if (hashPassword(password || '') !== s.passwordHash) {
+        return { ok: false, error: 'Senha incorreta' };
+      }
+    }
+  }
+
+  deleteUserDataFiles(id);
+
+  const registry = loadUserRegistry();
+  const remaining = registry.users.filter(u => u.id !== id);
+  if (remaining.length) {
+    saveUserRegistry({ users: remaining });
+  } else {
+    // Nenhum usuário restante — remove o registro inteiro. Sem o arquivo,
+    // loadUserRegistry() volta a assumir o único usuário "Principal"
+    // implícito, exatamente como numa instalação nova.
+    try {
+      const rp = getUserRegistryPath();
+      if (fs.existsSync(rp)) fs.unlinkSync(rp);
+    } catch(e) {}
+  }
+
+  return { ok: true };
+});
+
 ipcMain.handle('settings:get', () => {
   const s = loadSettings();
   return {
     hasPassword: !!s.passwordHash || !!s.hasEncryptedDB,
     dataDir: s.dataDir || null,
     tourDone: !!s.tourDone,
+    currentUserId: _currentUserId,
     benchmarks: s.benchmarks || null,
     hasRecoveryEmail: !!s.recoveryEmail,
     recoveryEmailMasked: s.recoveryEmail ? s.recoveryEmail.replace(/(.{2}).*(@.*)/, '$1***$2') : null,

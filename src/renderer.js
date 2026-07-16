@@ -17169,16 +17169,70 @@ async function syncRunNow() {
 async function renderUsersList() {
   const container = G('settings-users-list');
   if (!container) return;
-  const users = await ff.usersList().catch(() => []);
-  container.innerHTML = users.map(u => `
+  const [users, settings] = await Promise.all([
+    ff.usersList().catch(() => []),
+    ff.settingsGet().catch(() => ({})),
+  ]);
+  // "" (string vazia) representa o usuário padrão (id=null) num atributo HTML —
+  // não dá pra distinguir null de "não veio" num data-attribute, por isso o
+  // '' aqui e o `|| null` na leitura de volta em deleteUserPrompt/renameUserPrompt.
+  const currentId = settings.currentUserId ?? null;
+  container.innerHTML = users.map(u => {
+    const isCurrent = (u.id ?? null) === currentId;
+    const idAttr = u.id ?? '';
+    const nameAttr = esc(u.name).replace(/'/g,"\\'");
+    return `
     <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--bg3);border-radius:6px">
-      <span style="font-size:13px">👤 ${esc(u.name)} ${u.hasPassword ? '🔒' : ''}</span>
-      <button class="btn xs" onclick="renameUserPrompt('${u.id ?? ''}','${esc(u.name).replace(/'/g,"\\'")}')">✎ Renomear</button>
-    </div>`).join('');
+      <span style="font-size:13px">👤 ${esc(u.name)} ${u.hasPassword ? '🔒' : ''} ${isCurrent ? '<span style="color:var(--accent);font-weight:600">(você)</span>' : ''}</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn xs" onclick="renameUserPrompt('${idAttr}','${nameAttr}')">✎ Renomear</button>
+        ${isCurrent ? `<button class="btn xs danger" onclick="deleteUserPrompt('${idAttr}','${nameAttr}',${u.hasPassword})">🗑 Excluir</button>` : ''}
+      </div>
+    </div>`;
+  }).join('');
   const hint = G('settings-users-restart-hint');
   if (hint) hint.style.display = users.length > 1 ? '' : 'none';
   const switchRow = G('settings-switch-user-row');
   if (switchRow) switchRow.style.display = users.length > 1 ? '' : 'none';
+}
+
+// Exclusão definitiva do usuário ATUALMENTE LOGADO — nunca de outro (o botão
+// só aparece na própria linha, e o backend recusa qualquer id diferente do
+// que está logado). Dois alertas sequenciais sobre a definitividade da
+// exclusão, e senha obrigatória se o usuário tiver uma configurada — sem
+// isso, qualquer pessoa com acesso ao PC destrancado apagaria os dados de
+// outra pessoa que compartilha o mesmo Cruzeiro sem digitar nada.
+async function deleteUserPrompt(id, name, hasPassword) {
+  const uid = id || null;
+  const ok1 = await showConfirmDialog(
+    `Excluir usuário "${name}"?`,
+    'Isso apaga PERMANENTEMENTE todos os dados deste usuário neste computador: contas, transações, orçamentos, metas, patrimônio e configurações. Essa ação não pode ser desfeita.',
+    'Continuar', true
+  );
+  if (!ok1) return;
+  const ok2 = await showConfirmDialog(
+    'Tem certeza mesmo?',
+    `Última confirmação: os dados de "${name}" serão apagados definitivamente deste computador agora. Não há como recuperar depois.`,
+    'Sim, excluir definitivamente', true
+  );
+  if (!ok2) return;
+
+  let errorMsg = '';
+  while (true) {
+    let password = null;
+    if (hasPassword) {
+      password = await showPasswordPrompt('Confirme sua senha', `Digite a senha de "${name}" para concluir a exclusão.`, errorMsg);
+      if (password === null) return; // usuário cancelou o prompt de senha
+    }
+    const result = await ff.usersDelete({ id: uid, password }).catch(e => ({ ok: false, error: e.message }));
+    if (result?.ok) {
+      toast('Usuário excluído. Reiniciando…');
+      await ff.appRelaunch();
+      return;
+    }
+    if (!hasPassword) { toast('❌ ' + (result?.error || 'Erro ao excluir usuário')); return; }
+    errorMsg = result?.error || 'Senha incorreta';
+  }
 }
 
 async function switchUserNow() {

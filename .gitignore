@@ -25,6 +25,8 @@ dist-ssr
 
 # Dados pessoais e segredos — NUNCA versionar
 _settings.json
+_settings_*.json
+_users_registry.json
 _bank_parsers.json
 _broker_mappings.json
 cruzeiro_data.db

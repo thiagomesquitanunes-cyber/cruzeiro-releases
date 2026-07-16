@@ -186,6 +186,7 @@ const api = {
   usersAdd:            (d)   => ipcRenderer.invoke('users:add', d),
   usersRename:         (d)   => ipcRenderer.invoke('users:rename', d),
   usersSelect:         (d)   => ipcRenderer.invoke('users:select', d),
+  usersDelete:         (d)   => ipcRenderer.invoke('users:delete', d),
   evolucaoIpcaGet:    ()   => ipcRenderer.invoke('evolucao:ipca-get'),
   evolucaoIpcaSave:   (d)  => ipcRenderer.invoke('evolucao:ipca-save', d),
   evolucaoIpcaFetch:  ()   => ipcRenderer.invoke('evolucao:ipca-fetch'),

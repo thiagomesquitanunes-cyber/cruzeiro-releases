@@ -12,6 +12,82 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-16 (continuação 13) — v4.78.0: excluir usuário (multi-usuário do mesmo Desktop)
+
+### O que foi pedido
+"O app precisa permitir excluir um usuário criado (com 2 alertas sobre a
+definitividade da exclusão). Só permite excluir o usuário que estiver
+logado (para um usuário não excluir outro, sem a senha dele), e, ao
+excluir, o app reinicia."
+
+### Como funciona
+- Botão "🗑 Excluir" só aparece na PRÓPRIA linha do usuário logado, na
+  lista de usuários em Configurações (`renderUsersList()`, renderer.js
+  ~17168) — para isso, `settings:get` (main.js) passou a incluir
+  `currentUserId: _currentUserId` na resposta.
+- `deleteUserPrompt()` (renderer.js ~17198): 2 `showConfirmDialog()`
+  sequenciais avisando que a exclusão é permanente e irreversível; se o
+  usuário tiver senha configurada, pede a senha via `showPasswordPrompt()`
+  (com loop de nova tentativa em caso de senha errada); ao concluir,
+  chama `ff.appRelaunch()` — reaproveita o handler `app:relaunch` já
+  existente (usado pelo updater).
+- `ipcMain.handle('users:delete', ...)` (main.js ~6172): recusa
+  qualquer `id` diferente de `_currentUserId` (retorna erro sem apagar
+  nada) — é a proteção contra um usuário excluir outro. Verifica a
+  senha com a MESMA lógica já usada em `settings:set-password` (cobre
+  tanto o modo legado `passwordHash` quanto o DB criptografado via
+  `_dbKey`/`decryptDBWithPassword`). Se passar, chama
+  `deleteUserDataFiles(id)` e remove o usuário do `_users_registry.json`
+  (se não sobrar ninguém, apaga o registro inteiro — volta ao estado de
+  instalação nova).
+- `deleteUserDataFiles(id)` (main.js ~6172): apaga o banco e TODOS os
+  arquivos "sidecar" desse usuário (categorias, senha de recuperação,
+  backup de emergência, cache de hash do sync, etc. — todos derivados de
+  `getDbPath()` com sufixos diferentes) usando o mesmo padrão de prefixo
+  que `doBackup()` já usa pra não colidir entre usuários na mesma pasta
+  (usuário nomeado: prefixo `cruzeiro_data_<id>`; usuário padrão:
+  prefixo `cruzeiro_data` excluindo o que começa com `_usr_`, senão
+  apagaria sidecars de outros usuários nomeados). **Backups (pasta
+  separada) e `_import_pending.json` (arquivo global, sem sufixo de
+  usuário) são deliberadamente preservados** — não são "identidade" do
+  usuário, e apagar os backups tiraria a única rede de segurança em caso
+  de exclusão por engano.
+
+### Validação (CDP, contra o app real)
+1. Criado usuário de teste sem senha, confirmado tentativa de excluí-lo
+   estando logado como outro usuário → recusado corretamente
+   (`"Só é possível excluir o usuário que está logado no momento."`),
+   nada apagado.
+2. Trocado para o usuário de teste (`users:select`), confirmado
+   `settings:get().currentUserId` bate, excluído (`users:delete` →
+   `ok:true`), confirmado via `users:list()` (de outra janela) que ele
+   sumiu do registro.
+3. Confirmado no disco que o `.db` do usuário de teste foi realmente
+   apagado, e que os arquivos do usuário "Principal" (dados reais)
+   ficaram intocados o tempo todo.
+4. Observação: o app fica com estado inconsistente em memória
+   (`_currentUserId` aponta pra um usuário que acabou de deixar de
+   existir) até reiniciar — confirma que o `app.relaunch()` chamado
+   pelo fluxo real (`deleteUserPrompt()`) é necessário, não só
+   cosmético.
+5. Edge case observado (não corrigido, impacto nulo): se a exclusão
+   acontecer poucos segundos depois de logar num usuário novo, tarefas
+   de fundo do `mainStartupFlow` ainda em andamento (fetch de índices
+   de financiamento/benchmarks) podem recriar 1-2 arquivos json
+   pequenos e órfãos DEPOIS da exclusão. Não afeta o banco de dados em
+   si (que é sempre apagado com sucesso) e, no fluxo real, o
+   `app.exit(0)` do relaunch mata o processo antes disso acontecer na
+   prática (exclusão só é alcançável depois de navegar até
+   Configurações, o que já dá tempo de sobra pras tarefas de fundo
+   terminarem).
+
+### Arquivos tocados
+`src/main.js` (`settings:get`, `deleteUserDataFiles`, `users:delete`),
+`src/preload.js` (`usersDelete`), `src/renderer.js`
+(`renderUsersList`, `deleteUserPrompt`).
+
+---
+
 ## 2026-07-16 (continuação 12) — v4.77.6: transferência criada a partir de "Nova Transação" travava o modal e duplicava a transferência a cada clique
 
 ### Causa raiz (2 bugs compostos)
