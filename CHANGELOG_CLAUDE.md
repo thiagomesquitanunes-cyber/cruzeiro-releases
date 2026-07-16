@@ -12,6 +12,59 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-16 (continuação 12) — v4.77.6: transferência criada a partir de "Nova Transação" travava o modal e duplicava a transferência a cada clique
+
+### Causa raiz (2 bugs compostos)
+Usuário relatou: cria uma transação, escolhe categoria "⇄ Transferência:
+X", o modal de transferência abre, ao clicar em "Registrar" o modal não
+some; repetindo o clique algumas vezes e desistindo, o app tinha criado
+várias transferências idênticas (uma por clique).
+
+1. **Bug principal (o que realmente causava a duplicação)**:
+   `saveTransfer()` (renderer.js) já criava a transferência de verdade
+   via `ff.transfer()` com sucesso, mas em seguida crashava com
+   `TypeError: Cannot read properties of null` na checagem
+   `G('tr-import-row-idx')?.value !== ''` — o campo `tr-import-row-idx`
+   só existe no DOM depois que `openTransferFromImportRow()` roda pelo
+   menos uma vez na sessão (não existe estático no HTML); antes disso
+   `G(...)` retorna `null`, e `null?.value` vira `undefined`, que é
+   `!== ''` → entra no bloco e crasha em `importIdxField.value` (sem
+   `?.`) na linha seguinte. Como o crash acontecia DEPOIS do
+   `ff.transfer()` já ter sido concluído mas ANTES do
+   `toast()`/`closeModal('modal-transfer')`, o modal ficava
+   visualmente "preso" aberto e o botão voltava a ficar clicável (reset
+   no `finally`) — cada novo clique em "Registrar" criava uma
+   transferência real adicional, pois nada impedia uma nova tentativa
+   limpa. Fix: `if (importIdxField && importIdxField.value !== '')`.
+2. **Bug secundário (contribuía pra confusão visual)**: ao abrir o
+   modal de transferência a partir do campo de categoria de "Novo
+   Lançamento" (`openTransferFromCat`), o modal "Novo Lançamento"
+   (`modal-tx`) nunca era fechado — ficava aberto por baixo, mesmo
+   z-index. Ao fechar o modal de transferência (por sucesso ou
+   Cancelar), o "Novo Lançamento" reaparecia sozinho, ainda com
+   data/memo/valor preenchidos e a categoria mostrando o texto literal
+   "⇄ Transferência: X" — se o usuário salvasse esse formulário por
+   engano, criava um lançamento "fantasma" com essa categoria literal.
+   Fix: `openTransferFromCat` agora fecha `modal-tx` (sem os efeitos
+   colaterais de `closeModal()`, como interromper a fila de "Lançar com
+   IA") antes de abrir `modal-transfer`, e ele não reabre sozinho.
+
+### Arquivos/funções tocadas
+- `src/renderer.js`: `saveTransfer()` (~3661) — null-check corrigido;
+  `openTransferFromCat()` (~12578) — fecha `modal-tx` antes de abrir
+  `modal-transfer`.
+
+### Validação
+Testado ao vivo via CDP: `openTxModal()` → preencher
+data/memo/valor → `pickGlobalCat('⇄ Transferência: <conta>')` →
+`saveTransfer()`. Confirmado: `modal-tx` fecha ao escolher a
+categoria, `modal-transfer` fecha sozinho após salvar (sem crash),
+exatamente 1 par de transações de transferência criado (2 linhas,
+mesmo `transfer_id`), nenhum lançamento com categoria literal
+"⇄ Transferência: ..." criado.
+
+---
+
 ## 2026-07-16 (continuação 11) — v4.77.5: "substituir provisão" duplicava lançamento quando a provisão já estava conferida
 
 ### Causa raiz

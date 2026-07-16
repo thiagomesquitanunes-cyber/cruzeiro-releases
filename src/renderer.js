@@ -3659,7 +3659,7 @@ async function saveTransfer() {
   // e a exclui da lista que será enviada na confirmação final da importação,
   // eliminando qualquer chance de duplicação.
   const importIdxField = G('tr-import-row-idx');
-  if (importIdxField?.value !== '') {
+  if (importIdxField && importIdxField.value !== '') {
     const idx = parseInt(importIdxField.value);
     if (_importEditRows[idx]) {
       _importEditRows[idx]._transferDone = true; // sinaliza exclusão na hora de montar finalRows
@@ -12622,6 +12622,25 @@ function openTransferFromCat(destAcc) {
         G('modal-transfer')?.appendChild(hidField);
       }
       hidField.value = row.dataset.id || '';
+    }
+  }
+
+  // Se veio do campo de categoria do modal "Novo Lançamento" (tx-category),
+  // esse modal fica aberto por baixo do de transferência (mesmo z-index —
+  // quem fica visível é só quem tem a classe .open por último). Ao fechar o
+  // modal de transferência depois de registrar, o "Novo Lançamento" reaparecia
+  // por trás, ainda com data/memo/valor preenchidos e categoria literal
+  // "⇄ Transferência: X" — parecia que "o modal não fechou", e um novo clique
+  // em Salvar/Registrar criava um lançamento fantasma e/ou outra transferência
+  // duplicada. Fechamos o "Novo Lançamento" aqui (sem os efeitos colaterais de
+  // closeModal(), como interromper a fila de "Lançar com IA") pra deixar só um
+  // modal visível por vez, e ele não reabre sozinho depois.
+  if (_globalCatActiveInput?.id === 'tx-category') {
+    const txModal = G('modal-tx');
+    if (txModal?.classList.contains('open')) {
+      const focused = txModal.querySelector(':focus');
+      if (focused) focused.blur();
+      txModal.classList.remove('open');
     }
   }
 
