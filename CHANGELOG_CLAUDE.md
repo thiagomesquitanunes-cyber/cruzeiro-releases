@@ -12,6 +12,54 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-16 (continuação 10) — v4.77.4: card "Despesas vs. planejado" da Visão Geral divergindo do Orçamento + prep Windows Store
+
+### Card "📉 Despesas vs. planejado" (Visão Geral) com o mesmo bug já corrigido no Orçamento
+`renderDashBudgetGauges` (renderer.js) tinha DOIS problemas que faziam
+esse gauge divergir do gráfico/tabela da aba Orçamento pra mesma
+categoria/mês:
+1. `totalExpensePlanned` usava `effLimitOf(b)` (soma rollover ao
+   planejado) — a regra em toda a aba Orçamento é % sempre contra o
+   planejado MENSAL puro, rollover é exibido à parte, nunca somado
+   (mesmo bug já corrigido nos gráficos do Orçamento, task anterior
+   desta sessão).
+2. `actualFor` só somava `d.expenses` bruto — sem descontar
+   `d.income` (estornos/receita lançada na mesma categoria) — todo
+   resto do app usa o líquido (`expenses - income`).
+Corrigido: agora usa `b.monthly_limit` puro pro planejado e
+`actualFor` líquido (mesma fórmula da aba Orçamento). Validado ao
+vivo: os dois lugares agora mostram exatamente "R$ 54.834,74 de
+R$ 86.800,00 (63%)" pra despesas.
+
+### Preparação pra distribuição na Microsoft Store (Windows)
+Usuário confirmou (após pesquisa) que a Microsoft Store NÃO exige
+certificado de assinatura próprio (a Microsoft assina o pacote na
+certificação) e aceita conta de desenvolvedor Individual sem CNPJ.
+Adicionado suporte a build MSIX/AppX:
+- `package.json`: bloco `build.appx` com identidade placeholder
+  (`identityName`/`publisher`/`publisherDisplayName` — usuário precisa
+  preencher com os valores reais depois de reservar o nome "Cruzeiro"
+  no Partner Center). Novo script `build:winstore`
+  (`electron-builder --win appx`).
+- IMPORTANTE: `appx` NÃO foi adicionado à lista `win.target` (que seria
+  usada por `publish:win`/CI a cada release) — isso quebraria o build
+  de produção atual (.exe via GitHub Actions) tentando gerar o pacote
+  da Store com identidade placeholder a cada tag. O build da Store só
+  roda via `build:winstore`, isolado, quando explicitamente invocado.
+- Testado localmente: pipeline de geração do AppX funciona (ícone,
+  empacotamento, manifesto) até a etapa de assinatura — falta (a) a
+  identidade real do Partner Center e (b) o "Modo de Desenvolvedor" do
+  Windows ativado nesta máquina (o `makeappx.exe` vem dentro de um
+  pacote com links simbólicos, que o Windows só extrai com essa
+  permissão). Usuário sem documento físico pra verificação de
+  identidade no momento — pausado, retomar quando disponível.
+
+### Publicação
+Versão 4.77.3 → 4.77.4 (patch). Arquivos: `src/renderer.js`,
+`package.json`.
+
+---
+
 ## 2026-07-16 (continuação 9) — v4.77.3: bug crítico no orçamento mobile (budget_type nunca sincronizado) + throttle 1x/sessão
 
 ### `budget_type` nunca era enviado ao Supabase — bug crítico na aba Orçamento mobile

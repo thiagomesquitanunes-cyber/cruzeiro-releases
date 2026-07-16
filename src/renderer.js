@@ -2007,24 +2007,31 @@ async function renderDashBudgetGauges(byCatFull, monthStr) {
   const budgets = await ff.budgetList().catch(() => []);
   const incomeBudgets  = budgets.filter(b => b.type === 'income');
   const expenseBudgets = budgets.filter(b => b.type !== 'income');
-  const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: monthStr }).catch(() => ({}));
-  const effLimitOf = b => b.monthly_limit + ((b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0);
 
+  // Mesma regra da aba Orçamento (renderBudgetTable/refreshBudget):
+  // % sempre contra o planejado MENSAL puro, sem rollover (rollover é
+  // uma folga de meses anteriores, exibida à parte, nunca somada aqui) —
+  // e o realizado é o saldo LÍQUIDO por categoria (despesa menos
+  // estorno/receita lançada nela, ou receita menos despesa lançada
+  // nela, dependendo do tipo). Antes este card usava effLimitOf
+  // (com rollover) pro planejado e só somava o lado bruto (sem
+  // descontar estorno) pro realizado — os dois faziam esse gauge
+  // divergir do gráfico/tabela da aba Orçamento pra mesma categoria/mês.
   const mo = byCatFull[monthStr] || {};
-  const actualFor = (category, type) => {
-    let total = 0;
+  const actualFor = (category, type, consolidate = true) => {
+    let income = 0, expenses = 0;
     Object.entries(mo).forEach(([rawCat, d]) => {
-      if (rawCat === category || rawCat.startsWith(category + ':')) {
-        total += type === 'income' ? (d.income||0) : (d.expenses||0);
+      if (rawCat === category || (consolidate && rawCat.startsWith(category + ':'))) {
+        income += d.income || 0; expenses += d.expenses || 0;
       }
     });
-    return total;
+    return type === 'income' ? (income - expenses) : (expenses - income);
   };
 
   const totalIncomePlanned  = incomeBudgets.reduce((s,b) => s + b.monthly_limit, 0);
-  const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + effLimitOf(b), 0);
-  const totalIncomeActual   = incomeBudgets.reduce((s,b) => s + actualFor(b.category, 'income'), 0);
-  const totalExpenseActual  = expenseBudgets.reduce((s,b) => s + actualFor(b.category, 'expense'), 0);
+  const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + b.monthly_limit, 0);
+  const totalIncomeActual   = incomeBudgets.reduce((s,b) => s + actualFor(b.category, 'income', b.consolidate_subs !== 0), 0);
+  const totalExpenseActual  = expenseBudgets.reduce((s,b) => s + actualFor(b.category, 'expense', b.consolidate_subs !== 0), 0);
 
   const pctInc = totalIncomePlanned  > 0 ? (totalIncomeActual  / totalIncomePlanned  * 100) : 0;
   const pctExp = totalExpensePlanned > 0 ? (totalExpenseActual / totalExpensePlanned * 100) : 0;

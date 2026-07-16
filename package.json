@@ -1,6 +1,6 @@
 {
   "name": "cruzeiro",
-  "version": "4.77.3",
+  "version": "4.77.4",
   "description": "Gestão financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
@@ -12,6 +12,7 @@
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
     "build:all": "electron-builder --win --mac",
+    "build:winstore": "electron-builder --win appx",
     "publish:win": "electron-builder --win --publish always",
     "publish:mac": "electron-builder --mac --publish always"
   },
@@ -44,6 +45,17 @@
         }
       ],
       "artifactName": "Cruzeiro-${version}-portable.exe"
+    },
+    "appx": {
+      "artifactName": "Cruzeiro-${version}.appx",
+      "applicationId": "Cruzeiro",
+      "displayName": "Cruzeiro",
+      "publisherDisplayName": "TODO.PreencherAposReservarNoPartnerCenter",
+      "identityName": "TODO.PreencherAposReservarNoPartnerCenter",
+      "publisher": "CN=TODO-PREENCHER-APOS-RESERVAR-NO-PARTNER-CENTER",
+      "backgroundColor": "#0d3b2e",
+      "showNameOnTiles": true,
+      "languages": ["pt-BR"]
     },
     "publish": {
       "provider": "github",
