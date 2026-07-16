@@ -245,8 +245,15 @@ async function pushBudgets(all, userId) {
     GROUP BY category
   `, [from, to]);
 
-  // Gasto líquido por orçamento, somando subcategorias (quando consolidate_subs)
-  // e descontando estornos — mesma regra da aba Orçamento do desktop.
+  // Gasto/recebido líquido por orçamento, somando subcategorias (quando
+  // consolidate_subs) e descontando estornos — mesma regra da aba
+  // Orçamento do desktop (actualFor em renderer.js). CRÍTICO: type-aware,
+  // igual ao desktop — para orçamento de DESPESA, líquido é
+  // gasto-recebido; para RECEITA, é recebido-gasto. Antes sempre
+  // calculava Math.max(0, spent-received) independente do tipo, o que
+  // pra uma categoria de receita (spent baixo, received alto) sempre
+  // dava zero (Math.max de um número bem negativo) — "Salário"/"Renda
+  // Financeira" apareciam com 0% realizado no mobile.
   const spentForBudget = (b) => {
     const consolidate = b.consolidate_subs !== 0;
     let spent = 0, received = 0;
@@ -256,13 +263,19 @@ async function pushBudgets(all, userId) {
         spent += r.spent || 0; received += r.received || 0;
       }
     });
-    return Math.max(0, spent - received);
+    return b.type === 'income' ? Math.max(0, received - spent) : Math.max(0, spent - received);
   };
 
   const rows = budgets.map(b => ({
     user_id:       userId,
     month,
     category:      b.category,
+    // budget_type: sem isso, o mobile não tinha como distinguir orçamento
+    // de receita vs despesa — tratava TODOS como despesa, o que inflava o
+    // "total planejado" (somava receita+despesa juntos) e escondia a
+    // seção de receitas por completo (o filtro budget_type==='income'
+    // nunca batia, já que o campo nunca chegava).
+    budget_type:   b.type || 'expense',
     monthly_limit: toCents(b.monthly_limit),
     spent:         toCents(spentForBudget(b)),
     alert_pct:     b.alert_pct || 80,

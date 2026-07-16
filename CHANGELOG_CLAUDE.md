@@ -12,6 +12,74 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-16 (continuação 9) — v4.77.3: bug crítico no orçamento mobile (budget_type nunca sincronizado) + throttle 1x/sessão
+
+### `budget_type` nunca era enviado ao Supabase — bug crítico na aba Orçamento mobile
+Usuário reportou: total planejado de despesas no mobile mostrando
+R$208.800 (desktop mostra corretamente R$86.800), e categorias de
+receita (Salário, Renda Financeira) sempre em 0%. Causa raiz:
+`pushBudgets` (sync-push.js) nunca incluía o campo `budget_type` na
+linha enviada — mesmo o código do mobile já esperando esse campo há
+tempo (comentário em `orcamento.js`: "O sync v2 envia também metas de
+RECEITA (budget_type='income')"). Sem esse campo, TODO orçamento
+(receita ou despesa) era tratado como despesa no mobile:
+- `expenseBudgets = budgets.filter(b => b.budget_type !== 'income')` —
+  como `budget_type` vinha `undefined`, a condição `undefined !== 'income'`
+  é sempre verdadeira, então orçamentos de receita entravam na lista de
+  despesas.
+- Total planejado somava despesas (R$86.800) + receitas (R$122.000) =
+  R$208.800 — bateu exatamente com o valor errado reportado.
+- `incomeBudgets` ficava sempre vazio (nunca via `budget_type==='income'`),
+  então a seção "Receitas" nunca aparecia.
+- Um segundo bug na mesma função: `spentForBudget` sempre calculava
+  `Math.max(0, spent-received)`, fórmula correta só pra despesa — pra
+  receita (spent baixo, received alto) isso sempre dava 0, explicando
+  o "0%" em Salário/Renda Financeira mesmo se o campo fosse corrigido.
+
+Corrigido: `pushBudgets` agora envia `budget_type: b.type || 'expense'`,
+e `spentForBudget` ficou type-aware (`received-spent` pra receita,
+`spent-received` pra despesa, igual ao `actualFor` do desktop). Validado
+com simulação direta contra o banco real antes de publicar — valores de
+"Contas" (R$10.861,28) e "Educação" (R$9.719,69) batendo com o desktop;
+os valores divergentes que o usuário via (R$2.507,08 e R$19.439,38,
+respectivamente) eram dado obsoleto no Supabase de antes deste fix — o
+push desta versão já força a correção (hash mudou, reenvio automático).
+
+### Mobile: card do topo da aba Orçamento agora mostra receitas também
+`orcamento.js` (Android + iOS): hero card antes só mostrava %/total de
+despesas. Adicionado bloco "Receitas" (rótulo, % e "recebido de
+planejado") no mesmo card, abaixo do de despesas — a separação
+receita/despesa nas categorias abaixo já existia no código mas nunca
+funcionava por causa do bug de `budget_type` acima.
+
+### Mobile: throttle de 20s trocado por "1x por sessão"
+Discussão com o usuário sobre egress: como o desktop só sincroniza no
+abrir/fechar/clique manual (nunca continuamente), o cooldown de 20s nas
+telas mobile (Home, Conta, Configurações, Evolução, Metas, Orçamento)
+quase nunca trazia dado realmente novo — só repetia leitura. Trocado
+por "carrega 1x por sessão do app" (recarrega só em mutação própria ou
+pull-to-refresh manual), reduzindo egress sem perder a atualização
+imediata após uma ação do usuário no próprio app.
+
+### Decisão registrada: diff por linha no push NÃO reduz egress
+Usuário sugeriu diff por linha (evitar reenviar tabela inteira a cada
+edição pontual) como próximo passo de egress. Investigação: o `upsert`
+do desktop já usa `Prefer: return=minimal` — a resposta do Supabase já
+é praticamente vazia independente do tamanho do payload enviado. Egress
+(dado que SAI do Supabase) vem das LEITURAS (`select`), não das
+escritas — então diff por linha no push não teria efeito relevante no
+egress medido. Adiado (task registrada, sem prioridade imediata).
+
+### Publicação
+Versão 4.77.2 → 4.77.3 (patch — inclui um bug crítico de dados, por
+isso não é minor apesar de mexer em bastante coisa). Arquivo:
+`src/sync/sync-push.js`. Mobile (Android/iOS): `app/(tabs)/orcamento.js`,
+`app/(tabs)/index.js`, `app/conta/[name].js`, `app/(tabs)/configuracoes.js`,
+`app/(tabs)/evolucao.js`, `app/(tabs)/metas.js` — publicado via
+`eas update --branch production`.
+
+---
+
 ## 2026-07-15 (continuação 8) — v4.77.2: reduz egress do Supabase (horizonte de 60 dias em `mobile_scheduled`)
 
 ### Contexto
