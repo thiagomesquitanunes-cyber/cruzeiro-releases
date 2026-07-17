@@ -3240,6 +3240,11 @@ function updateSelectionUI() {
   if (selectedRows.size > 0) {
     bar.classList.add('show');
     G('multi-count').textContent = `${selectedRows.size} selecionado${selectedRows.size>1?'s':''}`;
+    const sum = [...selectedRows].reduce((acc, id) => {
+      const tx = window._lastTxs?.find(t => t.id === id);
+      return acc + (tx ? tx.amount : 0);
+    }, 0);
+    G('multi-sum').textContent = `Soma: ${fmtBRL(sum)}`;
   } else {
     bar.classList.remove('show');
   }
@@ -16331,7 +16336,15 @@ function renderBudgetSingleMonth(budgets, actualFor) {
       : (pct > 110 ? '#ef5350' : pct >= 100 ? '#ef5350' : pct >= 80 ? '#f0a93a' : '#43a047');
     const id = `budget-gauge-${b._t}-${b.id}`;
     setTimeout(() => renderGoalGaugeCanvas(id, pct, color, _budgetCharts), 0);
-    return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:16px;display:flex;flex-direction:column;align-items:center;gap:10px">
+    // Mesmo padrão da tabela (catRow): clicável só quando há algo a mostrar,
+    // abrindo a mesma lista de transações consideradas no cálculo.
+    const [yy, mo] = month.split('-').map(Number);
+    const lastDay = new Date(yy, mo, 0).getDate();
+    const mFrom = `${month}-01`, mTo = `${month}-${String(lastDay).padStart(2,'0')}`;
+    const clickAttrs = actual !== 0
+      ? ` onclick="openCatDetail('${esc2(b.category)}','${mFrom}','${mTo}')" title="Clique para ver o que está sendo considerado"`
+      : '';
+    return `<div${clickAttrs} style="background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:16px;display:flex;flex-direction:column;align-items:center;gap:10px${actual !== 0 ? ';cursor:pointer' : ''}">
       <div style="font-size:12px;font-weight:700;text-align:center">${b._t==='income'?'📈':'📉'} ${esc(b.category)}</div>
       <div style="position:relative;width:120px;height:120px">
         <canvas id="${id}"></canvas>
@@ -16449,6 +16462,20 @@ function renderBudgetSeries(budgets, actualFor, effLimitOf, byMonth) {
         options: {
           responsive: true, maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
+          // Clique na barra "Realizado" abre a mesma lista de transações da
+          // tabela (openCatDetail), pro mês daquela barra especificamente —
+          // mesmo padrão de "clique pra ver o que está sendo considerado".
+          onClick: (evt, elements) => {
+            const el = elements.find(e => e.datasetIndex === 0);
+            if (!el || data[el.index] === 0) return;
+            const m = months[el.index];
+            const [yy2, mo2] = m.split('-').map(Number);
+            const lastDay2 = new Date(yy2, mo2, 0).getDate();
+            openCatDetail(b.category, `${m}-01`, `${m}-${String(lastDay2).padStart(2,'0')}`);
+          },
+          onHover: (evt, elements) => {
+            evt.native.target.style.cursor = elements.some(e => e.datasetIndex === 0) ? 'pointer' : 'default';
+          },
           plugins: {
             legend: { display: false },
             tooltip: { enabled: false, external: context => dashTooltip(context, {
@@ -17465,6 +17492,64 @@ function setupDateMask(input) {
   });
 }
 
+// Avaliador aritmético (+, -, *, /, parênteses) sem eval()/Function() — a
+// CSP do app (script-src sem 'unsafe-eval') bloqueia silenciosamente
+// qualquer Function()/eval em código real de página. O bug ficava invisível
+// em testes automatizados via CDP porque avaliação via DevTools Protocol é
+// isenta de CSP, dando falso positivo — só reproduzia com o usuário
+// digitando de verdade no app.
+function safeEvalArith(expr) {
+  let i = 0;
+  function skipSpaces() { while (i < expr.length && /\s/.test(expr[i])) i++; }
+  function parseNumber() {
+    const start = i;
+    while (i < expr.length && /[\d.]/.test(expr[i])) i++;
+    if (i === start) throw new Error('esperava número em ' + i);
+    return parseFloat(expr.slice(start, i));
+  }
+  function parseFactor() {
+    skipSpaces();
+    if (expr[i] === '(') {
+      i++;
+      const val = parseExpr();
+      skipSpaces();
+      if (expr[i] !== ')') throw new Error('esperava )');
+      i++;
+      return val;
+    }
+    if (expr[i] === '-') { i++; return -parseFactor(); }
+    if (expr[i] === '+') { i++; return parseFactor(); }
+    return parseNumber();
+  }
+  function parseTerm() {
+    let val = parseFactor();
+    skipSpaces();
+    while (expr[i] === '*' || expr[i] === '/') {
+      const op = expr[i]; i++;
+      const rhs = parseFactor();
+      val = op === '*' ? val * rhs : val / rhs;
+      skipSpaces();
+    }
+    return val;
+  }
+  function parseExpr() {
+    let val = parseTerm();
+    skipSpaces();
+    while (expr[i] === '+' || expr[i] === '-') {
+      const op = expr[i]; i++;
+      const rhs = parseTerm();
+      val = op === '+' ? val + rhs : val - rhs;
+      skipSpaces();
+    }
+    return val;
+  }
+  skipSpaces();
+  const result = parseExpr();
+  skipSpaces();
+  if (i !== expr.length) throw new Error('caracteres sobrando: ' + expr.slice(i));
+  return result;
+}
+
 function setupCurrencyInput(el, onChange) {
   if (!el || el.dataset.currencySetup) return;
   el.dataset.currencySetup = '1';
@@ -17476,7 +17561,7 @@ function setupCurrencyInput(el, onChange) {
     const clean = str.replace(/R\$\s*/g, '').replace(/\./g, '').replace(/,/g, '.').trim();
     if (!/^[\d\s\+\-\*\/\.\(\)]+$/.test(clean)) return null;
     try {
-      const val = Function('"use strict"; return (' + clean + ')')();
+      const val = safeEvalArith(clean);
       if (typeof val === 'number' && isFinite(val) && val >= 0) return Math.round(val * 100);
     } catch(e) {}
     return null;
@@ -17497,18 +17582,43 @@ function setupCurrencyInput(el, onChange) {
   }
 
   // Whether the current value looks like a math expression (contains operators)
-  function isMathMode() { return /[+\-*/]/.test(el.value.replace(/^R\$\s*/, '').replace(/^\s*-?\s*/, '')); }
+  function isMathMode() { return /[+\-*/(]/.test(el.value.replace(/^R\$\s*/, '').replace(/^\s*-?\s*/, '')); }
+
+  // Marca se o operando atual j\u00e1 passou pela convers\u00e3o caixa-eletr\u00f4nico\u2192
+  // literal (ver coment\u00e1rio abaixo). Reseta sempre que o campo sai do modo
+  // calculadora, pra pr\u00f3xima express\u00e3o ser convertida do zero.
+  let mathModeEntered = false;
 
   el.addEventListener('focus', () => {
     if (el.value === '' || el.value === 'R$\u00a00,00') el.value = 'R$\u00a00,00';
+    mathModeEntered = false;
     setTimeout(() => el.setSelectionRange(el.value.length, el.value.length), 0);
   });
 
   el.addEventListener('input', () => {
     // If value contains math operators, leave raw (don't reformat)
     const raw = el.value;
-    const hasMath = /[+\-*/]/.test(raw.replace(/^R\$[\s\u00a0]*/, ''));
-    if (hasMath) { if (onChange) onChange(); return; } // let user type freely, but still notify
+    const hasMath = /[+\-*/(]/.test(raw.replace(/^R\$[\s\u00a0]*/, ''));
+    if (hasMath) {
+      if (!mathModeEntered) {
+        // Primeira vez que um operador (ou "(") aparece: at\u00e9 aqui o campo
+        // formatou os d\u00edgitos como moeda "caixa eletr\u00f4nico" (ex: digitar "48"
+        // virou "R$ 0,48", d\u00edgitos empurrando os centavos). Mas numa express\u00e3o
+        // tipo "48+50" o usu\u00e1rio quer dizer literalmente 48, n\u00e3o 0,48 \u2014
+        // ent\u00e3o reconverte o primeiro operando pro valor inteiro que foi
+        // digitado antes de deixar o resto da express\u00e3o livre (sem m\u00e1scara).
+        mathModeEntered = true;
+        const opIdx = raw.search(/[+\-*/(]/);
+        const leadPart = raw.slice(0, opIdx);
+        const rest = raw.slice(opIdx);
+        const leadCents = toCents(leadPart);
+        el.value = (leadCents === 0 ? '' : String(leadCents)) + rest;
+        setTimeout(() => el.setSelectionRange(el.value.length, el.value.length), 0);
+      }
+      if (onChange) onChange();
+      return;
+    } // let user type freely, but still notify
+    mathModeEntered = false;
     // Formato "caixa eletrônico": todo dígito digitado entra pela direita,
     // empurrando os centavos. O cursor fica sempre no fim. Comprovamos
     // matematicamente que edição posicional no meio do valor é incompatível
@@ -24983,6 +25093,15 @@ async function aposSaveConfig() {
     apos_patAtual:   G('apos-patrimonio-atual')?.value || '',
     apos_rateReal:   G('apos-rate-real')?.value || '',
     apos_rateInfl:   G('apos-rate-infl')?.value || '',
+    // aposTglMode() dispara este save (via aposCalc()) e o de apos2SaveConfig()
+    // em paralelo, sem aguardar um pelo outro — ambos fazem leitura+escrita
+    // do mesmo arquivo, e o que escrever por último "vence". Sem incluir
+    // apos_mode aqui também, essa corrida podia fazer o modo salvo reverter
+    // sozinho pro valor antigo (ex: usuário troca pra "Rumo à Aposentadoria",
+    // mas na próxima vez que abre a aba volta pra "Pós-Aposentadoria") — os
+    // dois salvamentos concorrentes agora sempre escrevem o mesmo _aposMode
+    // atual, então não importa qual "vence" a corrida.
+    apos_mode:       _aposMode,
   };
   try {
     const cfg = await ff.overviewConfigGet().catch(() => null) || {};

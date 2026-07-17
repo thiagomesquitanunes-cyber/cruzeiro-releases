@@ -12,6 +12,73 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-17 — v4.79.0: 4 melhorias na aba Aposentadoria/Orçamento/Contas/lançamentos
+
+### Aposentadoria: view não "grudava" (voltava sempre pra pós-aposentadoria)
+Toda vez que o usuário reabria a aba Aposentadoria, ela ia sozinha pra
+visualização "📉 Pós-Aposentadoria", mesmo que a última escolhida tivesse
+sido "🚀 Rumo à Aposentadoria". Causa raiz: `aposTglMode()` dispara DOIS
+saves concorrentes sem aguardar um pelo outro — `apos2SaveConfig()`
+(direto) e `aposSaveConfig()` (via `aposCalc()`) — ambos persistem no
+MESMO arquivo (`_overview_config.json`). `aposSaveConfig()`'s `aposFields`
+não incluía `apos_mode`, então numa corrida onde o save dele "ganhava" por
+último, revertia silenciosamente o modo pro valor antigo (lido antes da
+troca). Fix: `aposSaveConfig()` (renderer.js ~L24973) agora também inclui
+`apos_mode: _aposMode`, então os dois writers concorrentes sempre
+concordam no mesmo valor, não importa qual "vence" a corrida. Validado
+via CDP reproduzindo a corrida nos dois sentidos, antes (bug confirmado)
+e depois (correto, inclusive sobrevivendo navegação real entre abas).
+
+### Orçamento (gráficos): clicar abre a lista de transações, como na tabela
+Nas duas sub-visões de "Orçamento → Gráficos" (cards de rosca por mês
+único e barras da série mensal), clicar num gráfico agora abre o mesmo
+modal de detalhe (`openCatDetail`) que já existia ao clicar numa célula
+da tabela. `renderBudgetSingleMonth`'s `cardHtml` (~L16325) ganhou
+`onclick`+cursor:pointer quando `actual !== 0`. `renderBudgetSeries`
+(~L16395, gráfico Chart.js `type:'bar'`) ganhou `options.onClick` (só
+reage a cliques no dataset "Realizado", índice 0, ignora a linha "Meta")
++ `options.onHover` pra mostrar cursor de mão — calcula o mês exato da
+barra clicada e abre `openCatDetail(categoria, mFrom, mTo)` daquele mês.
+
+### Contas: soma dos valores selecionados na barra azul
+Ao selecionar várias transações na tabela de uma conta, a barra de ação
+em lote (`#multi-bar`) agora mostra "Soma: R$ X,XX" (soma líquida, sinal
+já considerado) ao lado da contagem. Novo `<span id="multi-sum">` em
+index.html + cálculo em `updateSelectionUI()` (renderer.js ~L3233).
+
+### Calculadora embutida no campo de valor (novo lançamento/transferência)
+Pedido do usuário: digitar "48+50" num campo de valor deveria resultar em
+98 (e aceitar -, *, / também). Essa lógica (`evalMathExpr`, detecção de
+"modo calculadora" via operadores) já existia no código, mas **nunca
+funcionou de verdade em uso real** — só passava em testes automatizados
+via CDP porque avaliação via DevTools Protocol é isenta de CSP.
+Causa raiz real: o CSP do app (`script-src 'self' 'unsafe-inline' ...`,
+SEM `'unsafe-eval'`) bloqueia silenciosamente `Function()`/`eval` quando
+chamado de dentro de um handler de evento real de página (blur, keydown)
+— por isso a digitação real do usuário sempre caía no `catch` e retornava
+`null`, silenciosamente formatando só os dígitos como centavos ("50+20"
+virava "R$ 50,20", ignorando o operador). Só foi possível reproduzir
+capturando o console em tempo real enquanto o usuário digitava de
+verdade no app (testes via `Runtime.evaluate` do CDP sempre mascaravam o
+bug). Fix: nova função `safeEvalArith()` (renderer.js, logo antes de
+`setupCurrencyInput`) — um parser aritmético recursivo-descendente escrito
+à mão (sem `eval`/`Function()`), suportando `+ - * /` e parênteses com
+precedência correta. `evalMathExpr()` passou a chamar `safeEvalArith()`
+em vez de `Function()`. Também corrigido: a detecção de "entrou em modo
+calculadora" (`hasMath`/`isMathMode()`) não reconhecia `(` como gatilho,
+então um parêntese digitado ANTES de qualquer operador era silenciosamente
+descartado pela formatação normal de moeda, corrompendo a expressão
+(ex: "(50+20)*2" virava "R$ 502,02" em vez de "R$ 140,00") — agora `(`
+também dispara o modo calculadora. Testado exaustivamente com teclado e
+blur/Enter REAIS via CDP (não só leitura via `Runtime.evaluate`, que
+mascararia o bug de novo) nos campos de despesa, receita e transferência.
+Limitação conhecida (fora do escopo pedido): decimal com vírgula digitado
+ANTES do primeiro operador (ex: "48,5+1,5") não é suportado — a
+formatação "caixa eletrônico" não distingue "usuário digitando decimal"
+de "usuário continuando a digitar dígitos" nesse ponto.
+
+---
+
 ## 2026-07-16 (continuação 15) — v4.78.2: push do sync não sobrescrevia dados errados no Supabase após trocar de conta/pasta de dados
 
 ### O que aconteceu (relato do usuário)
