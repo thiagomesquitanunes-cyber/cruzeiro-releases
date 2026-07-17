@@ -38,3 +38,5 @@ backups/
 *.db.bak
 *.zip
 *.zip
+
+_import_pending.json
