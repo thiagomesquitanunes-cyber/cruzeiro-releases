@@ -12,6 +12,25 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-17 (continuação) — v4.79.1: "Poupança realizada" vira barra no gráfico da Aposentadoria
+
+No gráfico "Poupança necessária (futura) e realizada (histórica)" da
+aba Aposentadoria (visão gráfico, `_aposChart2`), a série "Poupança
+realizada/mês (Média 12m)" era renderizada como linha âmbar sobre as
+barras empilhadas de "Rendimento do patrimônio" e "Poupança por outros
+meios" — pedido do usuário pra virar barra âmbar também, consistente
+com as outras duas séries. `renderer.js` ~L25672: removido `type:'line'`
+(o dataset agora herda o `type:'bar'` do gráfico) e trocado o estilo de
+linha (gradiente, tension, pointRadius) pelo mesmo padrão de barra das
+outras duas séries (`backgroundColor`/`borderColor` sólidos, `borderRadius`,
+`maxBarThickness`, mesmo `stack:'future'` — os períodos são mutuamente
+exclusivos no tempo, então não há conflito de empilhamento real).
+Validado via CDP: as 3 séries agora reportam `type:"bar"`, com a série
+de poupança realizada renderizando barras nos 3 anos passados com dado
+disponível.
+
+---
+
 ## 2026-07-17 — v4.79.0: 4 melhorias na aba Aposentadoria/Orçamento/Contas/lançamentos
 
 ### Aposentadoria: view não "grudava" (voltava sempre pra pós-aposentadoria)
