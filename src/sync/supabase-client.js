@@ -6,12 +6,57 @@
 // ─────────────────────────────────────────────────────────────
 
 const https = require('https');
+const fs    = require('fs');
 
 const SUPABASE_URL    = 'https://nfpjxmwrtwogctocqtxp.supabase.co';
 const SUPABASE_ANON   = 'sb_publishable_rCikC0YRWCUwicYs0v7W8Q_k5sniHIl';
 
 // ── Estado de sessão (em memória) ──
 let _session = null;
+
+// ─────────────────────────────────────────────────────────────
+// Instrumentação de egress — registra o tamanho de cada RESPOSTA da
+// Supabase (é isso que é cobrado como egress, não o que o app envia),
+// agrupado por tabela e por dia, num arquivo local. Existe só para
+// diagnosticar picos de egress vistos no painel da Supabase — não afeta
+// o funcionamento do sync, e falha em silêncio se não conseguir gravar.
+// ─────────────────────────────────────────────────────────────
+let _egressLogPath = null;
+
+function setEgressLogPath(dbPath) {
+  _egressLogPath = dbPath ? dbPath.replace('.db', '_egress_log.json') : null;
+}
+
+function _logEgress(pathname, method, bytes) {
+  if (!_egressLogPath || !bytes) return;
+  try {
+    const table = pathname.replace(/^\/rest\/v1\//, '').split('?')[0] || '(outro)';
+    const today = new Date().toISOString().slice(0, 10);
+    let log = {};
+    try { log = JSON.parse(fs.readFileSync(_egressLogPath, 'utf8')); } catch (e) {}
+    if (!log[today]) log[today] = {};
+    const key = `${table} [${method}]`;
+    log[today][key] = (log[today][key] || 0) + bytes;
+    fs.writeFileSync(_egressLogPath, JSON.stringify(log));
+  } catch (e) { /* diagnóstico best-effort — nunca deve quebrar o sync */ }
+}
+
+// Imprime no console um resumo do egress de hoje, maior tabela primeiro —
+// chamado ao final de cada ciclo de sync (ver runMobileSync em main.js).
+function printEgressSummary() {
+  if (!_egressLogPath) return;
+  try {
+    const log = JSON.parse(fs.readFileSync(_egressLogPath, 'utf8'));
+    const today = new Date().toISOString().slice(0, 10);
+    const todayLog = log[today];
+    if (!todayLog) return;
+    const rows = Object.entries(todayLog).sort((a, b) => b[1] - a[1]);
+    const total = rows.reduce((s, [, v]) => s + v, 0);
+    const fmt = n => n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(2) + ' MB' : (n / 1024).toFixed(1) + ' KB';
+    console.log(`[egress] hoje (${today}), total medido pelo app: ${fmt(total)}`);
+    rows.slice(0, 10).forEach(([key, bytes]) => console.log(`[egress]   ${fmt(bytes).padStart(10)}  ${key}`));
+  } catch (e) { /* best-effort */ }
+}
 
 // ─────────────────────────────────────────────────────────────
 // HTTP helper usando https nativo
@@ -47,8 +92,15 @@ function _request(urlStr, { method = 'GET', body, token } = {}) {
 
     const req = https.request(options, (res) => {
       let data = '';
-      res.on('data', chunk => { data += chunk; });
+      let bytes = 0;
+      // chunk é um Buffer (sem res.setEncoding()), então chunk.length já é
+      // o tamanho real em bytes — string.length divergiria em acentos/UTF-8.
+      res.on('data', chunk => { data += chunk; bytes += chunk.length; });
       res.on('end', () => {
+        // Registra o egress independentemente de sucesso ou erro — uma
+        // resposta de erro também consome banda, e é exatamente esse
+        // número (bytes que SAEM da Supabase) que é cobrado.
+        _logEgress(url.pathname, method, bytes);
         if (res.statusCode >= 400) {
           reject(new Error(`Supabase ${method} ${url.pathname} → ${res.statusCode}: ${data}`));
           return;
@@ -196,5 +248,6 @@ module.exports = {
   login, logout, refreshSession, clearSession,
   getSession, getUserId, isLoggedIn,
   upsert, select, update, remove, pruneNotIn, removeOlderThan,
+  setEgressLogPath, printEgressSummary,
   SUPABASE_URL,
 };

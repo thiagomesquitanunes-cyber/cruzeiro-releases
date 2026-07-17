@@ -12,6 +12,54 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-17 (continuação 2) — v4.79.2: instrumentação de egress + bug de integridade no cache de sync
+
+### Contexto
+Usuário reportou egress muito alto no painel da Supabase (806MB num único
+dia, com apenas 1-2 usuários de teste). Investigação extensa (push, pull,
+todas as queries do mobile, checagem de Realtime) não encontrou nenhum
+bug isolado óbvio — confirmado via busca que a Supabase só cobra egress
+por dados que SAEM dela (respostas), não pelo que o app envia; as
+escritas do app já usam `Prefer: return=minimal` corretamente (resposta
+vazia = zero egress, confirmado ao vivo). A causa mais provável são
+sessões intensas de teste (do usuário e desta própria sessão, que
+reiniciou o Electron dezenas de vezes hoje — cada reinício dispara um
+sync completo).
+
+### Instrumentação de egress (`supabase-client.js`)
+Novo: `setEgressLogPath(dbPath)` + `printEgressSummary()`. Toda resposta
+HTTP da Supabase (`_request()`) agora tem seu tamanho real em bytes
+registrado por tabela e por dia em `cruzeiro_data_egress_log.json` (local,
+nunca versionado — já coberto pelo padrão `cruzeiro_data_*.json` do
+.gitignore). Ao final de cada ciclo de sync (`runMobileSync` em
+`main.js`), imprime um resumo no console ordenado por maior consumo.
+Existe só para diagnóstico — não afeta o funcionamento do sync.
+
+### Bug real encontrado durante o teste: cache de hash "mentia" em falha de rede
+Ao testar a instrumentação, um push de `balances`/`transactions` deu
+timeout/socket hang up — e o `hasChanged()` já tinha gravado o hash como
+"sincronizado" como efeito colateral da própria checagem, ANTES de
+qualquer chamada de rede. Resultado: uma falha de rede marcava a tabela
+como sincronizada com sucesso, e ela nunca mais era re-tentada até algum
+dado local mudar de novo — podendo deixar o Supabase desatualizado em
+silêncio por tempo indefinido. Corrigido em `sync-push.js`: `hasChanged()`
+agora só COMPARA (sem mutação); novo `markSynced(table, rows)` grava o
+hash, chamado explicitamente só DEPOIS de cada push (balances,
+transactions, budgets, goals, scheduled, patrimonio ×2, evolution,
+ml_rules) ter concluído com sucesso. Validado ao vivo via CDP.
+
+### Reforço de segurança em arquivos locais
+`.gitignore`: nova regra geral `_*.json` (cobre qualquer arquivo futuro
+com esse padrão de nome, sem depender de lembrar de listar cada um —
+foi assim que `_import_pending.json` vazou num commit antes desta sessão).
+`publish.js`: `_sync_hashes.json`/`_egress_log.json` adicionados à lista
+de arquivos sensíveis verificados (defesa extra, já cobertos pelo padrão
+`cruzeiro_data_*.json` existente, mas os nomes originais que eu supunha
+para esses arquivos — antes de descobrir o `.replace('.db', ...)` real —
+não estavam cobertos por nada).
+
+---
+
 ## 2026-07-17 (continuação) — v4.79.1: "Poupança realizada" vira barra no gráfico da Aposentadoria
 
 No gráfico "Poupança necessária (futura) e realizada (histórica)" da

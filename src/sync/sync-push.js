@@ -104,12 +104,21 @@ function hashRows(rows) {
   return crypto.createHash('md5').update(str).digest('hex');
 }
 
-// Retorna true se os dados mudaram desde o último sync desta tabela
+// Retorna true se os dados mudaram desde o último sync BEM-SUCEDIDO desta
+// tabela — só COMPARA, não grava nada (ver markSynced abaixo).
 function hasChanged(table, rows) {
-  const h = hashRows(rows);
-  if (_hashCache[table] === h) return false; // sem mudança
-  _hashCache[table] = h;
-  return true;
+  return _hashCache[table] !== hashRows(rows);
+}
+
+// Confirma que os dados foram sincronizados com sucesso — só chame isso
+// DEPOIS do upsert/remove realmente ter concluído sem erro. hasChanged()
+// costumava gravar o hash como efeito colateral da própria checagem, ANTES
+// de qualquer chamada de rede: se o upload falhasse (erro de rede, timeout),
+// o hash já tinha sido commitado como se tivesse dado certo, e a tabela
+// nunca mais era re-tentada até algum dado local mudar de novo — uma falha
+// de rede podia deixar o Supabase permanentemente desatualizado em silêncio.
+function markSynced(table, rows) {
+  _hashCache[table] = hashRows(rows);
 }
 
 // Invalida o cache de uma tabela (força re-sync na próxima vez)
@@ -161,7 +170,8 @@ async function pushBalances(all, userId, syncInvestments) {
     };
   });
 
-  if (!hasChanged('balances', rows.map(r => ({ ...r, synced_at: undefined })))) {
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('balances', hashableRows)) {
     console.log('[sync:push] balances sem mudança — pulando');
     return;
   }
@@ -177,6 +187,7 @@ async function pushBalances(all, userId, syncInvestments) {
     ? accounts.map(a => a.name)
     : all('SELECT name FROM accounts WHERE hidden=0 AND type != ?', ['investment']).map(a => a.name);
   await sb.pruneNotIn('mobile_balances', userId, 'account_name', allAccountNames);
+  markSynced('balances', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -230,7 +241,8 @@ async function pushTransactions(all, userId, syncInvestments) {
     };
   });
 
-  if (!hasChanged('transactions', rows.map(r => ({ ...r, synced_at: undefined })))) {
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('transactions', hashableRows)) {
     console.log('[sync:push] transactions sem mudança — pulando');
     return;
   }
@@ -246,6 +258,7 @@ async function pushTransactions(all, userId, syncInvestments) {
   // Remove transações antigas que saíram da janela de 90 dias
   await sb.pruneNotIn('mobile_transactions', userId, 'desktop_id', rows.map(r => r.desktop_id))
     .catch(() => {});
+  markSynced('transactions', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -308,7 +321,8 @@ async function pushBudgets(all, userId) {
     synced_at:     new Date().toISOString(),
   }));
 
-  if (!hasChanged('budgets', rows.map(r => ({ ...r, synced_at: undefined })))) {
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('budgets', hashableRows)) {
     console.log('[sync:push] budgets sem mudança — pulando');
     return;
   }
@@ -318,6 +332,7 @@ async function pushBudgets(all, userId) {
   await sb.upsert('mobile_budgets', rows, 'user_id,month,category');
   await sb.pruneNotIn('mobile_budgets', userId, 'category', budgets.map(b => b.category))
     .catch(() => {});
+  markSynced('budgets', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -395,7 +410,8 @@ async function pushGoals(all, userId) {
     };
   });
 
-  if (!hasChanged('goals', rows.map(r => ({ ...r, synced_at: undefined })))) {
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('goals', hashableRows)) {
     console.log('[sync:push] goals sem mudança — pulando');
     return;
   }
@@ -404,6 +420,7 @@ async function pushGoals(all, userId) {
   encFields(rows, ['target_amount', 'monthly_amount', 'current_amount']);
   await sb.upsert('mobile_goals', rows, 'user_id,desktop_id');
   await sb.pruneNotIn('mobile_goals', userId, 'desktop_id', goals.map(g => String(g.id)));
+  markSynced('goals', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -452,7 +469,8 @@ async function pushScheduled(all, userId, syncInvestments) {
     synced_at:    new Date().toISOString(),
   }));
 
-  if (!hasChanged('scheduled', rows.map(r => ({ ...r, synced_at: undefined })))) {
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('scheduled', hashableRows)) {
     console.log('[sync:push] scheduled sem mudança — pulando');
     return;
   }
@@ -461,6 +479,7 @@ async function pushScheduled(all, userId, syncInvestments) {
   encFields(rows, ['memo', 'amount']);
   await sb.upsert('mobile_scheduled', rows, 'user_id,desktop_id');
   await sb.pruneNotIn('mobile_scheduled', userId, 'desktop_id', rows.map(r => r.desktop_id));
+  markSynced('scheduled', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -480,6 +499,7 @@ async function pushPatrimonio(all, userId, syncInvestments) {
     if (hasChanged('patrimonio', ['sync_disabled'])) {
       await sb.remove('mobile_patrimonio', { user_id: userId }).catch(() => {});
       console.log('[sync:push] patrimonio: sync de investimentos desativado — dados remotos removidos');
+      markSynced('patrimonio', ['sync_disabled']);
     }
     return;
   }
@@ -534,7 +554,8 @@ async function pushPatrimonio(all, userId, syncInvestments) {
     };
   });
 
-  if (!hasChanged('patrimonio', rows.map(r => ({ ...r, synced_at: undefined })))) {
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('patrimonio', hashableRows)) {
     console.log('[sync:push] patrimonio sem mudança — pulando');
     return;
   }
@@ -542,6 +563,7 @@ async function pushPatrimonio(all, userId, syncInvestments) {
   rows.forEach(r => r.synced_at = syncedAtP);
   encFields(rows, ['total_assets', 'total_debts', 'net_worth'], ['breakdown']);
   await sb.upsert('mobile_patrimonio', rows, 'user_id,month');
+  markSynced('patrimonio', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -717,7 +739,8 @@ async function pushEvolution(all, userId, getDbPath, fs) {
     };
   });
 
-  if (!hasChanged('evolution', rows.map(r => ({ ...r, synced_at: undefined })))) {
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('evolution', hashableRows)) {
     console.log('[sync:push] evolution sem mudança — pulando');
     return;
   }
@@ -729,6 +752,7 @@ async function pushEvolution(all, userId, getDbPath, fs) {
   // janela de 12 meses atual
   await sb.remove('mobile_evolution', { user_id: userId });
   if (rows.length) await sb.upsert('mobile_evolution', rows, 'user_id,month');
+  markSynced('evolution', hashableRows);
 
   console.log(`[sync:push:evolution] ${rows.length} meses (últimos 12, MA sempre ativa, sem correção IPCA)`);
 }
@@ -753,13 +777,15 @@ async function pushMlRules(all, userId) {
     synced_at: new Date().toISOString(),
   }));
 
-  if (!hasChanged('ml_rules', rows.map(r => ({ ...r, synced_at: undefined })))) {
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('ml_rules', hashableRows)) {
     console.log('[sync:push] ml_rules sem mudança — pulando');
     return;
   }
   const syncedAtML = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtML);
   await sb.upsert('ml_rules', rows, 'user_id,keyword');
+  markSynced('ml_rules', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────

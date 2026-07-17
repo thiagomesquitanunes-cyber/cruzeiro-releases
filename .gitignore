@@ -24,6 +24,11 @@ dist-ssr
 *.sw?
 
 # Dados pessoais e segredos — NUNCA versionar
+# Regra geral: todo arquivo "_algumacoisa.json" na raiz é dado local do
+# usuário (convenção do projeto) — pega qualquer arquivo novo desse tipo
+# automaticamente, sem depender de lembrar de listar cada nome aqui (foi
+# assim que _import_pending.json vazou num commit antes desta regra existir).
+_*.json
 _settings.json
 _settings_*.json
 _users_registry.json
@@ -40,3 +45,5 @@ backups/
 *.zip
 
 _import_pending.json
+_sync_hashes.json
+_egress_log.json

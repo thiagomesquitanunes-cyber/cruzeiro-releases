@@ -120,6 +120,7 @@ try {
     'cruzeiro_data_col_config.json', 'cruzeiro_data_categories.json',
     'latest.json', '_recovery.enc', '_categories.json',
     '_users_registry.json', '_import_pending.json',
+    '_sync_hashes.json', '_egress_log.json',
   ];
   const trackedFiles = (runSilent('git ls-files') || '').split('\n').filter(Boolean);
   let untracked = 0;
