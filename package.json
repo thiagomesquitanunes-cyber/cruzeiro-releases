@@ -54,9 +54,9 @@
       "artifactName": "Cruzeiro-${version}.appx",
       "applicationId": "Cruzeiro",
       "displayName": "Cruzeiro",
-      "publisherDisplayName": "TODO.PreencherAposReservarNoPartnerCenter",
-      "identityName": "TODO.PreencherAposReservarNoPartnerCenter",
-      "publisher": "CN=TODO-PREENCHER-APOS-RESERVAR-NO-PARTNER-CENTER",
+      "publisherDisplayName": "Cruzeiro App",
+      "identityName": "CruzeiroApp.CruzeiroFinanasPessoais",
+      "publisher": "CN=F273678E-4760-4FBB-A6D9-CDDE2A4A3870",
       "backgroundColor": "#0d3b2e",
       "showNameOnTiles": true,
       "languages": [

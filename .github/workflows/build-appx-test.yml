@@ -1,0 +1,38 @@
+name: Build Windows Store (.appx) — teste manual
+
+# Só roda quando disparado manualmente (Actions → este workflow → Run
+# workflow). Não publica nada, não mexe em release nem em tag — só gera o
+# .appx como artefato do próprio run pra baixar e testar/enviar ao Partner
+# Center. Existe separado do build.yml porque o computador de
+# desenvolvimento é corporativo e não permite ativar o Modo de
+# Desenvolvedor do Windows (necessário pro electron-builder extrair as
+# ferramentas de assinatura localmente via symlink).
+on:
+  workflow_dispatch:
+
+jobs:
+  build-appx:
+    name: Build .appx
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build appx (sem publicar)
+        run: npm run build:winstore
+
+      - name: Upload artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: cruzeiro-appx
+          path: dist/*.appx
+          retention-days: 14
