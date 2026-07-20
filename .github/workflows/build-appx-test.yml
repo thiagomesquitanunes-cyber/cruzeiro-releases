@@ -28,7 +28,12 @@ jobs:
         run: npm ci
 
       - name: Build appx (sem publicar)
-        run: npm run build:winstore
+        # --publish never é necessário: o electron-builder detecta CI
+        # automaticamente (env CI=true, setado pelo GitHub Actions) e por
+        # padrão tenta publicar num release do GitHub mesmo sem pedir —
+        # falha sem GH_TOKEN, que este workflow não define de propósito
+        # (só queremos o artefato pra baixar e testar manualmente).
+        run: npx electron-builder --win appx --publish never
 
       - name: Upload artefato
         uses: actions/upload-artifact@v4
