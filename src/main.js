@@ -2758,8 +2758,22 @@ app.whenReady().then(async () => {
 });
 
 // Sync final ao fechar o app (garante que últimas alterações cheguem ao mobile)
+//
+// _quitFinalizing evita um loop infinito: app.quit() dispara 'before-quit';
+// se ainda logado, cancelávamos o quit (preventDefault), rodávamos o sync
+// final e chamávamos app.quit() de novo — mas esse segundo app.quit()
+// disparava 'before-quit' MAIS UMA VEZ, e como _syncRunning já tinha
+// voltado a false (resetado dentro do próprio runMobileSync antes deste
+// handler terminar), a condição de guarda nunca barrava a recursão: o app
+// ficava rodando sync completo sem parar, pra sempre, sem nenhuma janela
+// visível, só terminando se o processo fosse morto manualmente. Com a
+// flag, a segunda (e demais) chamada de 'before-quit' cai direto no early
+// return e deixa o quit seguir de verdade.
+let _quitFinalizing = false;
 app.on('before-quit', async (e) => {
+  if (_quitFinalizing) return;
   if (!sb.isLoggedIn() || _syncRunning) return;
+  _quitFinalizing = true;
   e.preventDefault();
   try { await runMobileSync('quit'); } catch (err) { console.error('[sync] before-quit:', err); }
   app.quit();

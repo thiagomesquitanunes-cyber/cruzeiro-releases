@@ -1,6 +1,6 @@
 {
   "name": "cruzeiro",
-  "version": "4.79.2",
+  "version": "4.79.3",
   "description": "Gestão financeira pessoal",
   "author": "Cruzeiro",
   "main": "src/main.js",
@@ -37,11 +37,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "Cruzeiro-${version}-portable.exe"
@@ -55,7 +59,9 @@
       "publisher": "CN=TODO-PREENCHER-APOS-RESERVAR-NO-PARTNER-CENTER",
       "backgroundColor": "#0d3b2e",
       "showNameOnTiles": true,
-      "languages": ["pt-BR"]
+      "languages": [
+        "pt-BR"
+      ]
     },
     "publish": {
       "provider": "github",
@@ -77,7 +83,9 @@
       {
         "from": "assets/",
         "to": "assets/",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "asar": true,
@@ -105,7 +113,10 @@
       "target": [
         {
           "target": "zip",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "category": "public.app-category.finance",

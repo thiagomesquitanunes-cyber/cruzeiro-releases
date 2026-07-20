@@ -12,6 +12,104 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-20 (continuação) — Causa raiz real encontrada: loop infinito no quit (`main.js`)
+
+### Correção da investigação anterior (mesmo dia, entrada abaixo)
+A conclusão anterior ("o código não reescreve os arquivos sozinho") estava
+**incompleta** — só testei o app parado/idle, nunca o momento de FECHAR.
+O usuário reportou que matar manualmente 2 processos zumbis do Cruzeiro no
+Gerenciador de Tarefas fez as escritas pararem, o que apontava pra um bug
+no ciclo de saída, não em nenhum timer.
+
+### Causa raiz: `app.on('before-quit', ...)` se rechamava para sempre
+Em `main.js` (~linha 2761), o handler de sync final ao fechar tinha uma
+recursão infinita não intencional:
+
+1. Fechar a janela → `window-all-closed` → `app.quit()`.
+2. Dispara `before-quit`. Logado e sem sync em andamento → `e.preventDefault()`
+   (cancela o quit), roda `runMobileSync('quit')` (escreve
+   `cruzeiro_data_sync_hashes.json` e `cruzeiro_data_egress_log.json`), e ao
+   final chama `app.quit()` de novo pra realmente fechar.
+3. Esse `app.quit()` dispara `before-quit` **outra vez**. Como `_syncRunning`
+   já tinha voltado a `false` (resetado dentro do próprio `runMobileSync`
+   antes deste handler terminar), a condição de guarda nunca barrava — caía
+   no mesmo caminho, rodava outro ciclo de sync completo, chamava
+   `app.quit()` de novo, e assim indefinidamente.
+
+Resultado: ao fechar o app (com sessão Supabase logada), o processo nunca
+morria de verdade — ficava rodando sync completo em loop, sem nenhuma
+janela visível, reescrevendo os dois arquivos a cada iteração, até alguém
+matar o processo manualmente no Gerenciador de Tarefas. Cada iteração de
+teste mediu ~1.85 MB de egress (banco de teste pequeno/vazio) — num banco
+de produção real, rodando sem parar por horas ou dias, isso sozinho
+provavelmente explica a maior parte do egress alto investigado no início
+desta sessão (creditado incorretamente na época a "muito teste manual").
+
+### Correção
+Nova flag `_quitFinalizing` — a primeira chamada de `before-quit` marca a
+flag, roda o sync final e chama `app.quit()`; a segunda chamada (disparada
+por esse `app.quit()`) cai direto no early return e deixa o quit seguir de
+verdade, sem novo `preventDefault()`.
+
+### Validado ao vivo
+Reiniciei o app com `--remote-debugging-port`, confirmei sessão logada via
+CDP, fechei a janela remotamente (`window.close()`) e monitorei
+`tasklist`: exatamente 1 ciclo de sync rodou (log confirma
+`trigger: 'quit'`) e o processo terminou sozinho — `tasklist` não encontrou
+mais nenhum `electron.exe` depois. Antes da correção, isso nunca acontecia.
+
+**Arquivo tocado**: `src/main.js` (handler `before-quit`).
+
+---
+
+## 2026-07-20 — Investigação: "cruzeiro_data_sync_hashes.json fica sincronizando o Dropbox sem parar"
+
+### Contexto
+Usuário reportou que `cruzeiro_data_sync_hashes.json` (produção, pasta
+sincronizada com Dropbox) aparenta ser reescrito continuamente, como se
+fosse atualizado a cada poucos segundos, mesmo com o app fechado —
+suspeitando de relação com o alto egress do Supabase. Observou o mesmo
+padrão nesta pasta de desenvolvimento (não sincronizada com Dropbox):
+`cruzeiro_data_sync_hashes.json` e `cruzeiro_data_egress_log.json`
+apareciam como "modificados hoje" sem o app ter sido aberto no dia.
+
+### Investigação
+Revisão de código não encontrou nenhum mecanismo periódico que escreva
+nesses arquivos: `saveHashCache()` (`sync-push.js`) só é chamado a partir
+de `pushAll()`, que só roda dentro de `runMobileSync()`
+(`main.js`), que por sua vez só é disparado em 4 gatilhos pontuais —
+`startup`, `login`, `sync:run-now` (botão manual) e `before-quit` — não
+há `setInterval`, `setTimeout` recursivo, `fs.watch`/`chokidar`, nem
+subscription Realtime do Supabase em lugar nenhum do app (confirmado via
+grep em `main.js`, `renderer.js` e no pacote `electron-updater`, que
+também não faz polling próprio além do único check inicial de 3s).
+
+Para confirmar empiricamente, instrumentou-se temporariamente
+`saveHashCache()` e `_logEgress()` para gravar stack trace a cada
+execução, e o app foi reiniciado do zero (processo limpo, sem os 3 dias
+de instância anterior ainda aberta). Resultado: exatamente **uma única
+escrita** em cada arquivo, no momento do `startup`, e nenhuma escrita
+adicional em 7 minutos de app parado e monitorado ao vivo.
+
+### Conclusão
+O código atual não reescreve esses arquivos sozinho — cada escrita
+corresponde a um sync real e pontual. As datas "de hoje" observadas nesta
+pasta de desenvolvimento vieram das próprias sessões de teste manual
+feitas mais cedo nesta conversa (chamadas a `ff.syncRunNow()` durante o
+teste do bug de `hasChanged`/`markSynced`), não de um processo autônomo.
+A percepção de "sincronizando toda hora" no Dropbox de produção é mais
+provável de ser o próprio Dropbox reindexando/reverificando o arquivo
+periodicamente (comportamento comum do cliente Dropbox em pastas com
+Smart Sync ou antivírus monitorando), e não o app gravando o arquivo —
+recomendado ao usuário conferir o "Modificado em" do arquivo pelo
+Explorer do Windows com o app fechado por um tempo, para confirmar que
+o timestamp não avança sozinho.
+
+A instrumentação de diagnóstico foi revertida após a confirmação (não
+ficou no código — não havia mais nada a capturar).
+
+---
+
 ## 2026-07-17 (continuação 2) — v4.79.2: instrumentação de egress + bug de integridade no cache de sync
 
 ### Contexto
