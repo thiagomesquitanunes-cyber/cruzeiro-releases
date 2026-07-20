@@ -12,6 +12,43 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-20 (continuação 3) — Windows Store: identidade real + build de teste + ficha pronta
+
+### Identidade do appx
+Usuário reservou o app no Partner Center. `package.json` (`build.appx`)
+atualizado com os valores reais: `identityName: CruzeiroApp.CruzeiroFinanasPessoais`,
+`publisher: CN=F273678E-4760-4FBB-A6D9-CDDE2A4A3870`,
+`publisherDisplayName: Cruzeiro App` — substituindo os placeholders TODO.
+
+### Build local do .appx bloqueado — resolvido via CI
+`npm run build:winstore` falha nesta máquina (corporativa): o
+electron-builder precisa criar links simbólicos ao extrair o
+`winCodeSign`, e isso exige Modo de Desenvolvedor do Windows (indisponível
+aqui). Solução: novo workflow `.github/workflows/build-appx-test.yml`
+(`workflow_dispatch` manual, sem publicar em release) que builda o .appx
+num runner do GitHub (sem essa restrição) e sobe como artefato pra
+download. Precisou de um ajuste (`--publish never`) porque o
+electron-builder detecta `CI=true` automaticamente e tenta publicar num
+release por padrão, mesmo sem pedir. Build de teste (v4.79.3) rodou com
+sucesso.
+
+### Ficha da loja preparada (`store-assets/`)
+`listing-pt-br.md`: nome, subtítulo, descrição curta/completa, lista de
+recursos, termos de busca e notas de lançamento — prontos pra colar no
+Partner Center. `screenshots/`: 9 capturas já existentes do site
+(`Cruzeiro Site/public/screenshots/`), reaproveitadas sem gerar nada
+novo, renomeadas em ordem sugerida (visão geral → orçamento →
+patrimônio → aposentadoria → evolução → IA insights → relatórios →
+importação → recorrentes).
+
+Submissão final ao Partner Center (upload do .appx + preenchimento da
+ficha) é manual — Claude não tem acesso à conta.
+
+**Arquivos tocados**: `package.json`, `.github/workflows/build-appx-test.yml` (novo),
+`store-assets/listing-pt-br.md` (novo), `store-assets/screenshots/*` (novo).
+
+---
+
 ## 2026-07-20 (continuação) — Causa raiz real encontrada: loop infinito no quit (`main.js`)
 
 ### Correção da investigação anterior (mesmo dia, entrada abaixo)
