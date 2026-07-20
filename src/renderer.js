@@ -5373,6 +5373,20 @@ function detectParcela(memo) {
   if (m) { const p=parseInt(m[1]),t=parseInt(m[2]); if(p>0&&t>1&&p<=t) return {parcel:p,total:t}; }
   return null;
 }
+// Faturas de cartão registram o cancelamento de uma compra parcelada como
+// uma linha de crédito POR PARCELA restante revertida (ex: uma compra em 5x
+// cancelada após a 1ª parcela já cobrada gera 4 linhas de crédito idênticas
+// nesta mesma fatura) — nenhuma delas tem o padrão "N/M" que detectParcela
+// reconhece, então sem isso elas eram importadas como lançamentos novos
+// comuns, enquanto as parcelas futuras já lançadas na importação original
+// (compra 1/5, 2/5...) continuavam agendadas normalmente, cobrando de novo
+// algo que a própria fatura já mostra como cancelado.
+function detectCancelamento(memo) {
+  if (!memo) return null;
+  const m = memo.match(/(?:cancelamento|estorno)\s+de\s+compra\s+parcelada(?:\s*[-–—]\s*(.+))?/i);
+  if (!m) return null;
+  return { merchant: (m[1] || '').trim() };
+}
 function shiftMonths(isoDate, months) {
   const [y,mo,d] = isoDate.split('-').map(Number);
   const dt = new Date(y, mo-1+months, d);
@@ -5422,10 +5436,21 @@ async function confirmBankImport() {
 
   const rows = [];
   const parcelInstallments = [];
+  // {merchant -> {count, date, accountId}} — quantas linhas de cancelamento
+  // desse comerciante apareceram nesta fatura, usado depois pra procurar e
+  // oferecer cancelar até essa quantidade de parcelas futuras já lançadas.
+  const cancelGroups = {};
 
   _bankParsed.forEach(r => {
     const memo = r.memo || r.desc || '';
     const rowAccountId = resolveRowAccountId(r, accountId);
+    const cancelamento = isCardImport ? detectCancelamento(memo) : null;
+    if (cancelamento && cancelamento.merchant) {
+      const key = norm(cancelamento.merchant);
+      const isoOrig = r.date.includes('-') ? r.date : toISOClient(r.date);
+      if (!cancelGroups[key]) cancelGroups[key] = { merchant: cancelamento.merchant, count: 0, date: isoOrig, accountId: rowAccountId };
+      cancelGroups[key].count++;
+    }
     const parcela = isCardImport ? detectParcela(memo) : null;
     if (parcela) {
       const isoOrig = r.date.includes('-') ? r.date : toISOClient(r.date);
@@ -5494,7 +5519,7 @@ async function confirmBankImport() {
   };
 
   const checkDailySaldo = selBank === 'itau' && rows.some(r => r.saldo != null);
-  _pendingImport = { rows: withML, parcelInstallments, accountId, checkDailySaldo };
+  _pendingImport = { rows: withML, parcelInstallments, accountId, checkDailySaldo, cancelGroups: Object.values(cancelGroups) };
 
   // Step 1: check for duplicates FIRST, before editing — one dry-run per destination account
   G('bank-result').innerHTML = '<div class="info-box">⏳ Verificando duplicatas…</div>';
@@ -5878,7 +5903,7 @@ async function aiCategorizeImportRows() {
 
 async function doImportFromTable() {
   if (!_pendingImport) return;
-  const { rows, parcelInstallments, accountId, checkDailySaldo, replaceIds } = _pendingImport;
+  const { rows, parcelInstallments, accountId, checkDailySaldo, replaceIds, cancelGroups } = _pendingImport;
 
   // Linhas já processadas como transferência manual (via modal) NÃO entram na importação —
   // o registro já foi criado de fato nas contas; importá-las de novo duplicaria.
@@ -6006,7 +6031,82 @@ async function doImportFromTable() {
 }
 
 // Shared tail of the import flow (called directly or after memo-dup resolution)
+// Ponto único por onde toda importação de fatura passa antes de gravar de
+// verdade — se a fatura tiver linhas de "Cancelamento de compra parcelada"
+// (ver detectCancelamento), procura parcelas futuras já lançadas que batem
+// com o comerciante cancelado e oferece cancelá-las junto, evitando que
+// continuem cobrando algo que a própria fatura já mostra como estornado.
+let _pendingCancelamentoResolution = null;
 async function finishImportWithPatLinks(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks, replaceIds = []) {
+  const groups = _pendingImport?.cancelGroups || [];
+  if (groups.length) {
+    const matchGroups = await findCancelamentoMatches(groups);
+    if (matchGroups.length) {
+      showCancelamentoConfirmUI(matchGroups, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks, replaceIds);
+      return; // pausa aqui — cancelamentoResumeImport() continua o fluxo
+    }
+  }
+  await _finishImportWithPatLinksInner(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks, replaceIds);
+}
+
+async function findCancelamentoMatches(groups) {
+  const today = new Date().toISOString().slice(0, 10);
+  const out = [];
+  for (const g of groups) {
+    try {
+      const future = await ff.listTx({ accountId: g.accountId });
+      const merchantKey = norm(g.merchant);
+      const matches = (future || [])
+        .filter(t => t.date > today && /\(\s*\d+\s*\/\s*\d+\s*\)/.test(t.memo || '') && norm(t.memo || '').includes(merchantKey))
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .slice(0, g.count); // no máximo a mesma qtde de linhas de cancelamento na fatura
+      if (matches.length) out.push({ ...g, matches });
+    } catch (e) { /* falha na busca não deve travar a importação */ }
+  }
+  return out;
+}
+
+function showCancelamentoConfirmUI(matchGroups, finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks, replaceIds) {
+  const totalMatches = matchGroups.reduce((s, g) => s + g.matches.length, 0);
+  const pl = totalMatches === 1 ? '' : 's';
+  const plM = totalMatches === 1 ? '' : 'm';
+  let bodyHtml = `<div style="font-size:14px;line-height:1.7">
+    <div style="margin-bottom:14px">Esta fatura tem cancelamento de compra parcelada. Encontramos parcela${pl} futura${pl} já lançada${pl} que parece${plM} corresponder — sem cancelar, continuaria${plM} cobrando normalmente nos próximos meses.</div>`;
+  matchGroups.forEach((g, gi) => {
+    bodyHtml += `<div style="margin:10px 0 4px;font-weight:600">${esc(g.merchant)} — ${g.count} linha${g.count===1?'':'s'} de cancelamento nesta fatura</div>`;
+    g.matches.forEach(m => {
+      bodyHtml += `<label style="display:flex;align-items:center;gap:8px;padding:4px 0 4px 12px;cursor:pointer">
+        <input type="checkbox" class="cancel-match-chk" data-id="${m.id}" checked>
+        <span>${fmtDateBR(m.date)} — ${esc(m.memo)} — ${fmtBRL(m.amount)}</span>
+      </label>`;
+    });
+  });
+  bodyHtml += `</div>`;
+  G('custom-parser-title').textContent = '⚠️ Cancelamento de compra parcelada detectado';
+  G('custom-parser-body').innerHTML = bodyHtml;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="cancelamentoResumeImport(false)">Não cancelar, só importar</button>
+    <button class="btn primary" onclick="cancelamentoResumeImport(true)">Cancelar selecionadas e importar</button>`;
+  _pendingCancelamentoResolution = { finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks, replaceIds };
+  openModal('modal-custom-parser');
+}
+
+async function cancelamentoResumeImport(doDelete) {
+  closeModal('modal-custom-parser');
+  const ctx = _pendingCancelamentoResolution;
+  _pendingCancelamentoResolution = null;
+  if (!ctx) return;
+  let cancelledCount = 0;
+  if (doDelete) {
+    const checks = document.querySelectorAll('.cancel-match-chk:checked');
+    for (const c of checks) {
+      try { await ff.deleteTx(parseInt(c.dataset.id)); cancelledCount++; } catch (e) {}
+    }
+  }
+  await _finishImportWithPatLinksInner(ctx.finalRows, ctx.updatedInstallments, ctx.accountId, ctx.checkDailySaldo, ctx.patLinks, ctx.debtLinks, ctx.replaceIds, cancelledCount);
+}
+
+async function _finishImportWithPatLinksInner(finalRows, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks, replaceIds = [], cancelledCount = 0) {
   const importResult = await doImport(finalRows, updatedInstallments, accountId, checkDailySaldo, replaceIds);
   if (!importResult) return; // erro já exibido por doImport
 
@@ -6050,7 +6150,7 @@ async function finishImportWithPatLinks(finalRows, updatedInstallments, accountI
   }
   if (debtLinks?.length && currentPage === 'patrimonio') refreshPatrimonioTable();
 
-  showImportSummaryModal({ ...importResult, patLinkedCount, debtLinkedCount });
+  showImportSummaryModal({ ...importResult, patLinkedCount, debtLinkedCount, cancelledCount });
   runFaturaBalanceAudit().catch(e => console.error('runFaturaBalanceAudit:', e));
 }
 
@@ -6058,7 +6158,7 @@ async function finishImportWithPatLinks(finalRows, updatedInstallments, accountI
 // só aparecia um toast pequeno no canto, e quando havia vínculos a bens/
 // direitos ou dívidas, não dava pra confirmar quantos realmente "pegaram"
 // sem abrir cada um manualmente.
-function showImportSummaryModal({ inserted, transferCount, installCount, accountId, patLinkedCount, debtLinkedCount, dailyMismatches }) {
+function showImportSummaryModal({ inserted, transferCount, installCount, accountId, patLinkedCount, debtLinkedCount, dailyMismatches, cancelledCount }) {
   const accName = accounts.find(a => a.id === accountId)?.name || 'conta';
   const total = (inserted||0) + (transferCount||0);
   const plural = (n, s='', p='s') => n === 1 ? s : p;
@@ -6073,6 +6173,7 @@ function showImportSummaryModal({ inserted, transferCount, installCount, account
         <div>💳 <strong style="color:var(--text)">${debtLinkedCount||0}</strong> vinculada${plural(debtLinkedCount||0)} a Cartões e Dívidas</div>
         <div>🔁 <strong style="color:var(--text)">${transferCount||0}</strong> registrada${plural(transferCount||0)} como transferência a outras contas</div>
         ${installCount ? `<div>📅 <strong style="color:var(--text)">${installCount}</strong> parcela${plural(installCount)} futura${plural(installCount)} criada${plural(installCount)}</div>` : ''}
+        ${cancelledCount ? `<div>🚫 <strong style="color:var(--text)">${cancelledCount}</strong> parcela${plural(cancelledCount)} futura${plural(cancelledCount)} cancelada${plural(cancelledCount)} por compra parcelada cancelada</div>` : ''}
       </div>
       ${dailyMismatches?.length ? `<div class="warn-box" style="margin-top:14px;font-size:13px">⚠️ Divergências de saldo em ${dailyMismatches.length} dia(s) — vale revisar o extrato.</div>` : ''}
     </div>`;
@@ -6505,7 +6606,7 @@ async function confirmDupAndImport() {
   }
 
   // Update pending import with only the selected (non-discarded, non-replaced) rows
-  _pendingImport = { rows: selectedRows, parcelInstallments, accountId, checkDailySaldo };
+  _pendingImport = { rows: selectedRows, parcelInstallments, accountId, checkDailySaldo, cancelGroups: _pendingImport.cancelGroups };
 
   // renderImportEditTable rebuilds preview.innerHTML from scratch — no need to clear first
   renderImportEditTable(selectedRows);

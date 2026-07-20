@@ -12,6 +12,68 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-20 (continuação 4) — Cancelamento de compra parcelada não duplica mais parcelas futuras
+
+### Contexto
+Ao importar uma fatura de cartão com o cancelamento de uma compra
+parcelada, o banco (ex: BTG) lista o cancelamento como uma linha de
+crédito POR PARCELA restante revertida — ex: uma compra em 5x cancelada
+após a 1ª parcela cobrada gera 4-5 linhas de crédito idênticas
+("Cancelamento de compra parcelada - Usaflex") na mesma fatura. Nenhuma
+delas tem o padrão "N/M" que `detectParcela()` reconhece, então eram
+importadas como lançamentos novos comuns — enquanto as parcelas futuras
+já lançadas na importação ORIGINAL da compra (1/5, 2/5...) continuavam
+agendadas normalmente, cobrando de novo algo que a própria fatura já
+mostra como cancelado. Exemplos reais confirmados numa fatura BTG
+anexada pelo usuário (casos "Usaflex" 15/12 e "Antolie" 04/01, cada um
+com 5 linhas de crédito idênticas no mesmo dia).
+
+### Detecção (`detectCancelamento`, ao lado de `detectParcela`)
+Reconhece `"Cancelamento de compra parcelada - <comerciante>"` (ou
+"estorno de compra parcelada"), extraindo o nome do comerciante após o
+traço.
+
+### Fluxo (`confirmBankImport` → `finishImportWithPatLinks`)
+Durante a importação, linhas de cancelamento são agrupadas por
+comerciante (`cancelGroups`, guardado em `_pendingImport` e preservado
+através das reatribuições de `_pendingImport` no fluxo de resolução de
+duplicatas). Antes de gravar de fato (`finishImportWithPatLinks`, agora
+um wrapper — a lógica antiga virou `_finishImportWithPatLinksInner`),
+`findCancelamentoMatches()` busca via `ff.listTx` transações FUTURAS na
+mesma conta cujo memo contenha o nome do comerciante E o padrão de
+parcela "(N/M)" — até o mesmo número de linhas de cancelamento na
+fatura, mais próximas primeiro.
+
+Se encontrar, `showCancelamentoConfirmUI()` mostra um modal (reaproveita
+o container `modal-custom-parser`) listando cada parcela futura
+encontrada com checkbox pré-marcado, pausando o fluxo.
+`cancelamentoResumeImport(doDelete)` retoma: se confirmado, deleta as
+selecionadas via `ff.deleteTx` (já suporta desfazer — undo nativo do
+`tx:delete`) e só então importa a fatura normalmente (as linhas de
+crédito de cancelamento SÃO importadas como lançamentos reais — só as
+parcelas futuras agora obsoletas é que são removidas). Resumo final
+mostra quantas parcelas foram canceladas.
+
+### Testado
+Via CDP contra a instância de desenvolvimento: criadas 2 transações
+futuras sintéticas ("Loja Teste (2/3)"/"(3/3)"), confirmado que
+`detectCancelamento` + `findCancelamentoMatches` acham exatamente as 2
+certas (por id), e que `showCancelamentoConfirmUI` renderiza o modal
+corretamente (2 checkboxes, título certo). Dados de teste removidos
+depois. Não testado via fluxo de UI completo (seleção de arquivo →
+tabela de edição → confirmação) por falta de tempo — a lógica nova
+(detecção + busca + modal) foi validada isoladamente; o encanamento que
+já existia (`doImport`, resolução de duplicatas) não foi alterado em
+comportamento, só recebeu o novo agrupamento por comerciante.
+
+**Arquivos tocados**: `src/renderer.js` (`detectCancelamento`,
+`finishImportWithPatLinks` virou wrapper + `_finishImportWithPatLinksInner`,
+`findCancelamentoMatches`, `showCancelamentoConfirmUI`,
+`cancelamentoResumeImport`, `showImportSummaryModal` — novo campo
+`cancelledCount`).
+
+---
+
 ## 2026-07-20 (continuação 3) — Windows Store: identidade real + build de teste + ficha pronta
 
 ### Identidade do appx
