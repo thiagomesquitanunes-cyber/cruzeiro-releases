@@ -53,7 +53,7 @@
     "appx": {
       "artifactName": "Cruzeiro-${version}.appx",
       "applicationId": "Cruzeiro",
-      "displayName": "Cruzeiro",
+      "displayName": "Cruzeiro: Finanças Pessoais",
       "publisherDisplayName": "Cruzeiro App",
       "identityName": "CruzeiroApp.CruzeiroFinanasPessoais",
       "publisher": "CN=F273678E-4760-4FBB-A6D9-CDDE2A4A3870",
