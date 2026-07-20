@@ -12,6 +12,51 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-20 (continuação 5) — Novo relatório: Fluxo do dinheiro (Sankey)
+
+### O quê
+Nova opção "Fluxo do dinheiro (Sankey)" no seletor de Relatórios. Mostra,
+pro período selecionado, de onde o dinheiro veio (categorias de receita,
+à esquerda) passando por um nó central "Receita total" até pra onde foi
+(categorias de despesa + "Sobra (poupança)" quando sobra dinheiro, à
+direita) — usa os mesmos filtros de conta/categoria/excluir transferência
+já existentes nos outros relatórios.
+
+### Implementação (`renderSankeyReport`, `src/renderer.js`)
+Desenhado à mão em SVG (sem lib externa — o app não tinha nenhuma lib de
+gráfico com suporte a Sankey, e adicionar uma só pra isso não valia a
+pena). Cada categoria vira um segmento vertical proporcional ao valor
+numa coluna, empilhados; cada fluxo é uma "fita" (duas curvas de Bézier
+espelhadas) ligando o segmento de origem ao de destino. Reaproveita
+`ff.reportSummary` (mesmo endpoint do "Mapa de despesas") e a paleta
+`DASH_COLORS` já usada nos outros gráficos.
+
+Quando despesas > receita no período (não há como desenhar mais do que
+100% do que entrou saindo do nó central), mostra um aviso e desenha as
+despesas proporcionais entre si (não em relação à receita) em vez de
+travar ou distorcer o gráfico.
+
+### Bug encontrado e corrigido durante o teste: rótulos cortados
+Primeira versão reservava só 40px de margem fixa nas laterais pros
+rótulos (nome da categoria + valor) — qualquer nome mais longo (ex:
+"Alimentação:Supermercado") ultrapassava x=0 (ou a borda direita do
+viewBox) e o SVG cortava silenciosamente o texto (comportamento padrão
+de overflow:hidden em `<svg>`). Corrigido reservando 220px de cada lado,
+calculados a partir da largura real do container.
+
+### Testado
+Via CDP contra a instância de desenvolvimento: casos de superávit
+(nó "Sobra" aparece, cor verde), déficit (aviso aparece, sem nó de
+sobra) e sem dados no período (estado vazio) — todos renderizando a
+contagem certa de nós/fitas. Capturado screenshot confirmando
+visualmente que os rótulos ficam legíveis (incluindo nomes longos de
+subcategoria) depois da correção de margem.
+
+**Arquivos tocados**: `src/index.html` (nova `<option value="sankey">`),
+`src/renderer.js` (`renderSankeyReport`, chamada em `runReport`).
+
+---
+
 ## 2026-07-20 (continuação 4) — Cancelamento de compra parcelada não duplica mais parcelas futuras
 
 ### Contexto

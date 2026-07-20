@@ -4386,9 +4386,126 @@ async function runReport() {
     });
     el.innerHTML=html+'</div>';
 
+  } else if (type === 'sankey') {
+    let rows = await ff.reportSummary({ fromDate:from, toDate:to, accountIds, excludeTransfers });
+    if (excludeTransfers) rows = rows.filter(r => !isTransferCategory(r.category));
+    if (categories) rows = rows.filter(r => categories.includes(r.category));
+    renderSankeyReport(el, rows);
+
   } else if (type === 'budget') {
     await runBudgetReport(from, to, accountIds, categories, excludeTransfers);
   }
+}
+
+// ── Relatório "Fluxo do dinheiro" (Sankey) ─────────────────────────────
+// Três colunas: categorias de receita (esquerda) → nó único "Receita total"
+// (meio) → categorias de despesa + "Sobra (poupança)" quando sobra dinheiro
+// (direita). Desenhado à mão em SVG (sem lib externa) — cada nó vira uma
+// coluna vertical de segmentos empilhados proporcionais ao valor, e cada
+// fluxo é uma "fita" (duas curvas de Bézier espelhadas) ligando o segmento
+// de origem ao de destino.
+function renderSankeyReport(el, rows) {
+  const incRows = rows.filter(r => r.income > 0).map(r => ({ category: r.category || 'Outros', value: r.income })).sort((a,b) => b.value - a.value);
+  const expRows = rows.filter(r => r.expenses > 0).map(r => ({ category: r.category || 'Outros', value: r.expenses })).sort((a,b) => b.value - a.value);
+  const totalInc = incRows.reduce((s,r) => s + r.value, 0);
+  const totalExp = expRows.reduce((s,r) => s + r.value, 0);
+
+  if (!totalInc && !totalExp) { el.innerHTML = '<div class="empty"><div class="ei">🌊</div><p>Sem dados no período</p></div>'; return; }
+
+  const leftover = totalInc - totalExp;
+  const rightRows = expRows.map(r => ({ ...r, isLeftover:false }));
+  if (leftover > 0.01) rightRows.push({ category: 'Sobra (poupança)', value: leftover, isLeftover: true });
+  // Despesas > receita: não há como desenhar mais do que 100% do que entrou
+  // saindo do nó central — mostra um aviso e escala as despesas pro que
+  // efetivamente entrou, só para o desenho (os valores exibidos nos rótulos
+  // continuam os reais).
+  const deficit = leftover < -0.01 ? -leftover : 0;
+  const rightTotalForLayout = deficit > 0 ? totalExp : (rightRows.reduce((s,r) => s + r.value, 0) || 1);
+
+  // Rótulos (nome da categoria + valor) ficam FORA da área de fluxo, à
+  // esquerda/direita dos nós — precisam de uma margem generosa reservada
+  // (nomes de subcategoria tipo "Alimentação:Supermercado" são longos), ou
+  // o texto passa da borda do viewBox e o SVG corta silenciosamente
+  // (comportamento padrão de overflow:hidden em <svg>).
+  const labelM = 220;
+  const flowW = Math.max((el.clientWidth || 900) - labelM * 2, 220);
+  const W = labelM * 2 + flowW;
+  const H = 480;
+  const margin = { top: 20, bottom: 20 };
+  const usableH = H - margin.top - margin.bottom;
+  const nodeW = 16;
+  const colL = labelM, colR = W - labelM - nodeW, colM = (colL + colR) / 2;
+
+  function layoutColumn(items, totalForScale) {
+    let y = margin.top;
+    const gap = items.length > 1 ? Math.min(10, usableH * 0.02) : 0;
+    const availH = usableH - gap * Math.max(0, items.length - 1);
+    return items.map(it => {
+      const h = totalForScale > 0 ? Math.max(2, (it.value / totalForScale) * availH) : 0;
+      const seg = { ...it, y0: y, y1: y + h };
+      y += h + gap;
+      return seg;
+    });
+  }
+
+  const leftSegs  = layoutColumn(incRows, totalInc || 1);
+  const rightSegs = layoutColumn(rightRows, rightTotalForLayout);
+
+  function ribbon(x0, y0a, y0b, x1, y1a, y1b, color) {
+    const xm = (x0 + x1) / 2;
+    return `<path d="M${x0},${y0a} C${xm},${y0a} ${xm},${y1a} ${x1},${y1a}
+                      L${x1},${y1b} C${xm},${y1b} ${xm},${y0b} ${x0},${y0b} Z"
+                  fill="${color}" fill-opacity="0.45" stroke="none"/>`;
+  }
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="font-family:inherit">`;
+
+  // Fluxos: cada receita entra proporcionalmente no topo do nó central,
+  // empilhando conforme a ordem das colunas — depois o nó central sai na
+  // mesma proporção pras despesas/sobra.
+  let midInY = margin.top;
+  leftSegs.forEach((s, i) => {
+    const h = s.y1 - s.y0;
+    const midY0 = midInY, midY1 = midInY + h;
+    midInY = midY1;
+    svg += ribbon(colL + nodeW, s.y0, s.y1, colM, midY0, midY1, DASH_COLORS[i % DASH_COLORS.length]);
+  });
+  let midOutY = margin.top;
+  rightSegs.forEach((s, i) => {
+    const midY0 = midOutY, midY1 = midOutY + (s.y1 - s.y0);
+    midOutY = midY1;
+    const color = s.isLeftover ? getComputedStyle(document.documentElement).getPropertyValue('--green').trim() || '#43a047'
+                                : DASH_COLORS[(incRows.length + i) % DASH_COLORS.length];
+    svg += ribbon(colM, midY0, midY1, colR, s.y0, s.y1, color);
+  });
+
+  // Nó central
+  svg += `<rect x="${colM}" y="${margin.top}" width="${nodeW}" height="${usableH}" rx="3" fill="var(--text2)"/>`;
+  svg += `<text x="${colM + nodeW/2}" y="${margin.top - 6}" text-anchor="middle" font-size="12" font-weight="700" fill="var(--text)">Receita total — ${esc(fmtBRL(totalInc))}</text>`;
+
+  // Nós + rótulos — esquerda (receitas)
+  leftSegs.forEach((s, i) => {
+    svg += `<rect x="${colL}" y="${s.y0}" width="${nodeW}" height="${Math.max(1,s.y1-s.y0)}" rx="3" fill="${DASH_COLORS[i % DASH_COLORS.length]}"/>`;
+    const midY = (s.y0 + s.y1) / 2;
+    svg += `<text x="${colL - 8}" y="${midY}" text-anchor="end" dominant-baseline="middle" font-size="12" fill="var(--text2)">${esc(s.category)} <tspan fill="var(--text3)" font-size="11">(${esc(fmtBRL(s.value))})</tspan></text>`;
+  });
+
+  // Nós + rótulos — direita (despesas + sobra)
+  rightSegs.forEach((s, i) => {
+    const color = s.isLeftover ? (getComputedStyle(document.documentElement).getPropertyValue('--green').trim() || '#43a047')
+                                : DASH_COLORS[(incRows.length + i) % DASH_COLORS.length];
+    svg += `<rect x="${colR}" y="${s.y0}" width="${nodeW}" height="${Math.max(1,s.y1-s.y0)}" rx="3" fill="${color}"/>`;
+    const midY = (s.y0 + s.y1) / 2;
+    svg += `<text x="${colR + nodeW + 8}" y="${midY}" dominant-baseline="middle" font-size="12" fill="var(--text2)">${esc(s.category)} <tspan fill="var(--text3)" font-size="11">(${esc(fmtBRL(s.value))})</tspan></text>`;
+  });
+
+  svg += '</svg>';
+
+  const deficitWarn = deficit > 0
+    ? `<div class="warn-box" style="margin-bottom:14px">⚠️ Despesas (${esc(fmtBRL(totalExp))}) superaram a receita (${esc(fmtBRL(totalInc))}) no período em ${esc(fmtBRL(deficit))} — o desenho abaixo mostra as despesas na proporção entre si, não em relação à receita.</div>`
+    : '';
+
+  el.innerHTML = `<div class="tbl-card" style="padding:20px;overflow-x:auto">${deficitWarn}${svg}</div>`;
 }
 
 function drawNetWorthChart(canvas, months, values) {
