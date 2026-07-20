@@ -307,9 +307,13 @@ async function pullReconcileUpdates(all, run, first, save, userId) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 5. Aplica edições de transações feitas no mobile
+// 5. Aplica edições (e exclusões) de transações feitas no mobile
 // (tela "Editar transação" grava aqui; até agora nada lia essa tabela,
-// então editar no mobile nunca refletia no desktop)
+// então editar no mobile nunca refletia no desktop). Exclusão usa a
+// mesma tabela com `is_delete=true` — as colunas new_* ficam vazias
+// nesse caso. A transação deletada some de mobile_transactions
+// sozinha no próximo push (pruneNotIn já remove qualquer desktop_id
+// que não exista mais no SQLite local).
 // ─────────────────────────────────────────────────────────────
 async function pullEditRequests(all, run, first, save, userId) {
   const requests = await sb.select('mobile_edit_requests',
@@ -330,12 +334,19 @@ async function pullEditRequests(all, run, first, save, userId) {
         errors++;
         continue;
       }
-      // Perna de transferência: editar só um lado desalinharia o par —
-      // não suportado por enquanto.
+      // Perna de transferência: editar (ou excluir) só um lado desalinharia
+      // o par — não suportado por enquanto.
       if (tx.transfer_id != null) {
-        console.log(`[sync:pull] edição ${req.id}: transação ${req.desktop_id} é perna de transferência — rejeitando`);
+        console.log(`[sync:pull] edição/exclusão ${req.id}: transação ${req.desktop_id} é perna de transferência — rejeitando`);
         await sb.update('mobile_edit_requests', { id: req.id }, { status: 'rejected' });
         errors++;
+        continue;
+      }
+
+      if (req.is_delete) {
+        run('DELETE FROM transactions WHERE id=?', [req.desktop_id]);
+        await sb.update('mobile_edit_requests', { id: req.id }, { status: 'applied' });
+        applied++;
         continue;
       }
 

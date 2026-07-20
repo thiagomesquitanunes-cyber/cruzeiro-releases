@@ -5498,11 +5498,22 @@ function detectParcela(memo) {
 // comuns, enquanto as parcelas futuras já lançadas na importação original
 // (compra 1/5, 2/5...) continuavam agendadas normalmente, cobrando de novo
 // algo que a própria fatura já mostra como cancelado.
+//
+// Detecção proposital bem ampla (só "cancelamento" ou "estorno" em
+// qualquer lugar do texto) — cada banco escreve essa linha de um jeito
+// diferente, e não dá pra manter um dicionário de frases por banco. A
+// segurança de não disparar em falso não vem do texto: vem da etapa
+// seguinte (findCancelamentoMatches), que só soma um cancelamento de
+// verdade quando existe uma parcela FUTURA já lançada com o valor EXATO
+// da linha de crédito — texto sozinho nunca decide isso.
 function detectCancelamento(memo) {
   if (!memo) return null;
+  if (!/cancelamento|estorno/i.test(memo)) return null;
+  // Quando a frase específica "...de compra parcelada - Loja X" aparece,
+  // aproveita pra extrair o nome do comerciante só pra deixar o texto de
+  // confirmação mais claro — não é exigido pra disparar a detecção.
   const m = memo.match(/(?:cancelamento|estorno)\s+de\s+compra\s+parcelada(?:\s*[-–—]\s*(.+))?/i);
-  if (!m) return null;
-  return { merchant: (m[1] || '').trim() };
+  return { merchant: (m && m[1]) ? m[1].trim() : '' };
 }
 function shiftMonths(isoDate, months) {
   const [y,mo,d] = isoDate.split('-').map(Number);
@@ -5553,19 +5564,25 @@ async function confirmBankImport() {
 
   const rows = [];
   const parcelInstallments = [];
-  // {merchant -> {count, date, accountId}} — quantas linhas de cancelamento
-  // desse comerciante apareceram nesta fatura, usado depois pra procurar e
-  // oferecer cancelar até essa quantidade de parcelas futuras já lançadas.
+  // {conta+valor -> {amount, count, date, accountId, merchant}} — quantas
+  // linhas de cancelamento com aquele valor exato apareceram nesta fatura,
+  // usado depois pra procurar (por VALOR, não por texto) e oferecer
+  // cancelar até essa quantidade de parcelas futuras já lançadas.
   const cancelGroups = {};
 
   _bankParsed.forEach(r => {
     const memo = r.memo || r.desc || '';
     const rowAccountId = resolveRowAccountId(r, accountId);
-    const cancelamento = isCardImport ? detectCancelamento(memo) : null;
-    if (cancelamento && cancelamento.merchant) {
-      const key = norm(cancelamento.merchant);
+    // Só uma linha de CRÉDITO (amount > 0) conta como estorno/cancelamento
+    // — isso sozinho já descarta a maioria dos falsos positivos do texto
+    // amplo acima (ex: "taxa de cancelamento" cobrada, que seria débito).
+    const cancelamento = (isCardImport && r.amount > 0) ? detectCancelamento(memo) : null;
+    if (cancelamento) {
+      const amt = Math.abs(r.amount);
+      const key = `${rowAccountId}|${amt.toFixed(2)}`;
       const isoOrig = r.date.includes('-') ? r.date : toISOClient(r.date);
-      if (!cancelGroups[key]) cancelGroups[key] = { merchant: cancelamento.merchant, count: 0, date: isoOrig, accountId: rowAccountId };
+      if (!cancelGroups[key]) cancelGroups[key] = { amount: amt, merchant: cancelamento.merchant, count: 0, date: isoOrig, accountId: rowAccountId };
+      if (!cancelGroups[key].merchant && cancelamento.merchant) cancelGroups[key].merchant = cancelamento.merchant;
       cancelGroups[key].count++;
     }
     const parcela = isCardImport ? detectParcela(memo) : null;
@@ -6172,9 +6189,14 @@ async function findCancelamentoMatches(groups) {
   for (const g of groups) {
     try {
       const future = await ff.listTx({ accountId: g.accountId });
-      const merchantKey = norm(g.merchant);
+      // Casamento por VALOR, não por texto do comerciante — isso é o que
+      // funciona igual pra qualquer banco, sem precisar reconhecer a frase
+      // de cancelamento de cada um. Mantém a exigência do padrão "(N/M)"
+      // no memo como segunda trava: só considera parcela futura já
+      // reconhecida como parte de uma compra parcelada, não qualquer
+      // lançamento futuro que coincida de ter o mesmo valor.
       const matches = (future || [])
-        .filter(t => t.date > today && /\(\s*\d+\s*\/\s*\d+\s*\)/.test(t.memo || '') && norm(t.memo || '').includes(merchantKey))
+        .filter(t => t.date > today && /\(\s*\d+\s*\/\s*\d+\s*\)/.test(t.memo || '') && Math.abs(Math.abs(t.amount) - g.amount) < 0.01)
         .sort((a, b) => a.date.localeCompare(b.date))
         .slice(0, g.count); // no máximo a mesma qtde de linhas de cancelamento na fatura
       if (matches.length) out.push({ ...g, matches });
@@ -6190,7 +6212,8 @@ function showCancelamentoConfirmUI(matchGroups, finalRows, updatedInstallments, 
   let bodyHtml = `<div style="font-size:14px;line-height:1.7">
     <div style="margin-bottom:14px">Esta fatura tem cancelamento de compra parcelada. Encontramos parcela${pl} futura${pl} já lançada${pl} que parece${plM} corresponder — sem cancelar, continuaria${plM} cobrando normalmente nos próximos meses.</div>`;
   matchGroups.forEach((g, gi) => {
-    bodyHtml += `<div style="margin:10px 0 4px;font-weight:600">${esc(g.merchant)} — ${g.count} linha${g.count===1?'':'s'} de cancelamento nesta fatura</div>`;
+    const label = g.merchant ? `${esc(g.merchant)} — estorno de ${fmtBRL(g.amount)}` : `Estorno de ${fmtBRL(g.amount)}`;
+    bodyHtml += `<div style="margin:10px 0 4px;font-weight:600">${label} (${g.count} linha${g.count===1?'':'s'} de cancelamento nesta fatura)</div>`;
     g.matches.forEach(m => {
       bodyHtml += `<label style="display:flex;align-items:center;gap:8px;padding:4px 0 4px 12px;cursor:pointer">
         <input type="checkbox" class="cancel-match-chk" data-id="${m.id}" checked>

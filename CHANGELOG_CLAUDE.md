@@ -12,6 +12,297 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-20 (continuação 12) — Mobile: excluir lançamento (sync) + achado importante sobre o bug de moeda
+
+### Achado: o fix de máscara de moeda do mobile nunca tinha sido publicado
+Investigando o relato do usuário (lançou R$55 de receita pelo mobile,
+apareceu como transação pendente de R$0,55, mas sincronizou certinho como
+R$55,00 no desktop) — achei que o `CurrencyInput` (componente de máscara
+estilo caixa eletrônico, que resolve exatamente esse bug de unidade
+reais-vs-centavos) **existia só como alteração local não commitada** nos
+dois repositórios mobile (`Cruzeiro iOS` e `Cruzeiro Android`) —
+`src/components/CurrencyInput.js` nem estava rastreado pelo git. Uma
+sessão anterior aparentemente implementou o fix mas nunca chegou a
+commitar/publicar de fato, então o app que o usuário testa (TestFlight
+build 12) continua com o código antigo, que tinha exatamente essa
+inconsistência: `quick_entries.amount` ia em centavos (`amountVal*100`)
+mas o lançamento otimista local (`pendingEntries`) recebia o valor em
+reais direto — dá exatamente R$0,55 na tela (otimista, errado) vs
+R$55,00 depois do sync real (certo). Commitado e publicado agora via
+`eas update` nos dois repositórios (ver changelogs deles).
+
+### Nova feature: excluir lançamento pelo mobile
+Pedido do usuário: `editar-transacao/[id].js` (tela de edição, mobile)
+não tinha botão de excluir. Adicionado — reaproveita a mesma tabela
+`mobile_edit_requests` já usada pra edição, com uma coluna nova
+`is_delete boolean`. Quando marcado, o desktop
+(`sync-pull.js:pullEditRequests`) roda `DELETE FROM transactions` em vez
+do `UPDATE` — a transação some de `mobile_transactions` sozinha no
+próximo push (o `pruneNotIn` já existente cuida disso, não precisou de
+mudança no lado do push). Pernas de transferência não podem ser
+excluídas pelo app (mesma restrição que já existia pra edição) — a tela
+mostra um aviso em vez do botão nesse caso.
+
+**Pré-requisito: rodar esta SQL no Supabase antes do botão funcionar**
+(sem ela, o insert falha com erro de coluna desconhecida):
+```sql
+alter table public.mobile_edit_requests add column if not exists is_delete boolean not null default false;
+```
+
+### Arquivos
+`src/sync/sync-pull.js` (`pullEditRequests`) — trata `is_delete`.
+
+---
+
+## 2026-07-20 (continuação 11) — Detecção de cancelamento de parcelada: de texto por banco pra valor genérico
+
+### O quê
+A detecção de cancelamento de compra parcelada na importação (feature
+#81, ver entrada mais abaixo) dependia de reconhecer a frase exata
+"cancelamento/estorno de compra parcelada" — só testada contra o texto
+real do BTG. Usuário pediu algo genérico, que não dependesse de ter
+exemplo de fatura de cada banco. Reescrito com duas mudanças em
+[src/renderer.js](src/renderer.js):
+
+1. **`detectCancelamento` (linha ~5501)**: agora dispara com qualquer
+   ocorrência de "cancelamento" ou "estorno" no texto do lançamento —
+   não exige mais a frase completa. A frase específica ainda é tentada,
+   só pra extrair o nome do comerciante quando disponível (deixa o texto
+   de confirmação mais claro), mas não é mais obrigatória.
+2. **Casamento por VALOR em vez de nome do comerciante**: o agrupamento
+   de linhas de cancelamento (`cancelGroups`, no loop de
+   `confirmBankImport`) passou a ser por `conta + valor exato do
+   crédito`, não mais por texto normalizado do comerciante. E
+   `findCancelamentoMatches` busca parcelas futuras já lançadas
+   comparando o VALOR (`Math.abs(t.amount) === g.amount`, com tolerância
+   de 1 centavo) em vez de checar se o memo contém o nome do
+   comerciante.
+
+### Por que isso é seguro apesar do texto amplo
+Alargar o gatilho de texto (só "cancelamento"/"estorno", sem exigir a
+frase inteira) aumentaria muito o risco de falso positivo se disparasse
+sozinho — mas duas travas continuam garantindo que só cancela parcela de
+verdade:
+- Só conta como candidato a cancelamento uma linha que seja **crédito**
+  (`r.amount > 0`) — descarta na hora coisas como "taxa de cancelamento"
+  cobrada (que seria débito).
+- Uma parcela futura só entra na lista de sugestão se: (a) tiver o
+  **valor exatamente igual** ao crédito da fatura, E (b) o memo já
+  reconhecido tiver o padrão `(N/M)` de parcela (`detectParcela`) — ou
+  seja, precisa já ser uma parcela futura de uma compra parcelada, não
+  qualquer lançamento futuro que coincida de ter o mesmo valor.
+- E o usuário ainda revisa e confirma linha por linha antes de qualquer
+  exclusão (`showCancelamentoConfirmUI` — isso não mudou).
+
+Com essas duas travas, o texto genérico funciona pra qualquer banco sem
+precisar de um dicionário de frases por instituição.
+
+---
+
+## 2026-07-20 (continuação 10) — 2 correções nos vídeos promocionais (todos os 6)
+
+### O quê
+1. **Vídeo 3 (Visão Geral), narração**: a palavra "Insights" (inglês,
+   nome do recurso na UI) fazia a voz `pt-BR-ThalitaMultilingualNeural`
+   trocar de idioma no meio da frase e sair falando em sotaque
+   espanhol/estranho. Trocado o texto da legenda 6 de "Insights que
+   realmente ajudam" pra "Sugestões que realmente ajudam" — em
+   `captions_03_visaogeral.json` (scratchpad), usado tanto pela versão
+   com legenda quanto pela narrada.
+2. **Tela de abertura curta demais** nos 3 vídeos — usuário pediu 4
+   segundos no total (a animação de entrada em si dura menos de 1s,
+   depois trava no frame final rápido demais pra dar tempo de ler
+   "Cruzeiro — Clareza para navegar seu dinheiro"). Corrigido com
+   `tpad=stop_mode=clone:stop_duration=X` no filtro do clipe de abertura
+   (calculado dinamicamente: `4.0 - (nº de frames / 30fps)`) — aplicado
+   nos 3 scripts de montagem (`assemble_real.js`, `assemble_video.js`,
+   `assemble_narrated.js`, todos em scratchpad). Testado isolado antes
+   de aplicar em massa (2 bugs de ffmpeg já encontrados nesta build
+   deixaram a cautela como hábito) — `tpad` funcionou de primeira, sem
+   surpresas.
+
+Todos os 6 arquivos em `store-assets/videos/` (3 com legenda + 3
+narrados) foram regerados com as duas correções.
+
+---
+
+## 2026-07-20 (continuação 9) — Narração por voz (TTS) como alternativa às legendas
+
+### O quê
+Usuário quis testar narração profissional em vez de legenda + música
+("tom sério mas convidativo"). Gerados
+`store-assets/videos/{01-contas,02-evolucao,03-visao-geral}-narrado.mp4`
+— mesma abertura/encerramento, vídeo real SEM legenda, com narração
+falada (voz `pt-BR-ThalitaMultilingualNeural`, ritmo -8%) entrando nos
+mesmos instantes em que cada legenda apareceria, e a trilha sonora bem
+mais baixa que antes (volume 0.09 em vez de 0.32) só como ambientação.
+Aprovado pelo usuário ("ficou perfeito") no teste do vídeo #1 antes de
+replicar pros outros 2. As versões com legenda (`01-contas.mp4` etc.)
+foram mantidas intactas pra comparação — usuário ainda não decidiu qual
+usar como definitiva.
+
+### TTS usado: Edge TTS (voz neural do Microsoft Edge), não SAPI/OneCore
+Primeira tentativa usou as vozes offline do Windows (OneCore/WinRT
+`Windows.Media.SpeechSynthesis`, vozes "Daniel"/"Maria" pt-BR) — o
+usuário achou o resultado "extremamente robótico". Trocado pro serviço
+de voz neural que o Microsoft Edge usa no "Ler em voz alta" (pacote
+Python `edge-tts`, `pip install edge-tts` — sem chave de API, sem custo,
+qualidade bem superior). Vozes pt-BR disponíveis:
+`pt-BR-AntonioNeural` (masculina), `pt-BR-FranciscaNeural` (feminina),
+`pt-BR-ThalitaMultilingualNeural` (feminina, multilíngue) — usuário
+escolheu Thalita depois de ouvir amostras das 3.
+
+Em paralelo o usuário testou o ElevenLabs (Text to Speech, não
+Dubbing) pra comparar — orientação dada: gerar as 4 frases do vídeo
+"Contas" em arquivos MP3 separados (um por frase, nessa ordem, pra
+encaixar cada fala no tempo certo do vídeo). Resultado dessa comparação
+ainda não voltou/não foi decisivo — Thalita já foi aprovada e usada pros
+3 vídeos.
+
+### Pipeline novo: `assemble_narrated.js` (scratchpad)
+Reaproveita as mesmas legendas (`captions_0N_*.json`, mesmos arquivos
+usados pro pipeline de legenda) como roteiro de fala — cada `text` vira
+uma chamada separada ao `edge-tts` (um mp3 por trecho), medido e
+posicionado com `adelay` no mesmo instante (`start`) em que a legenda
+visual apareceria, todos somados com `amix` num único trilho de
+narração, que depois é misturado com a trilha de fundo (também com
+`amix`, volumes controlados manualmente com `normalize=0` pra não perder
+nível) e por fim mixado no vídeo (sem legenda, sem `drawtext`).
+
+### Bugs encontrados e corrigidos
+1. **`amix ... duration=first` cortava o vídeo inteiro no fim da última
+   fala.** A narração é bem mais curta que o vídeo (só tem áudio até a
+   última frase); usar `duration=first` (referenciando a entrada da
+   narração) truncava a saída ali — vídeo de 50.73s virava 40s. Trocado
+   pra `duration=longest`, referenciando a trilha de fundo (que já foi
+   cortada com `atrim` pro tamanho certo do vídeo inteiro).
+2. **Áudio saía em mono.** O Edge TTS gera mono; sem forçar
+   `aformat=channel_layouts=stereo` nos dois ramos (narração e música)
+   antes do `amix`, o resultado herdava o layout do primeiro input
+   (mono) e a trilha de fundo perdia a largura estéreo.
+3. **Narrações se sobrepondo.** As legendas visuais foram cronometradas
+   pra leitura rápida de texto na tela — falar em voz alta o mesmo
+   trecho leva mais tempo, então em alguns pontos (ex: vídeo #3, 1ª e 2ª
+   falas) a narração anterior ainda não tinha terminado quando a
+   próxima "deveria" começar (pelo tempo original da legenda),
+   resultando em duas vozes sobrepostas. Corrigido com uma lógica de
+   fila em cascata: cada narração usa `max(tempo original, fim da
+   anterior + 0.25s de respiro)` como início real — sem problema
+   perceptível nisso, já que não existe mais legenda na tela pra
+   desincronizar visualmente.
+
+---
+
+## 2026-07-20 (continuação 6) — Vídeo promocional #1 ("Contas"): legendas modernas + bug de ffmpeg
+
+### O quê
+Usuário rejeitou o estilo de legenda anterior ("não gostei do formato,
+com a caixa em volta... precisava de algo mais moderno, mais
+profissional"). Redesenhado pra texto branco com sombra suave, sem caixa
+de fundo — mesma linguagem visual usada em vídeos de produto de apps como
+Linear/Stripe. `store-assets/videos/01-contas.mp4` foi regravado com o
+resultado final (fonte da gravação real do usuário no Pane Studio, 1080p
+— não é mais o vídeo sintético/roteirizado das tentativas anteriores).
+
+Pipeline de montagem inteiro (não faz parte do app — ferramentas em
+scratchpad de sessão, fora do repo) usa ffmpeg-static pra: gerar abertura
+e encerramento a partir de frames PNG (`store-assets/video-build/{opening,closing}.html`),
+sobrepor as 4 legendas com fade in/out na gravação real, concatenar tudo
+e misturar a trilha sonora (`Wavecont-Inspiring-Full.mp3`) por cima.
+
+### Bug de ffmpeg encontrado: `drawbox` ignora expressões em x=/y=
+A primeira tentativa do novo estilo incluía uma barrinha de destaque
+(cor de marca) acima do texto, com posição em expressão:
+`x=(w-64)/2:y=h-172`. A barra simplesmente não aparecia — nenhum erro,
+nenhum aviso. Isolando o filtro (testado sozinho, fora da cadeia com
+`drawtext`) e variando cada coordenada separadamente, confirmei: com
+`x`/`y` numéricos literais o `drawbox` funciona perfeitamente (inclusive
+com `t=fill`); com qualquer um dos dois como expressão (mesmo algo
+trivial tipo `(w-64)/2`), a caixa desaparece por completo nesta build do
+ffmpeg-static (Windows). Não é o mesmo bug do `t=fill` já documentado
+numa sessão anterior — esse já estava corrigido (`t=4` numérico) e ainda
+assim a barra não aparecia, o que apontou pra esse segundo bug distinto.
+
+Na prática, mesmo corrigindo a barra (coordenadas numéricas calculadas em
+JS), não sobrava espaço limpo pra ela nesta gravação: a janela do app
+ocupa quase o quadro inteiro (borda inferior por volta de y≈940 em
+1920x1080), colando quase direto no topo do texto da legenda (y≈942) —
+qualquer posição pra barra ou ficava atrás do conteúdo da janela ou
+colada/sobreposta ao texto. Decisão: removida a barra, mantido só texto
+com sombra (`shadowcolor=black@0.75:shadowx=0:shadowy=3`) — já atende o
+pedido do usuário (sem caixa) e continua legível mesmo quando a legenda
+cai sobre conteúdo claro da UI (testado nas 4 legendas do roteiro
+"Contas", incluindo uma caindo em cima de um modal).
+
+### Arquivos (fora do repo, scratchpad de sessão)
+`assemble_real.js` — script de montagem principal, com `barY`/`barX`
+agora calculados em JS (`W`/`H` são constantes 1920x1080) em vez de
+expressões ffmpeg, e a barra de destaque removida do `drawtexts`.
+
+### Ajuste seguinte: legenda dourada em vez de branca
+Usuário achou o texto branco "escondido" — trocado `fontcolor` pra
+`0xf9a825` (mesmo dourado do ícone/gráficos do app) e adicionado contorno
+escuro fino (`borderw=2.5:bordercolor=black@0.55`) além da sombra já
+existente, pra manter contraste tanto no fundo escuro do Windows quanto
+em cima de conteúdo claro da UI (testado nas 4 legendas, incluindo a que
+cai em cima de um modal).
+
+### Próximos passos (não feitos ainda)
+Replicar o mesmo pipeline (abertura/encerramento + legendas dourada +
+trilha) pros outros 7 vídeos do roteiro (`roteiros videos Cruzeiro.pdf`),
+na ordem sugerida: Dashboard → Orçamento → Evolução → Importação →
+Patrimônio (investimentos) → Patrimônio (ativo financiado) →
+Aposentadoria. Aguardando confirmação do usuário sobre o vídeo #1 antes
+de prosseguir.
+
+---
+
+## 2026-07-20 (continuação 7) — Vídeo promocional #2 ("Evolução")
+
+### O quê
+`store-assets/videos/02-evolucao.mp4` — mesmo pipeline do vídeo #1
+(abertura/encerramento + legendas douradas + trilha), aplicado à gravação
+real do usuário da aba Evolução (`Cruzeiro Evolução 1080p.mp4`, 45.23s).
+
+### Pipeline generalizado (`assemble_video.js`, scratchpad)
+O script do vídeo #1 (`assemble_real.js`) só aceitava uma gravação com
+tempos de legenda *escalados* a partir de um roteiro-alvo (não tínhamos
+os tempos reais ainda naquela primeira tentativa). Pra este vídeo o
+usuário já cronometrou a própria gravação e mandou os tempos exatos de
+cada legenda — criado `assemble_video.js`, versão genérica que lê as
+legendas de um JSON externo (`captionsFile`, tempos reais, sem escala) em
+vez de calcular a partir de um alvo de roteiro. Este será o script
+reaproveitado pros vídeos #3–8.
+
+Legenda 3 ("Com correção por IPCA e média móvel de 12 meses, o Cruzeiro
+te ajuda a ver as tendências reais") é longa demais pra uma linha em
+1920px — quebrada em 2 linhas manualmente no texto (`\n`) com fontsize
+reduzido (40 em vez de 46); testado visualmente, cabe sem cortar nas
+bordas do quadro. `assemble_video.js` aceita um `fontsize` opcional por
+legenda no JSON pra isso.
+
+### Arquivos
+`captions_02_evolucao.json` (scratchpad) — as 5 legendas com tempos reais
+passados pelo usuário.
+
+---
+
+## 2026-07-20 (continuação 8) — Vídeo promocional #3 ("Visão Geral")
+
+### O quê
+`store-assets/videos/03-visao-geral.mp4` — mesmo pipeline reaproveitado
+(`assemble_video.js`) aplicado à gravação real da aba Visão Geral
+(`Cruzeiro Visão Geral 1080p.mp4`, 65.97s), com as 7 legendas do roteiro
+e tempos reais passados pelo usuário
+(`captions_03_visaogeral.json`, scratchpad). Todas conferidas
+visualmente — sincronismo bateu bem com o conteúdo em tela (ex: "Metas
+sob controle" aparece exatamente sobre o card de Metas; "Insights que
+realmente ajudam" sobre o painel de Insights). Nenhum bug novo encontrado
+neste vídeo — o pipeline gerado nos vídeos #1/#2 já resolveu os problemas
+de fonte/posicionamento.
+
+---
+
 ## 2026-07-20 (continuação 5) — Novo relatório: Fluxo do dinheiro (Sankey)
 
 ### O quê
