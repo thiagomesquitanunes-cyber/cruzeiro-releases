@@ -12,6 +12,48 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-21 — Evolução: contas apareciam como categoria no "⚙ Configurar"
+
+### O quê
+No botão "⚙ Configurar" da aba Evolução (`openEvCatSelector`), contas
+bancárias, cartões e contas de investimento apareciam listadas junto com
+as categorias de verdade. Bug parecido com o já corrigido antes na aba
+Categorias (2026-07-xx, "Aba Categorias mostrando contas
+bancárias/cartões/investimentos"), só que numa fonte de dados diferente
+que aquele fix não cobria.
+
+### Causa
+Aquele fix anterior limpou a **lista gerenciada** de categorias
+(`_categories.json`, usada pela aba Categorias) e evita que nomes de
+conta sejam auto-registrados nela dali pra frente — mas, por design,
+nunca tocou `transactions.category` em si (dados históricos). A
+Evolução, diferente da aba Categorias, nunca leu da lista gerenciada:
+sempre monta `_ev.allCats` direto de `SELECT DISTINCT category FROM
+transactions` (via `ff.evolucaoByCat`/`evolucao:monthly-by-category`,
+main.js). Transações antigas — de antes do fix do parser de import que
+separava conta de categoria — ainda têm o nome da própria conta gravado
+em `category`, e por isso continuavam vazando pra essa lista.
+
+O mesmo filtro que resolveria isso já existia no código, só não estava
+sendo usado nesse ponto: `evLoadAllCatsStable()` e `openCatTypesConfig()`
+(ambos em renderer.js) já filtram `accountNames = new
+Set(accounts.map(a=>a.name))` antes de montar a lista — só que populam
+variáveis diferentes (`_ev.allCatsStable`, não `_ev.allCats`), então o
+modal "⚙ Configurar" (que lê `_ev.allCats`) continuava exposto.
+
+### Correção (`src/renderer.js`)
+Aplicado o mesmo filtro (`!accountNames.has(c) && !isTransferCategory(c)`)
+nos dois pontos que populam `_ev.allCats` sem filtro:
+`getEvolucaoData()` e o fallback dentro de `computeOverviewMonthSummary()`.
+
+### Verificação
+Testado ao vivo via CDP (`--remote-debugging-port`) contra os dados
+reais já sincronizados: confirmado que `_ev.allCats` não tem mais
+interseção com `accounts.map(a=>a.name)`, e que o modal "⚙ Configurar"
+renderizado mostra só as categorias de verdade (nenhuma conta/cartão).
+
+---
+
 ## 2026-07-20 (continuação 15) — Ajuste: bens pré-selecionados por padrão nas duas visões
 
 ### O quê

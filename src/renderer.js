@@ -18295,7 +18295,16 @@ async function getEvolucaoData() {
     ff.evolucaoSummary({ excludedCats: [] }),
     ff.evolucaoByCat({ excludedCats: [] }),
   ]);
-  _ev.allCats = [...new Set(catRows.map(r=>r.category))].sort();
+  // catRows vem direto de transactions.category, sem passar pela lista
+  // gerenciada de categorias (_categories.json) — transações antigas
+  // (de antes do fix de import que separava conta de categoria) ainda têm
+  // o nome da própria conta/cartão/investimento gravado ali. Sem esse
+  // filtro, essas contas apareciam na lista de categorias do "⚙
+  // Configurar" da Evolução, mesmo já não aparecendo mais na aba
+  // Categorias (que usa a lista gerenciada, já limpa). Mesmo filtro já
+  // usado em evLoadAllCatsStable()/openCatTypesConfig().
+  const accountNames = new Set((accounts||[]).map(a=>a.name));
+  _ev.allCats = [...new Set(catRows.map(r=>r.category).filter(c => c && !isTransferCategory(c) && !accountNames.has(c)))].sort();
 
   // byCategory — filtered by catConfigCats for "Por Categoria" view
   const allowedCats = buildAllowedCats(_ev.catConfigCats);
@@ -19110,7 +19119,12 @@ async function computeOverviewMonthSummary(fromDate, toDate) {
   const excl=[..._excludedCats];
   const month=fromDate.slice(0,7);
   const catRows=await ff.evolucaoByCat({excludedCats:excl});
-  if (!_ev.allCats.length) _ev.allCats=[...new Set(catRows.map(r=>r.category))].sort();
+  // Mesmo filtro de getEvolucaoData() — sem ele, esse fallback reintroduz
+  // contas/cartões/investimentos na lista assim que roda antes dela.
+  if (!_ev.allCats.length) {
+    const accountNames = new Set((accounts||[]).map(a=>a.name));
+    _ev.allCats=[...new Set(catRows.map(r=>r.category).filter(c => c && !isTransferCategory(c) && !accountNames.has(c)))].sort();
+  }
   const byCatFull={};
   catRows.forEach(r=>{if(!byCatFull[r.month])byCatFull[r.month]={};byCatFull[r.month][r.category]={income:r.income||0,expenses:r.expenses||0};});
   const summary=computeSummaryFromByCat([month],byCatFull);
