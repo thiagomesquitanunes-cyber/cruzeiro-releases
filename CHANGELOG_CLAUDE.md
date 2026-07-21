@@ -12,6 +12,61 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-21 (continuação) — Bug crítico: "Substituir provisão" duplicava o lançamento depois
+
+### O quê
+Usuário reportou (com prints) que, ao importar fatura/extrato e escolher
+"🔄 Substituir provisão" pra um lançamento que corresponde a uma
+recorrência já cadastrada, a transação real importada ficava DUPLICADA
+com a provisão antiga logo depois — não na hora da importação, mas na
+próxima vez que o app era aberto/desbloqueado.
+
+### Causa raiz
+O `DELETE` que apaga a provisão antiga (`main.js`, handler
+`bank:import`, dentro do bloco `if (Array.isArray(replaceIds) &&
+replaceIds.length)`) funcionava normalmente — mas a transação real
+inserida no lugar **não guardava nenhum vínculo** com a recorrência
+(nem `recurring_id`, nem uma linha em `recurring_excludes`). Do ponto de
+vista de `syncRecurringTxns()` (que roda em **todo boot/desbloqueio do
+app** — `mainStartupFlow`, `login:check`, `settings:check-password`),
+aquela ocorrência da recorrência nunca tinha sido atendida — então ela
+recriava uma provisão nova (`cleared=0`, valor/data **estimados** do
+cadastro da recorrência) do lado da transação real já importada.
+
+Isso explica os dois sintomas do print do usuário: duas linhas pro mesmo
+lançamento, com valores levemente diferentes (real vs. estimado), e o
+ícone de recorrência só numa das duas (a recriada). É um bug irmão —
+mas distinto — do corrigido em 2026-07-16 (v4.77.5, "Corrigir
+duplicação quando 'substituir provisão' falha"): aquele cobria o DELETE
+falhando NA HORA da substituição; este é o DELETE funcionando
+perfeitamente na hora, mas o "buraco" reaparecendo depois, na próxima
+sincronização de recorrências.
+
+### Correção (`src/main.js`, handler `bank:import`)
+Antes de apagar a provisão, guarda seu `recurring_id`+`date`; depois do
+`DELETE` confirmado (mesmo padrão já usado em `tx:delete`, que faz o
+mesmo pra exclusão manual), grava `INSERT OR IGNORE INTO
+recurring_excludes (recurring_id, date)` pra aquela ocorrência —
+sinalizando pro motor de recorrência que ela já foi atendida e não deve
+ser regenerada.
+
+### Verificação
+Testado com um script isolado (`sql.js` puro, sem Electron) contra uma
+CÓPIA do banco de dados fake (`Usuário Fake/cruzeiro_data.db`) — nunca o
+banco real do usuário: reproduzido o bug exato (2 linhas após rodar de
+novo a lógica de `syncRecurringTxns`) sem o fix, e confirmada a correção
+(1 linha só) com o fix aplicado, usando o mesmo SQL do código real.
+
+### ⚠️ Pendência: limpar os 3 lançamentos já duplicados
+O fix evita duplicatas NOVAS — não desfaz as que já foram criadas. Os 3
+lançamentos que o usuário reportou (Latam - Passagem Roma, Globoplay,
+Mercado Livre - Presente Dudu) continuam duplicados na base real dele.
+Ele precisa excluir manualmente, pra cada par, a linha com o ícone de
+recorrência (🔄, a provisão recriada com valor estimado) — a linha SEM
+o ícone é a transação real importada da fatura/extrato, essa fica.
+
+---
+
 ## 2026-07-21 — Evolução: contas apareciam como categoria no "⚙ Configurar"
 
 ### O quê
