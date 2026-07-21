@@ -12,6 +12,34 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-20 (continuação 13) — Mobile: exclusão otimista de lançamento (feedback do usuário)
+
+### O quê
+Usuário testou o botão de excluir lançamento (feature da entrada
+anterior) e apontou: depois de excluir, o item continuava aparecendo
+normal na lista da conta até o próximo sync real do desktop — sem
+feedback de que a exclusão estava em andamento. Corrigido nos dois
+repositórios mobile (iOS/Android) com o mesmo padrão já usado pro
+lançamento otimista (`pendingEntries.js`), só que invertido:
+`markPendingDelete(id)` grava localmente que aquele id está sendo
+excluído; a tela da conta (`conta/[name].js`) marca a linha com
+`_pendingDelete`, mostrando memorando riscado, ícone 🗑️, texto
+"Excluindo…" e desabilitando a interação — some sozinha quando o sync
+real confirma (id não aparece mais na lista) ou depois de 15min.
+
+### Também nesta sessão: reformulação da narração do vídeo #3
+A frase "Sugestões que realmente ajudam" (já trocada de "Insights" numa
+entrada anterior) continuava saindo com sotaque estranho na voz Thalita
+— confirmado que **repetir a mesma frase/voz produz sempre o mesmo áudio**
+(edge-tts é determinístico), então retry não resolve, só reformulação do
+texto. Usuário recusou trocar de voz no meio do vídeo ("vai ficar
+horrível"), então geradas 3 variações de texto (mesma voz Thalita) pro
+usuário escolher fora do computador (enviadas como arquivo, não por
+caminho local, já que estava sem acesso à máquina) — decisão final ainda
+pendente.
+
+---
+
 ## 2026-07-20 (continuação 12) — Mobile: excluir lançamento (sync) + achado importante sobre o bug de moeda
 
 ### Achado: o fix de máscara de moeda do mobile nunca tinha sido publicado
