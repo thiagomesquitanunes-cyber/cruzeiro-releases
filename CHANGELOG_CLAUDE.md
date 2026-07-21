@@ -12,6 +12,85 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-21 (continuação 4) — Bug: gauges de meta na Visão Geral travavam em 200%
+
+### O quê
+Usuário notou que, na aba Visão Geral, o gauge de "Curto prazo" (meta de
+aposentadoria) parava de subir em 200% mesmo quando o progresso real era
+maior (ex: 222%, valor que a própria aba Metas já mostrava corretamente
+sem teto). Pediu para nenhum gauge de meta ter teto.
+
+### Causa
+`renderDashGoals()` (`src/renderer.js`, linha ~1783), usada só na Visão
+Geral, tinha três `Math.min(pct, 200)` que a aba Metas (`renderRetirementGoalCard`/
+`renderGoalCard`, mesmo arquivo) nunca teve — essa última já calcula o
+percentual sem teto, e só o anel visual do gauge (`lap1`/`lap2`, 2 voltas
+no máximo) satura visualmente em 200%; o número exibido acima do anel
+sempre foi o valor real. Os três limites removidos:
+- `pctLong` (longo prazo — patrimônio) e `pctShort` (curto prazo —
+  poupança mensal) do card duplo da meta de aposentadoria.
+- `pct` do card simples de metas normais (`target`/`monthly`/`emergency`).
+
+### Correção
+Removidos os três `Math.min(_, 200)`, deixando os percentuais exibidos
+sem teto — mesmo comportamento que a aba Metas já tinha. O anel do
+gauge continua com o mesmo visual de antes (satura em 2 voltas = "200%
+cheio" na cor verde), só o número acima dele agora sobe livremente.
+
+### Teste
+Sintaxe verificada (`node -c`) e app testado ao vivo via CDP na aba
+Visão Geral sem erros — os valores atuais do usuário estavam abaixo de
+200% no momento do teste (dado ao vivo, muda com o tempo), então a
+correção foi confirmada por leitura do código (nenhum `Math.min(_,200)`
+remanescente) e pela ausência de erros ao renderizar.
+
+---
+
+## 2026-07-21 (continuação 3) — Bug: calculadora do campo de valor perdia os centavos ao usar operador
+
+### O quê
+Usuário relatou: ao digitar um valor com centavos no campo de valor (que
+funciona como calculadora embutida — aceita `+`, `-`, `*`, `/`) e em
+seguida apertar um operador, os centavos somem e o valor passa a ser
+tratado como se fosse em reais — 100x maior que o digitado. Ex: `R$
+150,45` seguido de `+` virava, na prática, `15045` (interpretado como
+150,45 reais na formatação errada), resultando num total 100x maior que
+o esperado.
+
+### Causa
+`setupCurrencyInput()` (`src/renderer.js:17794`) formata dígitos como
+moeda "caixa eletrônico" enquanto o usuário digita (dígitos empurram os
+centavos da direita pra esquerda). Ao detectar o primeiro operador
+matemático, o código precisa reconverter esse operando pro formato que a
+expressão espera — e uma correção anterior (2026-07-20, ver "Modal de
+lançamento/transferência: calculadora embutida") já havia resolvido o
+caso de valores pequenos (digitar "48" e ficar preso em "R$0,48" em vez
+de virar "48" na expressão). Mas essa correção reduzia QUALQUER operando
+para dígitos crus antes do operador — inclusive valores que já tinham
+reais E centavos reais (ex: `R$ 150,45` → dígitos crus `15045`), o que
+descarta a vírgula decimal e multiplica o valor final por 100 quando a
+expressão é avaliada.
+
+### Correção
+Mesmo trecho (`src/renderer.js`, dentro do listener `input` de
+`setupCurrencyInput`): agora só reduz a dígitos crus quando o valor é
+menor que R$1,00 (só centavos, sem parte inteira — o caso original que a
+correção anterior visava). Para valores de R$1,00 pra cima, preserva
+como decimal com vírgula (ex: `R$150,45` → `150,45`), consistente com o
+formato que o resto da expressão espera (segundo operando digitado
+livremente pelo usuário, com vírgula manual).
+
+### Teste
+Verificado ao vivo via CDP contra o app real rodando (sem alterar dados,
+só manipulando o campo do modal "Novo lançamento" e fechando sem salvar):
+- `48+50` → `R$ 98,00` (comportamento do caso pequeno, inalterado)
+- `150,45+10,00` → `R$ 160,45` (caso do bug relatado, antes daria
+  `R$ 15.055,00` — confirmado corrigido)
+- `R$1,00` exato (fronteira de 100 centavos) também preserva a vírgula
+  corretamente.
+
+---
+
 ## 2026-07-21 (continuação 2) — Investigação: desconexão intermitente do Supabase
 
 ### O quê

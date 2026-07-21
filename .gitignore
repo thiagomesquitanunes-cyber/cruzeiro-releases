@@ -48,3 +48,9 @@ _import_pending.json
 _sync_hashes.json
 _egress_log.json
 _auth_log.txt
+
+# Vídeos promocionais (binários grandes, não fazem parte do build/release —
+# ficam só localmente em store-assets/, fonte de onde são publicados manualmente
+# pro site). store-assets/screenshots/ continua versionado normalmente.
+store-assets/videos/
+store-assets/video-build/

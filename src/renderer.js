@@ -1824,10 +1824,10 @@ async function renderDashGoals() {
     if (g.type === 'retirement') {
       // ── Meta de aposentadoria: card duplo (longo + curto prazo) ──
       const pctLong = retirementLive && (g.target_amount||0) > 0
-        ? Math.max(0, Math.min(200, (retirementLive.currentPat / g.target_amount) * 100)) : 0;
+        ? Math.max(0, (retirementLive.currentPat / g.target_amount) * 100) : 0;
       const targetMonthly = g.monthly_amount || 0;
       const pctShort = targetMonthly <= 0 ? 100
-        : Math.max(0, Math.min(200, retirementLive ? (retirementLive.currentMA12 / targetMonthly) * 100 : 0));
+        : Math.max(0, retirementLive ? (retirementLive.currentMA12 / targetMonthly) * 100 : 0);
       const colorLong  = pctLong  >= 100 ? '#43a047' : color;
       const ratioShort = targetMonthly <= 0 ? 1.1 : (retirementLive ? retirementLive.currentMA12 / targetMonthly : 0);
       const colorShort = ratioShort >= 1.1 ? '#43a047' : ratioShort >= 1 ? '#f0a93a' : '#ef5350';
@@ -1903,7 +1903,6 @@ async function renderDashGoals() {
       const current = g.account_id ? (balMap[g.account_id] || 0) : 0;
       pct = target > 0 ? Math.max(0, (current / target) * 100) : 0;
     }
-    pct = Math.min(pct, 200);
     const gaugeColor = pct >= 100 ? '#43a047' : color;
 
     const mini = document.createElement('div');
@@ -17848,12 +17847,20 @@ function setupCurrencyInput(el, onChange) {
         // tipo "48+50" o usu\u00e1rio quer dizer literalmente 48, n\u00e3o 0,48 \u2014
         // ent\u00e3o reconverte o primeiro operando pro valor inteiro que foi
         // digitado antes de deixar o resto da express\u00e3o livre (sem m\u00e1scara).
+        // Mas isso s\u00f3 vale pra valores abaixo de R$1 (s\u00f3 centavos, sem parte
+        // inteira) \u2014 se o valor j\u00e1 tem reais E centavos reais (ex: R$150,45),
+        // reduzir a d\u00edgitos crus perde a v\u00edrgula e o valor vira 100x maior
+        // (15045 tratado como reais). Nesse caso preserva como decimal.
         mathModeEntered = true;
         const opIdx = raw.search(/[+\-*/(]/);
         const leadPart = raw.slice(0, opIdx);
         const rest = raw.slice(opIdx);
         const leadCents = toCents(leadPart);
-        el.value = (leadCents === 0 ? '' : String(leadCents)) + rest;
+        let leadStr;
+        if (leadCents === 0) leadStr = '';
+        else if (leadCents < 100) leadStr = String(leadCents);
+        else leadStr = (leadCents / 100).toFixed(2).replace('.', ',');
+        el.value = leadStr + rest;
         setTimeout(() => el.setSelectionRange(el.value.length, el.value.length), 0);
       }
       if (onChange) onChange();
