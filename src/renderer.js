@@ -20739,10 +20739,18 @@ function refreshPatrimonioTable() {
   // monthly installment kicked in either.
   const debtByAsset     = {}; // { assetId: { month: value } }
   const debtProjByAsset = {}; // { assetId: { month: bool } } — true = projected
+  // Valor líquido por bem/direito (bruto − saldo devedor de financiamento),
+  // mês a mês — mesma composição de assetTotalByMonth (o agregado de
+  // todos os bens), só que preservado por ativo individual. Exposto em
+  // window._patAssetNetByMonth pro seletor "quais bens geram renda" da
+  // aba Aposentadoria (apos2GetPatAssetsWithValues) não somar o valor
+  // BRUTO de um imóvel financiado como se a dívida não existisse.
+  const assetNetByMonth = {}; // { assetId: { month: value } }
   _pat.assets.forEach(a => {
+    assetNetByMonth[a.id] = {};
     months.forEach(m => {
       const v = histMap[a.id]?.[m]?.value;
-      if (v != null) assetTotalByMonth[m] += v;
+      if (v != null) { assetTotalByMonth[m] += v; assetNetByMonth[a.id][m] = v; }
     });
     if (a.financed && _pat.financing[a.id]?.length) {
       const allFins = _pat.financing[a.id].sort((x,y) => x.month.localeCompare(y.month));
@@ -20920,7 +20928,12 @@ function refreshPatrimonioTable() {
           ${iCells}
           <td style="background:${bg};${STICKY};right:0;min-width:60px"></td>
         </tr>`}`;
-        months.forEach(m => { if (debtMap[m] != null) assetTotalByMonth[m] += debtMap[m]; });
+        months.forEach(m => {
+          if (debtMap[m] != null) {
+            assetTotalByMonth[m] += debtMap[m];
+            assetNetByMonth[a.id][m] = (assetNetByMonth[a.id][m] || 0) + debtMap[m];
+          }
+        });
       });
     }
 
@@ -21275,6 +21288,7 @@ function refreshPatrimonioTable() {
 
   // Store for use by overview
   window._patGrandTotal = { value: grandTotal, month: curM };
+  window._patAssetNetByMonth = assetNetByMonth;
 
   // Grand TIR for all investments (excluindo caixa — sem aporte/resgate
   // registrado, caixa entraria como "ganho" puro se contasse aqui)
@@ -25320,6 +25334,19 @@ const APOS_STORAGE_KEY = 'cruzeiro_apos_config';
 let _aposView = 'table';
 let _aposChart1 = null, _aposChart2 = null;
 let _aposFocusData = null;
+// Bens e direitos considerados geradores de renda no cálculo do
+// "patrimônio atual" desta visão (ex: imóvel alugado conta, a casa onde
+// mora normalmente não) — mesmo mecanismo já usado na visão
+// Pós-Aposentadoria (_apos2IncomeAssetIds), reaproveitando
+// apos2GetPatAssetsWithValues()/apos2RenderAssetPicker(). Diferença
+// importante: aqui o padrão (usuário que nunca mexeu no seletor) é
+// TODOS os bens contarem — mantém compatível com o comportamento
+// anterior (que somava o patrimônio total sem opção de exclusão). Só
+// depois que o usuário salva uma seleção explícita (mesmo que vazia) é
+// que _aposIncomeAssetIdsConfigured vira true e a lista salva passa a
+// valer exatamente como está.
+let _aposIncomeAssetIds = new Set();
+let _aposIncomeAssetIdsConfigured = false;
 
 async function aposSaveConfig() {
   // Salva o valor exibido no campo (texto formatado) — aposParseInput sabe interpretar.
@@ -25334,6 +25361,12 @@ async function aposSaveConfig() {
     apos_patAtual:   G('apos-patrimonio-atual')?.value || '',
     apos_rateReal:   G('apos-rate-real')?.value || '',
     apos_rateInfl:   G('apos-rate-infl')?.value || '',
+    // Só grava se o usuário já mexeu no seletor (_aposIncomeAssetIdsConfigured)
+    // — sem isso, o primeiro aposSaveConfig() disparado por qualquer outro
+    // campo (ex: mudar a idade) gravaria a lista "todos por padrão" como se
+    // fosse uma escolha explícita do usuário, travando esse comportamento
+    // padrão pra sempre em vez de continuar acompanhando os bens cadastrados.
+    ...(_aposIncomeAssetIdsConfigured ? { apos_incomeAssetIds: [..._aposIncomeAssetIds] } : {}),
     // aposTglMode() dispara este save (via aposCalc()) e o de apos2SaveConfig()
     // em paralelo, sem aguardar um pelo outro — ambos fazem leitura+escrita
     // do mesmo arquivo, e o que escrever por último "vence". Sem incluir
@@ -25353,7 +25386,7 @@ async function aposSaveConfig() {
 async function aposResetConfig() {
   try {
     const cfg = await ff.overviewConfigGet().catch(() => null) || {};
-    ['apos_goalType','apos_goalValue','apos_ageNow','apos_ageRet','apos_patAtual','apos_rateReal','apos_rateInfl'].forEach(k => delete cfg[k]);
+    ['apos_goalType','apos_goalValue','apos_ageNow','apos_ageRet','apos_patAtual','apos_rateReal','apos_rateInfl','apos_incomeAssetIds'].forEach(k => delete cfg[k]);
     await ff.overviewConfigSave(cfg);
   } catch(e) {}
   // Limpa todos os campos
@@ -25364,6 +25397,12 @@ async function aposResetConfig() {
   if (r) r.checked = true;
   if (G('apos-kpis')) G('apos-kpis').innerHTML = '';
   if (G('apos-table-body')) G('apos-table-body').innerHTML = '';
+  // Volta ao padrão (todos os bens contam) e recalcula o campo automático.
+  _aposIncomeAssetIds = new Set();
+  _aposIncomeAssetIdsConfigured = false;
+  const panel = G('apos-income-assets-panel');
+  if (panel) panel.style.display = 'none';
+  await aposPullPatrimonio();
 }
 
 async function aposLoadConfig() {
@@ -25422,6 +25461,16 @@ async function aposLoadConfig() {
     if (cfg.apos_patAtual)   { const inp = G('apos-patrimonio-atual');   if (inp) (inp.setValue ? inp.setValue(parseBRLStr(cfg.apos_patAtual)) : (inp.value = cfg.apos_patAtual)); }
     if (cfg.apos_rateReal)   G('apos-rate-real').value = cfg.apos_rateReal;
     if (cfg.apos_rateInfl)   G('apos-rate-infl').value = cfg.apos_rateInfl;
+    if (Array.isArray(cfg.apos_incomeAssetIds)) {
+      _aposIncomeAssetIds = new Set(cfg.apos_incomeAssetIds);
+      _aposIncomeAssetIdsConfigured = true;
+    } else {
+      // Nunca configurado — aposInit() preenche com todos os bens
+      // cadastrados assim que a aba Patrimônio estiver carregada (aqui
+      // ainda pode não estar, então não dá pra montar a lista já).
+      _aposIncomeAssetIds = new Set();
+      _aposIncomeAssetIdsConfigured = false;
+    }
   } catch(e) {}
 }
 
@@ -25490,23 +25539,40 @@ async function aposUpdateFocus() {
   }
 }
 
+// Recompõe o "patrimônio atual" a partir dos componentes (em vez do
+// window._patGrandTotal bruto da aba Patrimônio), pra poder excluir bens
+// e direitos que não geram renda (ex: casa própria) — mesma lógica da
+// visão Pós-Aposentadoria (apos2PullPatrimonio): investimentos e contas
+// bancárias sempre contam, bens/direitos só contam se marcados em
+// _aposIncomeAssetIds, e dívidas pessoais sempre reduzem o total
+// (independem de gerar renda ou não).
 async function aposPullPatrimonio() {
   try {
-    // Use the grand total from patrimônio tab if available (most accurate)
-    let total = 0;
-    if (window._patGrandTotal && typeof window._patGrandTotal.value === 'number' && window._patGrandTotal.value > 0) {
+    const now = new Date();
+    const curM = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const invTotal    = (window._invTotalByMonth || {})[curM] || 0;
+    // accounts (global) só tem metadados (nome, tipo, banco...), NÃO tem
+    // saldo — saldo por conta vive em _pat.accountBalances[].history, o
+    // mesmo dado que a aba Patrimônio usa pra somar o card "Contas".
+    const contasTotal = (_pat?.accountBalances || []).reduce((s, a) => {
+      const up = (a.history || []).filter(h => h.month <= curM);
+      return s + (up.length ? up[up.length - 1].balance : 0);
+    }, 0);
+    const bensTotal = apos2GetPatAssetsWithValues()
+      .filter(a => _aposIncomeAssetIds.has(a.id))
+      .reduce((s, a) => s + a.value, 0);
+    let totalDebt = 0;
+    (_pat?.debts || []).forEach(d => {
+      const rows = (_pat.debtInstallments?.[d.id] || []);
+      const rowsUpTo = rows.filter(r => r.month.slice(0, 7) <= curM);
+      if (rowsUpTo.length) totalDebt += rowsUpTo[rowsUpTo.length - 1].balance_end ?? 0;
+    });
+    let total = invTotal + contasTotal + bensTotal - totalDebt;
+    // Se ainda não há nada carregado (aba Patrimônio vazia/não carregada
+    // nesta sessão), cai pro total bruto já calculado por lá como
+    // fallback — evita mostrar 0 por causa de uma corrida de carregamento.
+    if (!total && window._patGrandTotal && typeof window._patGrandTotal.value === 'number') {
       total = window._patGrandTotal.value;
-    } else {
-      // Fallback: sum account balances. accounts (global) só tem metadados
-      // (nome, tipo, banco...) — NÃO tem saldo; saldo por conta vive em
-      // _pat.accountBalances[].history (mesmo dado que a aba Patrimônio usa
-      // pro card "Contas"). accounts.reduce(...a.balance...) sempre dava 0.
-      const now2 = new Date();
-      const curM2 = `${now2.getFullYear()}-${String(now2.getMonth()+1).padStart(2,'0')}`;
-      total = (_pat?.accountBalances || []).reduce((s, a) => {
-        const up = (a.history || []).filter(h => h.month <= curM2);
-        return s + (up.length ? up[up.length - 1].balance : 0);
-      }, 0);
     }
     const inp = G('apos-patrimonio-atual');
     if (inp) {
@@ -25516,6 +25582,23 @@ async function aposPullPatrimonio() {
       aposCalc();
     }
   } catch(e) { toast('Erro ao buscar patrimônio: ' + e.message); }
+}
+
+// Painel de seleção de bens/direitos geradores de renda — visão 1 (esta
+// tela não tem botão "usar atual" como a Pós-Aposentadoria, o campo é
+// sempre automático, então marcar/desmarcar já recalcula na hora).
+function aposToggleIncomeAssetsPanel() {
+  const panel = G('apos-income-assets-panel');
+  if (!panel) return;
+  const willOpen = panel.style.display === 'none';
+  panel.style.display = willOpen ? '' : 'none';
+  if (willOpen) apos2RenderAssetPicker('apos-income-assets-panel', _aposIncomeAssetIds, 'aposToggleIncomeAsset');
+}
+function aposToggleIncomeAsset(id) {
+  if (_aposIncomeAssetIds.has(id)) _aposIncomeAssetIds.delete(id); else _aposIncomeAssetIds.add(id);
+  _aposIncomeAssetIdsConfigured = true;
+  aposSaveConfig();
+  aposPullPatrimonio();
 }
 
 // Converte uma string em formato brasileiro ("R$ 1.234,56" ou "1234,56" ou
@@ -25976,6 +26059,13 @@ async function aposInit() {
   if (!window._evMA12LucroByMonth || Object.keys(window._evMA12LucroByMonth).length === 0) {
     try { await computeEvMA12LucroData(); } catch(e) {}
   }
+  // Se o usuário nunca configurou o seletor de bens/direitos geradores de
+  // renda nesta visão, todos contam por padrão — mantém o comportamento
+  // de antes da feature existir (soma tudo). Só dá pra montar essa lista
+  // aqui, depois que refreshPatrimonio() já carregou _pat.assets.
+  if (!_aposIncomeAssetIdsConfigured) {
+    _aposIncomeAssetIds = new Set(apos2GetPatAssetsWithValues().map(a => a.id));
+  }
   // Patrimônio atual é sempre puxado automaticamente do total real (não editável manualmente)
   await aposPullPatrimonio();
   await apos2Init();
@@ -26008,10 +26098,18 @@ let _apos2PreserveAssetIds = new Set(); // bens e direitos a preservar (viram o 
 // (renderer.js, refreshPatrimonioChart). Investimentos financeiros não
 // entram aqui de propósito — o usuário pediu que eles sempre contem como
 // geradores de renda, sem precisar aparecer nesta lista de seleção.
+//
+// Usa window._patAssetNetByMonth (valor JÁ LÍQUIDO de financiamento,
+// calculado pela renderização da aba Patrimônio) quando disponível — sem
+// isso, um imóvel financiado entrava aqui pelo valor BRUTO (como se a
+// dívida do financiamento não existisse), inflando bastante o total de
+// quem marca esse imóvel como gerador de renda. Cai pro histMap bruto só
+// como fallback (ex: sessão em que a aba Patrimônio ainda não renderizou).
 function apos2GetPatAssetsWithValues() {
   if (!_pat?.assets?.length) return [];
   const now = new Date();
   const curM = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const netByMonth = window._patAssetNetByMonth || {};
   const histMap = {};
   (_pat.historyAll || []).forEach(h => {
     if (!histMap[h.asset_id]) histMap[h.asset_id] = {};
@@ -26020,8 +26118,14 @@ function apos2GetPatAssetsWithValues() {
   return _pat.assets
     .filter(a => !a.hidden)
     .map(a => {
-      const months = Object.keys(histMap[a.id] || {}).filter(m => m <= curM).sort();
-      const value = months.length ? (histMap[a.id][months[months.length - 1]] || 0) : 0;
+      const netMonths = Object.keys(netByMonth[a.id] || {}).filter(m => m <= curM).sort();
+      let value;
+      if (netMonths.length) {
+        value = netByMonth[a.id][netMonths[netMonths.length - 1]] || 0;
+      } else {
+        const months = Object.keys(histMap[a.id] || {}).filter(m => m <= curM).sort();
+        value = months.length ? (histMap[a.id][months[months.length - 1]] || 0) : 0;
+      }
       return { id: a.id, name: a.name, value };
     })
     .filter(a => a.value > 0.01);

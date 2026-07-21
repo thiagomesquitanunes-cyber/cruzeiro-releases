@@ -12,6 +12,62 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-20 (continuação 14) — Aposentadoria (visão principal): seletor de bens que geram renda + bug de valor bruto
+
+### O quê
+Pedido do usuário: a visão principal "Rumo à Aposentadoria" somava o
+patrimônio atual inteiro (via `window._patGrandTotal`, aba Patrimônio)
+como se TODO bem gerasse renda — sem a opção de excluir, por exemplo, o
+imóvel onde mora, que já existia na visão Pós-Aposentadoria
+(`_apos2IncomeAssetIds`, `apos2ToggleIncomeAssetsPanel`). Adicionado o
+mesmo seletor nesta visão, reaproveitando as funções genéricas já
+existentes (`apos2GetPatAssetsWithValues`, `apos2RenderAssetPicker`).
+
+### Implementação (`src/renderer.js`, `src/index.html`)
+- Novo estado `_aposIncomeAssetIds` / `_aposIncomeAssetIdsConfigured` e
+  funções `aposToggleIncomeAssetsPanel()`/`aposToggleIncomeAsset(id)`
+  (mesmo padrão da visão 2).
+- `aposPullPatrimonio()` recomposto a partir dos componentes (investimentos
+  + contas sempre, bens/direitos só se marcados, menos dívidas pessoais) em
+  vez de usar `_patGrandTotal` bruto — igual à lógica já usada em
+  `apos2PullPatrimonio()`.
+- **Compatibilidade importante**: diferente da visão 2 (que sempre foi
+  opt-in, começando vazia), aqui o padrão pra quem nunca mexeu no seletor
+  é TODOS os bens contarem — preserva o comportamento de antes da feature
+  existir (soma tudo). Só quando o usuário desmarca algo explicitamente
+  (`_aposIncomeAssetIdsConfigured=true`) é que a seleção salva passa a
+  valer. `aposInit()` popula esse "todos por padrão" logo depois que
+  `refreshPatrimonio()` carrega `_pat.assets`.
+- Link "▾ Escolher quais bens e direitos geram renda" + painel adicionados
+  no HTML, no mesmo bloco do campo "Patrimônio atual".
+
+### Bug real encontrado durante o teste: valor bruto em vez de líquido
+Testando com dados reais (via CDP, sem mutar nada — só leitura), o
+patrimônio recalculado deu **quase o dobro** do valor antigo correto
+(R$955mil vs. R$483mil esperado). Causa: `apos2GetPatAssetsWithValues()`
+lia o valor **bruto** de cada bem direto de `_pat.historyAll`, sem
+descontar o saldo devedor de financiamento — um apartamento financiado
+entrava pelo valor de mercado cheio, não pelo patrimônio líquido real
+(valor − dívida). Esse bug já existia na visão Pós-Aposentadoria também
+(criada antes, usa a mesma função), só nunca tinha ficado tão visível.
+
+Corrigido expondo `window._patAssetNetByMonth` (valor líquido por bem,
+por mês — calculado durante a renderização da aba Patrimônio,
+`refreshPatrimonio()`, já que o desconto de financiamento por
+contrato/parcela é complexo demais pra duplicar) e usando isso como
+fonte primária em `apos2GetPatAssetsWithValues()`, com fallback pro valor
+bruto só se a aba Patrimônio ainda não tiver renderizado nesta sessão.
+Depois da correção, o valor recalculado bateu exatamente com o antigo
+(R$482.915,53 nos dois), e o Apartamento passou a mostrar R$209.097,69
+(líquido) em vez de R$681.945,96 (bruto) no seletor.
+
+### Verificação
+Testado ao vivo via CDP (`--remote-debugging-port`) contra os dados reais
+já sincronizados — sem clicar em nenhum checkbox (evita gravar
+configuração), só leitura/inspeção do DOM e das funções JS.
+
+---
+
 ## 2026-07-20 (continuação 13) — Mobile: exclusão otimista de lançamento (feedback do usuário)
 
 ### O quê
