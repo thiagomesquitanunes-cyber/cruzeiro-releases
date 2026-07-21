@@ -12,6 +12,67 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-21 (continuação 2) — Investigação: desconexão intermitente do Supabase
+
+### O quê
+Usuário relatou que, de vez em quando, sem ação própria, o app aparece
+como "Desconectado" nas Configurações, pedindo email/senha de novo. Usa
+o app em 2 computadores; confirmou que "single session per user" está
+**desativado** no Supabase (não é a causa). Investigação encontrou um
+único ponto de restauração de sessão no boot (`mainStartupFlow`,
+main.js) e identificou 3 hipóteses de causa raiz, das quais as duas
+primeiras foram corrigidas nesta sessão (a terceira é só monitoramento):
+
+1. **Falha transitória de rede exatamente no boot** (mais provável de
+   explicar a frequência "de vez em quando, sem causa aparente"): o app
+   só tenta renovar a sessão UMA VEZ no boot; qualquer soluço de
+   rede/DNS/VPN/timeout nesse instante único marcava a sessão como
+   "Desconectada" pelo resto da execução — mesmo com o token salvo em
+   disco continuando 100% válido, sem nenhum retry automático depois.
+2. **Corrida entre duas instâncias do Electron na mesma máquina**
+   (candidato mais forte pra uma desconexão REAL, não só aparente): o
+   app nunca teve trava de instância única
+   (`app.requestSingleInstanceLock()`). Se duas cópias abrissem quase
+   juntas (clique duplo, atalho + bandeja, processo anterior que não
+   fechou), ambas competiriam pelo MESMO `refresh_token` salvo em disco
+   — o Supabase rotaciona esse token a cada uso (single-use), então a
+   segunda a usá-lo recebe erro e pode invalidar a sessão inteira
+   (inclusive o token novo que a primeira acabou de obter).
+3. Acesso em 2 computadores por si só **não deveria** causar conflito
+   (cada máquina mantém sua própria cadeia de refresh_token, em arquivo
+   local — nunca sincronizado via Dropbox) — a menos que uma delas tenha
+   uma instância duplicada rodando (item 2).
+
+### Correções (`src/main.js`)
+1. **`app.requestSingleInstanceLock()`** adicionado logo no topo do
+   arquivo — uma segunda tentativa de abrir o app agora só foca a janela
+   já aberta, em vez de rodar `mainStartupFlow()` em paralelo e brigar
+   pelo mesmo refresh_token.
+2. **Retry com backoff** (até 3 tentativas, 1.5s/3s de espera) no trecho
+   de `mainStartupFlow` que chama `sb.refreshSession()`, só pra erro
+   TRANSITÓRIO (rede/timeout) — token realmente inválido continua
+   falhando rápido, sem retry (não adianta insistir num token morto).
+3. **Log persistido em arquivo** (`logAuth()`, novo helper, grava em
+   `_auth_log.txt` na pasta de dados, últimas ~200 linhas) pros eventos
+   desse fluxo — antes só existia `console.log`/`console.warn`, invisível
+   num app empacotado sem DevTools aberto. Se o problema persistir depois
+   dessas correções, esse arquivo vai mostrar exatamente qual dos 3
+   cenários aconteceu.
+
+### Testado
+App reiniciado normalmente (sessão restaurada na 1ª tentativa, log
+gravado certo) e testada a trava de instância única de verdade: abrir
+uma segunda cópia disparou `second-instance` na primeira (confirmado no
+`_auth_log.txt`) em vez de rodar um segundo `mainStartupFlow()`.
+
+### Pendência
+Não foi possível confirmar com certeza qual das hipóteses é a causa real
+sem reproduzir o bug ao vivo — as correções acima cobrem as duas mais
+prováveis. Se o usuário ver "Desconectado" de novo, o arquivo
+`_auth_log.txt` (mesma pasta dos dados) vai dizer exatamente o motivo.
+
+---
+
 ## 2026-07-21 (continuação) — Bug crítico: "Substituir provisão" duplicava o lançamento depois
 
 ### O quê

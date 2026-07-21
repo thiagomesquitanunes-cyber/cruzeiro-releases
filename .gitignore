@@ -47,3 +47,4 @@ backups/
 _import_pending.json
 _sync_hashes.json
 _egress_log.json
+_auth_log.txt

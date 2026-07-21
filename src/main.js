@@ -3,6 +3,29 @@ const path = require('path');
 const fs   = require('fs');
 const crypto = require('crypto');
 
+// ── Trava de instância única ────────────────────────────────────────────
+// Sem isso, nada impedia abrir duas cópias do app ao mesmo tempo na mesma
+// máquina (clique duplo no atalho enquanto ainda carrega, ícone da
+// bandeja + atalho, processo anterior que não fechou de vez). Cada cópia
+// roda seu próprio mainStartupFlow() e chama sb.refreshSession() com o
+// MESMO refresh_token salvo em disco — o Supabase Auth faz rotação
+// single-use desse token, então a segunda chamada a usá-lo recebe
+// invalid_grant e pode invalidar a sessão inteira (inclusive o token novo
+// que a primeira cópia acabou de obter), forçando login de novo do nada.
+// Com a trava, a segunda tentativa de abrir só foca a janela já aberta.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    try { logAuth('SEGUNDA_INSTANCIA bloqueada — outra cópia do app já estava aberta'); } catch(e) {}
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+    }
+  });
+}
+
 // ── SYNC MOBILE (Supabase) ──
 const sb          = require('./sync/supabase-client');
 const syncPush    = require('./sync/sync-push');
@@ -50,6 +73,24 @@ function loadSettings(forUserId) {
 }
 function saveSettings(s, forUserId) {
   fs.writeFileSync(getSettingsPath(forUserId), JSON.stringify(s, null, 2));
+}
+// Log persistido em arquivo pro fluxo de restaurar sessão Supabase no
+// boot — os console.log/warn desse trecho só aparecem com o DevTools
+// aberto; num app empacotado, uma desconexão "do nada" não deixava
+// nenhum rastro consultável depois. Guarda só as últimas ~200 linhas
+// (não precisa de rotação sofisticada, é só pra diagnosticar o próximo
+// episódio, não um log de produção de verdade).
+function logAuth(msg) {
+  try {
+    const base = app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..');
+    const logPath = path.join(base, '_auth_log.txt');
+    const line = `[${new Date().toISOString()}] pid=${process.pid} ${msg}\n`;
+    let existing = '';
+    try { existing = fs.readFileSync(logPath, 'utf8'); } catch(e) {}
+    const lines = (existing + line).split('\n').filter(Boolean);
+    const trimmed = lines.slice(-200).join('\n') + '\n';
+    fs.writeFileSync(logPath, trimmed);
+  } catch(e) {}
 }
 
 function getImportStatePath() {
@@ -2675,54 +2716,76 @@ async function mainStartupFlow() {
   const settings = loadSettings();
   let sessionRestored = false;
   if (!_dbPendingDecrypt && settings.supabaseRefreshToken) {
-    try {
-      const refreshed = await sb.refreshSession(settings.supabaseRefreshToken);
-      console.log('[sync] sessão restaurada para', settings.supabaseEmail);
-      sessionRestored = true;
+    // Retry com backoff pra erro TRANSITÓRIO (rede/timeout/servidor fora
+    // do ar no exato instante do boot — ex: laptop acordando do sleep
+    // antes do Wi-Fi reconectar, VPN corporativa demorando a subir). Sem
+    // isso, um único hiccup de rede nesse momento marcava a sessão como
+    // "Desconectada" pelo resto da execução do app — mesmo com o token
+    // salvo em disco continuando 100% válido — e a única saída visível
+    // pro usuário era digitar a senha de novo, mesmo sem necessidade
+    // nenhuma. Token realmente inválido (rejeitado pelo Supabase) continua
+    // falhando rápido, sem retry — não adianta insistir num token morto.
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const refreshed = await sb.refreshSession(settings.supabaseRefreshToken);
+        console.log(`[sync] sessão restaurada para ${settings.supabaseEmail} (tentativa ${attempt}/${MAX_ATTEMPTS})`);
+        logAuth(`OK sessão restaurada para ${settings.supabaseEmail} (tentativa ${attempt}/${MAX_ATTEMPTS})`);
+        sessionRestored = true;
 
-      // Persiste o NOVO refresh token — o Supabase usa tokens rotativos:
-      // cada uso invalida o anterior e gera um novo. Sem persistir aqui,
-      // a próxima abertura do app tentaria usar um token já expirado.
-      if (refreshed?.refresh_token) {
-        const s2 = loadSettings();
-        s2.supabaseRefreshToken = refreshed.refresh_token;
-        saveSettings(s2);
-      }
-
-      if (sb.getUserId()) await _ensureFirstRun(sb.getUserId()).catch(() => {});
-
-      // Restaura chave de criptografia usando senha guardada pelo safeStorage
-      if (safeStorage.isEncryptionAvailable() && settings.supabaseEncryptedPassword) {
-        try {
-          const password = safeStorage.decryptString(
-            Buffer.from(settings.supabaseEncryptedPassword, 'base64')
-          );
-          await initEncryptionKey(sb.getUserId(), password);
-        } catch (e) {
-          console.warn('[crypto] não foi possível restaurar chave de dados:', e.message);
+        // Persiste o NOVO refresh token — o Supabase usa tokens rotativos:
+        // cada uso invalida o anterior e gera um novo. Sem persistir aqui,
+        // a próxima abertura do app tentaria usar um token já expirado.
+        if (refreshed?.refresh_token) {
+          const s2 = loadSettings();
+          s2.supabaseRefreshToken = refreshed.refresh_token;
+          saveSettings(s2);
+        } else {
+          console.warn('[sync] refreshSession não retornou refresh_token novo — token salvo pode ficar desatualizado até a próxima renovação');
         }
-      }
 
-      runMobileSync('startup').catch(() => {});
-    } catch(e) {
-      const errMsg = e.message || '';
-      const isTokenInvalid = errMsg.includes('invalid') || errMsg.includes('expired')
-        || errMsg.includes('401') || errMsg.includes('not found');
+        if (sb.getUserId()) await _ensureFirstRun(sb.getUserId()).catch(() => {});
 
-      if (isTokenInvalid) {
-        // Token realmente inválido ou expirado — precisa re-login
-        console.log('[sync] token inválido, re-login necessário:', errMsg);
-        const s2 = loadSettings();
-        delete s2.supabaseRefreshToken;
-        delete s2.supabaseEmail;
-        saveSettings(s2);
-        sessionRestored = false;
-      } else {
-        // Erro transitório (rede, timeout, servidor indisponível) —
-        // mantém o token salvo para tentar novamente na próxima abertura.
-        console.warn('[sync] falha transitória ao restaurar sessão (token preservado):', errMsg);
-        // Continua sem sessão ativa nesta execução, mas não força re-login
-        sessionRestored = false;
+        // Restaura chave de criptografia usando senha guardada pelo safeStorage
+        if (safeStorage.isEncryptionAvailable() && settings.supabaseEncryptedPassword) {
+          try {
+            const password = safeStorage.decryptString(
+              Buffer.from(settings.supabaseEncryptedPassword, 'base64')
+            );
+            await initEncryptionKey(sb.getUserId(), password);
+          } catch (e) {
+            console.warn('[crypto] não foi possível restaurar chave de dados:', e.message);
+          }
+        }
+
+        runMobileSync('startup').catch(() => {});
+        break; // sucesso — não tenta de novo
+      } catch(e) {
+        const errMsg = e.message || '';
+        const isTokenInvalid = errMsg.includes('invalid') || errMsg.includes('expired')
+          || errMsg.includes('401') || errMsg.includes('not found');
+
+        if (isTokenInvalid) {
+          // Token realmente inválido ou expirado — precisa re-login, sem retry
+          console.log('[sync] token inválido, re-login necessário:', errMsg);
+          logAuth(`TOKEN_INVALIDO re-login necessário: ${errMsg}`);
+          const s2 = loadSettings();
+          delete s2.supabaseRefreshToken;
+          delete s2.supabaseEmail;
+          saveSettings(s2);
+          sessionRestored = false;
+          break;
+        } else if (attempt < MAX_ATTEMPTS) {
+          console.warn(`[sync] falha transitória ao restaurar sessão (tentativa ${attempt}/${MAX_ATTEMPTS}), tentando de novo:`, errMsg);
+          logAuth(`TRANSITORIO tentativa ${attempt}/${MAX_ATTEMPTS} falhou, retry: ${errMsg}`);
+          await new Promise(r => setTimeout(r, 1500 * attempt));
+        } else {
+          // Erro transitório mesmo após todas as tentativas — mantém o
+          // token salvo pra tentar de novo na próxima abertura do app.
+          console.warn('[sync] falha transitória ao restaurar sessão após todas as tentativas (token preservado):', errMsg);
+          logAuth(`TRANSITORIO todas as ${MAX_ATTEMPTS} tentativas falharam, token preservado: ${errMsg}`);
+          sessionRestored = false;
+        }
       }
     }
   }
