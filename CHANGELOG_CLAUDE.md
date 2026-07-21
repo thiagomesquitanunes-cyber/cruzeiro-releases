@@ -12,6 +12,29 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-20 (continuação 15) — Ajuste: bens pré-selecionados por padrão nas duas visões
+
+### O quê
+Ajuste no seletor "quais bens e direitos geram renda" (as duas visões da
+aba Aposentadoria): ao abrir o painel, todos os bens agora vêm
+**pré-marcados** — o usuário clica pra DESmarcar o que não gera renda
+(ex: a casa onde mora), em vez de precisar marcar um por um. Isso já era
+o comportamento da visão principal (implementada agora há pouco), mas a
+Pós-Aposentadoria (`_apos2IncomeAssetIds`) sempre começou vazia (usuário
+tinha que marcar um por um) — alinhado agora com `_apos2IncomeAssetIdsConfigured`,
+mesmo padrão da visão principal.
+
+### Caso de borda encontrado testando com dados reais
+A config salva do usuário já tinha `apos2_incomeAssetIds: []` (array
+vazio, de uso anterior da feature antes desta mudança). Um array vazio
+salvo, tratado como "escolha explícita de zero bens", teria bloqueado o
+novo padrão pra sempre. Ajustado pra só considerar "configurado" (e
+respeitar a lista salva como está) quando o array salvo NÃO for vazio —
+um array vazio agora é tratado como "nunca configurado de verdade", caindo
+no novo padrão (todos marcados). Mesmo ajuste aplicado nas duas visões.
+
+---
+
 ## 2026-07-20 (continuação 14) — Aposentadoria (visão principal): seletor de bens que geram renda + bug de valor bruto
 
 ### O quê

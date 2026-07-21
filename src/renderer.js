@@ -25461,7 +25461,9 @@ async function aposLoadConfig() {
     if (cfg.apos_patAtual)   { const inp = G('apos-patrimonio-atual');   if (inp) (inp.setValue ? inp.setValue(parseBRLStr(cfg.apos_patAtual)) : (inp.value = cfg.apos_patAtual)); }
     if (cfg.apos_rateReal)   G('apos-rate-real').value = cfg.apos_rateReal;
     if (cfg.apos_rateInfl)   G('apos-rate-infl').value = cfg.apos_rateInfl;
-    if (Array.isArray(cfg.apos_incomeAssetIds)) {
+    // Array VAZIO não conta como "configurado" (ver mesmo tratamento em
+    // apos2LoadConfig) — só uma lista não-vazia é escolha explícita.
+    if (Array.isArray(cfg.apos_incomeAssetIds) && cfg.apos_incomeAssetIds.length) {
       _aposIncomeAssetIds = new Set(cfg.apos_incomeAssetIds);
       _aposIncomeAssetIdsConfigured = true;
     } else {
@@ -26092,6 +26094,11 @@ let _apos2Chart = null;
 let _apos2CalcField = 'idade';
 let _apos2IncomeAssetIds   = new Set(); // bens e direitos considerados geradores de renda (afeta "usar atual" do patrimônio inicial)
 let _apos2PreserveAssetIds = new Set(); // bens e direitos a preservar (viram o patrimônio desejado na idade limite)
+// Igual à visão 1 (_aposIncomeAssetIdsConfigured): ao abrir o painel pela
+// primeira vez, todos os bens vêm pré-marcados (usuário clica pra
+// DESmarcar o que não gera renda, não o contrário) — só depois que ele
+// mexe em algo é que a seleção salva passa a valer como está.
+let _apos2IncomeAssetIdsConfigured = false;
 
 // Bens e direitos (_pat.assets) com o valor mais recente conhecido —
 // mesmo padrão de leitura de histMap usado no gráfico de Patrimônio
@@ -26163,6 +26170,7 @@ function apos2TogglePreserveAssetsPanel() {
 }
 function apos2ToggleIncomeAsset(id) {
   if (_apos2IncomeAssetIds.has(id)) _apos2IncomeAssetIds.delete(id); else _apos2IncomeAssetIds.add(id);
+  _apos2IncomeAssetIdsConfigured = true;
   apos2SaveConfig();
   // Recalcula o "usar atual" na hora — antes só atualizava se o usuário
   // clicasse em "usar atual" de novo, o que não era nada óbvio depois de
@@ -26390,7 +26398,12 @@ async function apos2SaveConfig() {
     apos2_despesa:     G('apos2-despesa')?.value || '',
     apos2_patFinal:    G('apos2-pat-final')?.value || '',
     apos2_calcField:   _apos2CalcField,
-    apos2_incomeAssetIds:   [..._apos2IncomeAssetIds],
+    // Só grava se o usuário já mexeu no seletor — mesmo motivo do
+    // equivalente na visão 1 (ver aposSaveConfig): sem essa condição, o
+    // primeiro save disparado por qualquer outro campo gravaria "todos
+    // marcados" como escolha explícita, travando esse padrão pra sempre
+    // em vez de continuar acompanhando os bens cadastrados.
+    ...(_apos2IncomeAssetIdsConfigured ? { apos2_incomeAssetIds: [..._apos2IncomeAssetIds] } : {}),
     apos2_preserveAssetIds: [..._apos2PreserveAssetIds],
     apos_mode:         _aposMode,
   };
@@ -26411,7 +26424,21 @@ async function apos2LoadConfig() {
     if (cfg.apos2_despesa)    { const inp=G('apos2-despesa'); if (inp) (inp.setValue?inp.setValue(parseBRLStr(cfg.apos2_despesa)):(inp.value=cfg.apos2_despesa)); }
     if (cfg.apos2_patFinal)   { const inp=G('apos2-pat-final'); if (inp) (inp.setValue?inp.setValue(parseBRLStr(cfg.apos2_patFinal)):(inp.value=cfg.apos2_patFinal)); }
     if (cfg.apos2_calcField)  _apos2CalcField = cfg.apos2_calcField;
-    if (Array.isArray(cfg.apos2_incomeAssetIds))   _apos2IncomeAssetIds   = new Set(cfg.apos2_incomeAssetIds);
+    // Array VAZIO não conta como "configurado" — antes desta mudança o
+    // padrão era começar vazio (usuário clicava pra ADICIONAR), então um
+    // array vazio salvo quase sempre é só "nunca mexeu no seletor", não
+    // uma escolha deliberada de zero bens. Só uma lista não-vazia é
+    // tratada como escolha explícita do usuário.
+    if (Array.isArray(cfg.apos2_incomeAssetIds) && cfg.apos2_incomeAssetIds.length) {
+      _apos2IncomeAssetIds = new Set(cfg.apos2_incomeAssetIds);
+      _apos2IncomeAssetIdsConfigured = true;
+    } else {
+      // Nunca configurado (ou só array vazio antigo) — apos2Init()
+      // preenche com todos os bens cadastrados assim que _pat.assets
+      // estiver disponível.
+      _apos2IncomeAssetIds = new Set();
+      _apos2IncomeAssetIdsConfigured = false;
+    }
     if (Array.isArray(cfg.apos2_preserveAssetIds)) _apos2PreserveAssetIds = new Set(cfg.apos2_preserveAssetIds);
     if (cfg.apos_mode)        _aposMode = cfg.apos_mode;
   } catch(e) {}
@@ -26424,6 +26451,13 @@ async function apos2Init() {
   setupCurrencyInput(G('apos2-pat-final'), apos2Calc);
   await apos2PopulateCategoryDropdown();
   await apos2LoadConfig();
+  // Se o usuário nunca configurou o seletor, todos os bens vêm marcados
+  // por padrão (usuário clica pra desmarcar o que não gera renda) — igual
+  // à visão 1. _pat.assets já está carregado a essa altura (aposInit()
+  // chama refreshPatrimonio() antes de apos2Init()).
+  if (!_apos2IncomeAssetIdsConfigured) {
+    _apos2IncomeAssetIds = new Set(apos2GetPatAssetsWithValues().map(a => a.id));
+  }
   // O campo mostra "4.0" como placeholder, mas placeholder nunca é o
   // .value real do input — sem isso, o cálculo lia string vazia (rate=0)
   // até o usuário clicar e digitar algo, mesmo já vendo "4.0" na tela.
