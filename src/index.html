@@ -1799,8 +1799,8 @@ select.inp option{background:var(--bg2);}
             <!-- Patrimônio inicial (sempre informado pelo usuário) -->
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🏛️ Patrimônio inicial (R$)</div>
-              <div style="display:flex;gap:6px">
-                <input class="inp" id="apos2-pat-inicial" type="text" placeholder="0" style="flex:1;font-size:14px">
+              <input class="inp" id="apos2-pat-inicial" type="text" placeholder="0" style="width:100%;font-size:14px">
+              <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
                 <button class="ev-action-btn" onclick="apos2PullPatrimonio()" style="white-space:nowrap">usar atual</button>
                 <button class="ev-action-btn" onclick="apos2PullPatrimonioMeta()" title="Usa o patrimônio que você pretende ter na aposentadoria, calculado na aba &quot;Rumo à Aposentadoria&quot;" style="white-space:nowrap">usar patrimônio pretendido</button>
               </div>

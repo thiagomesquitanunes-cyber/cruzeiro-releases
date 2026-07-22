@@ -46,6 +46,21 @@ duplicada.
 
 ---
 
+## 2026-07-22 (continuação 4) — Ajuste: layout do "usar patrimônio pretendido" espremido
+
+### O quê
+Usuário testou o botão novo (entrada anterior) e o layout ficou
+espremido: campo de valor + 2 botões numa linha só, texto do segundo
+botão cortado.
+
+### Correção
+`src/index.html` (~linha 1799): campo "Patrimônio inicial" agora ocupa
+a largura toda sozinho; os dois botões ("usar atual" / "usar patrimônio
+pretendido") ficam empilhados verticalmente abaixo, um em cima do
+outro. Confirmado por screenshot ao vivo via CDP.
+
+---
+
 ## 2026-07-22 (continuação 3) — Pós-aposentadoria: botão "usar patrimônio pretendido"
 
 ### O quê
