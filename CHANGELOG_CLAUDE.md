@@ -12,6 +12,173 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-22 — Windows Store: corrige "Tile" com ícone padrão (certificação recusada)
+
+### O quê
+Microsoft recusou a certificação (Product ID `9P0JHTVM816H`) com o motivo
+"10.1.1.11 On Device Tiles — The available product tile icons include a
+default image", pacote com violação: "Tile".
+
+### Causa
+`build.appx` no `package.json` nunca configurou uma pasta de assets
+customizados pro appx (`assets/appx/`) — sem ela, o `electron-builder`
+usa suas PRÓPRIAS imagens de amostra genéricas
+(`node_modules/app-builder-lib/templates/appxAssets/SampleAppx.*.png`)
+pra `StoreLogo.png`, `Square150x150Logo.png`, `Square44x44Logo.png` e
+`Wide310x150Logo.png` (ver `AppXTarget.js`, `vendorAssetsForDefaultAssets`)
+— literalmente o ícone genérico do electron-builder, não o logo do
+Cruzeiro. Além disso, `Square310x310Logo` (tile grande) e
+`Square71x71Logo` (tile pequeno) nunca eram declarados no
+`AppxManifest.xml` — o template só inclui esses dois SE existirem
+`LargeTile.png`/`SmallTile.png` na pasta de assets (`AppxTarget.js`,
+`defaultTileTag()`), e como nunca existiram, essas duas variantes de
+tile simplesmente não tinham NENHUM ícone customizado — fonte provável
+do "default image" reportado pela Microsoft.
+
+### Correção
+Criada `assets/appx/` (pasta que o electron-builder já procura
+automaticamente — `APPX_ASSETS_DIR_NAME = "appx"` relativo a
+`directories.buildResources`, que já era `"assets"`) com os 6 ícones
+gerados a partir do mesmo `assets/icon.svg` (círculo dourado "C$" +
+barras verdes, fundo `#004d40`, cantos arredondados):
+- `StoreLogo.png` (50×50), `Square44x44Logo.png` (44×44),
+  `SmallTile.png` (71×71), `Square150x150Logo.png` (150×150),
+  `LargeTile.png` (310×310) — ícone centralizado com pequena margem.
+- `Wide310x150Logo.png` (310×150) — ícone centralizado sobre fundo
+  sólido da marca (`#0d3b2e`, mesma cor de `appx.backgroundColor`).
+
+Gerados via Chromium headless (canvas 2D, sem dependência de
+ImageMagick/sharp/Inkscape — nenhum instalado nesta máquina): SVG
+carregado como `<img>`, desenhado em `<canvas>` no tamanho exato de
+cada asset, exportado com `toDataURL('image/png')`. Script descartável
+em scratchpad de sessão, não faz parte do repo.
+
+### Teste
+Build local do appx não roda nesta máquina (falha reconhecida, ver
+entrada anterior sobre `winCodeSign`/symlink — corporativo, sem Modo de
+Desenvolvedor). Verificação feita por leitura direta do código do
+`electron-builder` (`AppXTarget.computeUserAssets`/`defaultTileTag`):
+com os 6 arquivos agora presentes em `assets/appx/`, nenhum dos 4
+fallbacks de amostra é usado (`isDefaultAssetIncluded` encontra os 4
+nomes), e as duas tags que faltavam (`Square310x310Logo`,
+`Square71x71Logo`) passam a ser incluídas no manifesto. Confirmação
+definitiva só via o workflow manual `build-appx-test.yml` (Actions →
+"Build Windows Store (.appx) — teste manual" → Run workflow) — precisa
+ser disparado pelo usuário (sem `gh` CLI disponível nesta sessão pra
+disparar via API).
+
+### Próximo passo
+Rodar o workflow, baixar o `.appx` gerado (artefato do run), reenviar
+pro Partner Center. Informar o Product ID (`9P0JHTVM816H`) se precisar
+contatar o suporte da Microsoft.
+
+---
+
+## 2026-07-21 (continuação 8) — Refeito o vídeo #5 (Orçamento): narração atrasada
+
+### O quê
+Usuário achou que "toda a narração ficou um pouco atrasada" na v2 do
+vídeo de Orçamento (entrada anterior). Encurtou o texto de 3 das 7 falas
+e antecipou o início da 1ª (00:49→00:19), reduzindo o quanto cada fala
+precisa do empurrão em cascata (mecanismo de 2026-07-20 que evita
+sobreposição de narrações). Publicado direto no site (`orcamento.mp4`),
+sem espera de aprovação — usuário confirmou que vai revisar direto lá.
+
+### Resultado
+Atraso acumulado máximo caiu de 8.56s (v2) pra 6.53s (v3), e o vídeo
+voltou a caber no tamanho natural (48.40s) sem precisar esticar o
+encerramento (o fix de 2026-07-21 continuação 7 pra isso continua
+disponível, só não foi necessário desta vez).
+
+---
+
+## 2026-07-21 (continuação 7) — Vídeo promocional #5 (Orçamento) + fix no pipeline de narração
+
+### O quê
+Novo vídeo narrado da aba Orçamento, publicado no site
+(`Cruzeiro Site/public/videos/orcamento.mp4`, referenciado em
+`Features.jsx` na entrada `'orcamento'`) e salvo localmente em
+`store-assets/videos/05-orcamento-narrado.mp4` (fora do git, mesmo
+padrão dos outros 4 vídeos). Usuário autorizou publicar sem aprovação
+prévia dessa vez.
+
+### Bug encontrado no pipeline (`assemble_narrated.js`, scratchpad)
+Esse vídeo tem 7 falas de narração bem mais densas/longas que os
+anteriores, encaixadas numa gravação de só 41s — o empurrão em cascata
+(quando uma narração ainda não terminou e a próxima "deveria" começar,
+ver entrada de 2026-07-20 sobre esse mecanismo) acumulou atraso
+suficiente pra a ÚLTIMA fala ("Nunca mais perca o controle do seu
+planejamento") terminar DEPOIS do fim natural do vídeo (abertura +
+gravação + encerramento no tamanho padrão) — o `-shortest` do mux final
+cortaria a frase pela metade, sem nenhum aviso.
+
+**Correção no script**: depois de calcular a cascata de delays (que
+precisa rodar antes, já que depende só da duração da abertura), mede se
+a última narração ultrapassa a duração natural do vídeo e, se sim,
+estica o encerramento com `tpad=stop_mode=clone` (mesma técnica já usada
+na abertura) até sobrar uma folga de 1.2s. Sem essa folga, o vídeo
+teria: 48.40s naturais vs. última fala terminando em 49.64s — corrigido
+esticando o encerramento em 2.43s (log de aviso adicionado também, pro
+caso de precisar mais que isso numa próxima vez).
+
+### Teste
+Rodado o pipeline com o fix, sem cortes: vídeo final com 50.83s, última
+narração terminando em 49.64s (dentro do total, com folga).
+
+---
+
+## 2026-07-21 (continuação 6) — Ajuste: Rollover verde ilegível na linha de totalização
+
+### O quê
+Na linha de totalização de "Despesas" (aba Orçamento, fundo vermelho
+sólido), o valor da coluna Rollover usava a mesma cor verde/vermelha da
+linha de categoria individual — verde sobre fundo vermelho, ilegível.
+
+### Correção
+`groupRow()` (`src/renderer.js:16261`, usada só nas linhas de
+totalização Receitas/Despesas) não coloca mais um `<span>` colorido
+dentro da célula — o texto herda a cor branca já aplicada no `<td>` pai
+(mesmo padrão das outras células dessa linha). A cor verde/vermelha por
+sinal continua normal na linha de cada categoria (fundo claro, onde faz
+sentido).
+
+### Teste
+Confirmado ao vivo via CDP: célula da linha "Despesas" com
+`color: rgb(255, 255, 255)`, sem `<span>` interno.
+
+---
+
+## 2026-07-21 (continuação 5) — Ajuste: coluna "Rollover" mais larga na aba Orçamento
+
+### O quê
+Usuário pediu para aumentar a largura da coluna "Rollover" na tabela da
+aba Orçamento (`src/index.html`/`src/renderer.js`), que estava apertada
+demais pra valores maiores.
+
+### Causa (não era só CSS)
+A tabela usa `table-layout:fixed` com um `<colgroup>` gerado
+dinamicamente em JS (`STICKY_W`, `renderBudgetPage()` em
+`src/renderer.js:16214`) — em layout fixo, a largura do `<col>` tem
+prioridade sobre a largura declarada na classe CSS do `<th>`/`<td>`
+(`.budget-sticky-3` em `src/index.html:391`). Mudar só o CSS não tinha
+efeito nenhum visualmente porque o colgroup sobrescrevia.
+
+### Correção
+Dois lugares, mesma largura (90px → 130px), pra ficar consistente:
+- `src/index.html:391` — `.budget-sticky-3{width:130px}` (e ajustado o
+  `left` das colunas seguintes, `.budget-sticky-4`/`-5`, que empilham
+  horizontalmente via `position:sticky`).
+- `src/renderer.js:16214` — `STICKY_W = [170, 120, 130, 80, 80]`
+  (o valor que realmente manda no layout fixo).
+
+### Teste
+Verificado ao vivo via CDP contra o app real: `offsetWidth` da coluna
+Rollover confirmado em 130px (era 90px) após a correção, colunas
+seguintes reposicionadas corretamente sem sobreposição, sem clipping de
+conteúdo.
+
+---
+
 ## 2026-07-21 (continuação 4) — Bug: gauges de meta na Visão Geral travavam em 200%
 
 ### O quê
