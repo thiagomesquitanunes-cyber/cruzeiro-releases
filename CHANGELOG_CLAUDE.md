@@ -12,6 +12,42 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-22 (continuação) — Bug: fatura Santander recusada ("Não foi possível identificar o período")
+
+### O quê
+Usuário reportou erro ao importar uma fatura Santander específica:
+"Não foi possível identificar o período da fatura Santander ('Esta
+Fatura')."
+
+### Causa
+`parseSantanderFaturaPDF()` (`src/renderer.js:11203`) procura a linha
+"Esta Fatura" na página 1 pra extrair o período de cobrança, usando
+`/EstaFatura/i` (sem espaço) sobre o texto "denso" (glifos concatenados
+sem espaços — técnica normal pra esse PDF fragmentado). Nesta fatura em
+específico, o pdf.js extraiu "Esta Fatura" como um item de texto ÚNICO
+com o espaço interno preservado (em vez de fragmentos glifo-a-glifo sem
+espaço, como no resto do documento) — o regex sem tolerância a espaço
+nunca batia. O mesmo valia pro regex de extração das datas
+(`DD/MM/YYaDD/MM/YY`, sem espaço ao redor do "a") — o texto real trazia
+"30/05/26 a 30/06/26", com espaços.
+
+### Correção
+Os dois regex agora toleram espaço opcional: `/Esta\s*Fatura/i` e
+`/(\d{2}\/\d{2}\/\d{2})\s*a\s*(\d{2}\/\d{2}\/\d{2})/`. Comportamento
+pro formato antigo (sem espaço) continua idêntico — `\s*` casa
+string vazia também.
+
+### Teste
+Reproduzido com o PDF real do usuário (extração do texto bruto da
+página 1 via pdf.js, ao vivo no app rodando, confirmando a hipótese
+antes de mexer no código) e depois validado rodando
+`parseSantanderFaturaPDF()` de ponta a ponta com o mesmo arquivo: 61
+transações extraídas corretamente, datas dentro do período correto
+(30/05 a 30/06/26), parcelas resolvidas certinho (ex: "TATIANNA
+PERAZOLO DERM 09/10").
+
+---
+
 ## 2026-07-22 — Windows Store: corrige "Tile" com ícone padrão (certificação recusada)
 
 ### O quê

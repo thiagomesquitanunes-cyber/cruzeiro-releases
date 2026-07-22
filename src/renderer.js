@@ -11224,8 +11224,13 @@ async function parseSantanderFaturaPDF(buffer) {
     for (const y of Object.keys(rowMap1)) {
       const items = rowMap1[y].sort((a,b) => a.x - b.x);
       const rowText = items.map(it => it.text).join('');
-      if (!/EstaFatura/i.test(rowText)) continue;
-      const m = rowText.match(/(\d{2}\/\d{2}\/\d{2})a(\d{2}\/\d{2}\/\d{2})/);
+      // Alguns layouts de fatura Santander trazem "Esta Fatura" (e o "a"
+      // entre as datas do período) como um item de texto único do pdf.js,
+      // com o espaço interno preservado — diferente do glifo-a-glifo
+      // fragmentado do resto do PDF, onde tudo fica colado. Tolera os dois
+      // casos (com ou sem espaço) em vez de exigir um formato fixo.
+      if (!/Esta\s*Fatura/i.test(rowText)) continue;
+      const m = rowText.match(/(\d{2}\/\d{2}\/\d{2})\s*a\s*(\d{2}\/\d{2}\/\d{2})/);
       if (m) { periodStart = m[1]; periodEnd = m[2]; break; }
     }
   }
@@ -16211,7 +16216,7 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
   // isso, o navegador usa auto-layout e colapsa colunas vazias/com pouco
   // conteúdo para quase 0px quando há muitas colunas (era exatamente o
   // bug visto: meses viravam barras finíssimas, ilegíveis).
-  const STICKY_W = [170, 120, 90, 80, 80];
+  const STICKY_W = [170, 120, 130, 80, 80];
   const MONTH_W  = [120, 60]; // realizado, %
   // Coluna extra, em branco, ao final da tabela — existe só pra "absorver"
   // o corte quando a largura da tela não é um múltiplo exato da largura das
@@ -16258,9 +16263,12 @@ function renderBudgetTable({ incomeBudgets, expenseBudgets, months, curMonthStr,
     // % sempre contra o planejado MENSAL (sem rollover).
     const planned12m = planned * last12Months.length;
     const pct12m = planned12m > 0 ? (actual12m / planned12m * 100) : 0;
+    // Cor fixa branca aqui (não verde/vermelho como na linha de categoria
+    // individual) — essa é a linha de totalização, com fundo colorido
+    // sólido (${bg}), onde o verde padrão fica ilegível.
     const rollCell = (type === 'income' || !rolloverTotal)
       ? '—'
-      : `<span style="color:${rolloverTotal >= 0 ? 'var(--green)' : 'var(--red)'}">${rolloverTotal > 0 ? '+' : ''}${fmtBRL(rolloverTotal)}</span>`;
+      : `${rolloverTotal > 0 ? '+' : ''}${fmtBRL(rolloverTotal)}`;
     let row = `<tr>
       <td class="budget-sticky budget-sticky-1" style="background:${bg};color:#fff;font-weight:700">${label}</td>
       <td class="budget-sticky budget-sticky-2 right" style="background:${bg};color:#fff;font-weight:700;font-family:'DM Mono',monospace">${fmtBRL(planned)}</td>
