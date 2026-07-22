@@ -46,6 +46,40 @@ duplicada.
 
 ---
 
+## 2026-07-22 (continuação 3) — Pós-aposentadoria: botão "usar patrimônio pretendido"
+
+### O quê
+Novo botão na visão "Pós-aposentadoria" (aba Aposentadoria), ao lado do
+já existente "usar atual": puxa como patrimônio inicial da simulação o
+patrimônio que o usuário PRETENDE ter na aposentadoria (a meta
+configurada na visão "Rumo à Aposentadoria"), em vez do patrimônio
+atual. Permite simular o consumo do patrimônio-alvo, não do que já foi
+acumulado até hoje.
+
+### Arquivos
+- `src/renderer.js`, `aposCalc()` (~linha 25757): expõe
+  `window._aposMetaPatrimonio = metaPatrimonio` logo após calcular a
+  meta (limpa pra `null` no early-return se a visão 1 estiver
+  incompleta — evita usar um valor obsoleto de uma sessão anterior).
+- `src/renderer.js`, nova função `apos2PullPatrimonioMeta()` (perto de
+  `apos2PullPatrimonio()`): lê o global acima, avisa com toast se ainda
+  não disponível (pede pra preencher a meta na visão 1 primeiro),
+  senão preenche `apos2-pat-inicial` e recalcula.
+- `src/index.html` (~linha 1804): novo botão "usar patrimônio
+  pretendido" ao lado do "usar atual".
+
+### Teste
+Sintaxe verificada. Testado ao vivo via CDP: com o global setado
+manualmente (sem tocar na config real do usuário — `aposCalc()` grava
+no disco ao rodar, e a meta real do usuário estava vazia), o botão
+preencheu `apos2-pat-inicial` corretamente e o `rawValue()` bateu com o
+valor esperado. Restaurado o valor original do campo depois do teste
+(o clique de teste, ao chamar `apos2Calc()`, tinha sobrescrito a
+config salva do usuário com o valor de teste — corrigido antes de
+encerrar).
+
+---
+
 ## 2026-07-22 (continuação) — Bug: fatura Santander recusada ("Não foi possível identificar o período")
 
 ### O quê

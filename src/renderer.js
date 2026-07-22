@@ -25761,6 +25761,7 @@ async function aposCalc() {
     if (!ageRet || ageRet <= ageNow) missing.push('idade na aposentadoria (maior que atual)');
     G('apos-kpis').innerHTML = `<div style="color:var(--text3);font-size:13px;padding:12px">Preencha: ${missing.join(', ')}.</div>`;
     if (G('apos-table-body')) G('apos-table-body').innerHTML = '';
+    window._aposMetaPatrimonio = null; // visão incompleta — indisponível pro "usar meta" da Pós-aposentadoria
     return;
   }
 
@@ -25768,6 +25769,10 @@ async function aposCalc() {
   const metaPatrimonio = goalType === 'patrimonio'
     ? goalRaw
     : (goalRaw * 12) / Math.max(0.01, rateReal);
+  // Exposto pro botão "usar patrimônio pretendido" da visão Pós-aposentadoria
+  // (apos2PullPatrimonioMeta) — é o patrimônio que o usuário pretende ter
+  // NA APOSENTADORIA nesta visão (metaPatrimonio), não o patrimônio atual.
+  window._aposMetaPatrimonio = metaPatrimonio;
 
   const curYear    = new Date().getFullYear();
   const yearsTotal = ageRet - ageNow;
@@ -26417,6 +26422,25 @@ async function apos2PullPatrimonio() {
       apos2Calc();
     }
   } catch(e) { toast('Erro ao buscar patrimônio: ' + e.message); }
+}
+
+// "Usar patrimônio pretendido" — puxa a META de patrimônio da visão
+// "Rumo à Aposentadoria" (window._aposMetaPatrimonio, exposta em aposCalc())
+// como ponto de partida da Pós-aposentadoria. Diferente do "usar atual"
+// acima (soma o que o usuário JÁ tem hoje), este usa o que o usuário
+// PRETENDE ter acumulado até a aposentadoria, pra simular o consumo desse
+// patrimônio-alvo em vez do atual.
+function apos2PullPatrimonioMeta() {
+  const meta = window._aposMetaPatrimonio;
+  if (!meta) {
+    toast('Preencha a meta de patrimônio na aba "Rumo à Aposentadoria" primeiro.');
+    return;
+  }
+  const inp = G('apos2-pat-inicial');
+  if (!inp) return;
+  if (inp.setValue) inp.setValue(meta);
+  else inp.value = meta.toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+  apos2Calc();
 }
 
 async function apos2SaveConfig() {

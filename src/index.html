@@ -1802,6 +1802,7 @@ select.inp option{background:var(--bg2);}
               <div style="display:flex;gap:6px">
                 <input class="inp" id="apos2-pat-inicial" type="text" placeholder="0" style="flex:1;font-size:14px">
                 <button class="ev-action-btn" onclick="apos2PullPatrimonio()" style="white-space:nowrap">usar atual</button>
+                <button class="ev-action-btn" onclick="apos2PullPatrimonioMeta()" title="Usa o patrimônio que você pretende ter na aposentadoria, calculado na aba &quot;Rumo à Aposentadoria&quot;" style="white-space:nowrap">usar patrimônio pretendido</button>
               </div>
               <a href="#" onclick="event.preventDefault();apos2ToggleIncomeAssetsPanel()" style="font-size:11px;color:var(--accent);display:inline-block;margin-top:6px;text-decoration:none">▾ Escolher quais bens e direitos geram renda</a>
               <div id="apos2-income-assets-panel" style="display:none;margin-top:6px;padding:8px;background:var(--bg3);border-radius:6px;max-height:160px;overflow-y:auto"></div>
