@@ -7475,16 +7475,24 @@ function parseBankBTGExtrato(buffer) {
   const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:true });
   const res = [];
   let hdr = -1;
+  // Dois layouts aceitos: o antigo ("Data e hora | Categoria | Transação |
+  // ... | Descrição | ... | Valor") e o atual, mais simples, sem coluna
+  // "Transação" separada e com "Valor" renomeado pra "Entradas / Saídas
+  // (R$)" ("Data de lançamento | Descrição do lançamento | Entradas /
+  // Saídas (R$) | Saldo (R$)") — o BTG trocou o formato do extrato de
+  // conta corrente em algum momento entre 2025 e a criação deste parser.
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i].map(c => norm(String(c)));
-    if (r.some(c => c.startsWith('data')) && r.some(c => c.includes('transa')) && r.some(c => c.includes('valor'))) { hdr = i; break; }
+    const hasValor = r.some(c => c.includes('valor') || c.includes('entrada') || c.includes('saida'));
+    if (r.some(c => c.startsWith('data')) && r.some(c => c.includes('descri')) && hasValor) { hdr = i; break; }
   }
   if (hdr < 0) return [];
   const headers = rows[hdr].map(c => norm(String(c)));
   const di    = headers.findIndex(h => h.startsWith('data'));
-  const ti    = headers.findIndex(h => h.includes('transa'));
+  const ti    = headers.findIndex(h => h.includes('transa')); // só existe no layout antigo
   const desci = headers.findIndex(h => h.includes('descri'));
-  const vi    = headers.findIndex(h => h.includes('valor'));
+  const vi    = headers.findIndex(h => h.includes('valor') || h.includes('entrada') || h.includes('saida'));
+  const saldoi= headers.findIndex(h => h.includes('saldo'));
   if (di < 0 || vi < 0) return [];
   for (let i = hdr + 1; i < rows.length; i++) {
     const row = rows[i];
@@ -7494,12 +7502,14 @@ function parseBankBTGExtrato(buffer) {
     if (!date) continue;
     const descricao = String(row[desci] || '').trim();
     if (norm(descricao) === 'saldo diario') continue; // saldo acumulado do dia, não é transação
-    const transacao = String(row[ti] || '').trim();
+    const transacao = ti >= 0 ? String(row[ti] || '').trim() : '';
     const valVal = row[vi];
     const rawVal = typeof valVal === 'number' ? valVal : pVal(String(valVal || ''));
     if (isNaN(rawVal) || rawVal === 0) continue;
     const memo = transacao && descricao ? `${transacao} - ${descricao}` : (descricao || transacao);
-    res.push({ date, desc: memo, memo, amount: rawVal, saldo: null, category: '' });
+    const saldoVal = saldoi >= 0 ? row[saldoi] : null;
+    const saldo = typeof saldoVal === 'number' ? saldoVal : (saldoVal ? pVal(String(saldoVal)) : null);
+    res.push({ date, desc: memo, memo, amount: rawVal, saldo: (saldo != null && !isNaN(saldo)) ? saldo : null, category: '' });
   }
   return res;
 }

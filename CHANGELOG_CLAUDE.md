@@ -46,6 +46,39 @@ duplicada.
 
 ---
 
+## 2026-07-22 (continuação 6) — Bug: extrato BTG (conta corrente) não reconhecido — layout novo
+
+### O quê
+Usuário reportou "nenhuma transação encontrada" ao importar um extrato
+de conta corrente BTG (.xlsx).
+
+### Causa
+`parseBankBTGExtrato()` (`src/renderer.js:7472`) só reconhecia o layout
+antigo do extrato ("Data e hora | Categoria | Transação | ... |
+Descrição | ... | Valor"). O BTG mudou o formato de exportação — o
+arquivo do usuário trazia "Data de lançamento | Descrição do lançamento
+| Entradas / Saídas (R$) | Saldo (R$)": sem coluna "Transação" separada,
+e a coluna de valor renomeada de "Valor" pra "Entradas / Saídas". A
+detecção de cabeçalho exigia encontrar as duas colunas ("transa" E
+"valor") na mesma linha — no arquivo novo, nenhuma bate, então a função
+nunca achava a tabela e retornava vazio.
+
+### Correção
+Detecção e mapeamento de colunas agora aceitam os dois layouts: coluna
+de valor casa com "valor" OU "entrada" OU "saida"; coluna "Transação" é
+opcional (só usada se existir, layout antigo); e a coluna "Saldo" (só no
+layout novo) agora é capturada e preenchida no campo `saldo` de cada
+lançamento (antes sempre `null`).
+
+### Teste
+Reproduzido e confirmado com o arquivo real do usuário (extrato PJ
+R2T2 Participações, outubro/2025): 7 transações extraídas corretamente
+via CDP contra o app rodando — datas, valores (incluindo Pix
+enviado/recebido, boleto, devolução) e saldo por linha todos batendo com
+o arquivo original.
+
+---
+
 ## 2026-07-22 (continuação 5) — Ajuste 2: campo+botões da Pós-aposentadoria ao lado, não empilhados
 
 ### O quê
