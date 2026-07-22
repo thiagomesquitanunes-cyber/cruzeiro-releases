@@ -1799,12 +1799,14 @@ select.inp option{background:var(--bg2);}
             <!-- Patrimônio inicial (sempre informado pelo usuário) -->
             <div>
               <div style="font-size:12px;font-weight:600;color:var(--text2);margin-bottom:8px">🏛️ Patrimônio inicial (R$)</div>
-              <input class="inp" id="apos2-pat-inicial" type="text" placeholder="0" style="width:100%;font-size:14px">
-              <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
-                <button class="ev-action-btn" onclick="apos2PullPatrimonio()" style="white-space:nowrap">usar atual</button>
-                <button class="ev-action-btn" onclick="apos2PullPatrimonioMeta()" title="Usa o patrimônio que você pretende ter na aposentadoria, calculado na aba &quot;Rumo à Aposentadoria&quot;" style="white-space:nowrap">usar patrimônio pretendido</button>
+              <div style="display:flex;gap:8px;align-items:stretch">
+                <input class="inp" id="apos2-pat-inicial" type="text" placeholder="0" style="flex:1;min-width:0;font-size:14px">
+                <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 118px">
+                  <button class="ev-action-btn" onclick="apos2PullPatrimonio()" style="padding:5px 8px;font-size:11px;line-height:1.25">usar atual</button>
+                  <button class="ev-action-btn" onclick="apos2PullPatrimonioMeta()" title="Usa o patrimônio que você pretende ter na aposentadoria, calculado na aba &quot;Rumo à Aposentadoria&quot;" style="padding:5px 8px;font-size:11px;line-height:1.25">usar patrimônio pretendido</button>
+                  <a href="#" onclick="event.preventDefault();apos2ToggleIncomeAssetsPanel()" style="font-size:10px;color:var(--accent);text-decoration:none;line-height:1.25;text-align:center">▾ Escolher bens que geram renda</a>
+                </div>
               </div>
-              <a href="#" onclick="event.preventDefault();apos2ToggleIncomeAssetsPanel()" style="font-size:11px;color:var(--accent);display:inline-block;margin-top:6px;text-decoration:none">▾ Escolher quais bens e direitos geram renda</a>
               <div id="apos2-income-assets-panel" style="display:none;margin-top:6px;padding:8px;background:var(--bg3);border-radius:6px;max-height:160px;overflow-y:auto"></div>
               <div style="font-size:10px;color:var(--text3);margin-top:3px">Usados só no "usar atual" — investimentos financeiros e contas bancárias sempre contam como geradores de renda; imóvel de moradia, por exemplo, normalmente não.</div>
             </div>

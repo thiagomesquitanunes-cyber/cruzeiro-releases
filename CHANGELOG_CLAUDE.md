@@ -46,6 +46,31 @@ duplicada.
 
 ---
 
+## 2026-07-22 (continuação 5) — Ajuste 2: campo+botões da Pós-aposentadoria ao lado, não empilhados
+
+### O quê
+A correção anterior (empilhar campo em cima, botões embaixo) resolveu o
+aperto horizontal mas criou um vão vazio grande — a coluna "Patrimônio
+inicial" ficou muito mais alta que as colunas vizinhas ("Idade inicial",
+"Juros reais") no mesmo grid, empurrando a linha seguinte pra baixo.
+Usuário pediu: campo de valor de um lado, e os botões + link "escolher
+bens" empilhados numa coluna estreita do outro lado (não embaixo).
+
+### Correção
+`src/index.html` (~linha 1799-1809): volta a ser `display:flex` em
+linha, mas agora com uma coluna fixa de 118px à direita do campo
+contendo os 2 botões + o link, empilhados verticalmente (fonte/padding
+reduzidos, sem `white-space:nowrap` — o texto "usar patrimônio
+pretendido" quebra em 2 linhas dentro da coluna estreita, o que é
+aceitável). A dica de texto embaixo ("Usados só no 'usar atual'...")
+continua ocupando a largura toda, fora do flex row.
+
+### Teste
+Confirmado por screenshot ao vivo via CDP — altura da coluna agora bate
+com as vizinhas, sem vão vazio.
+
+---
+
 ## 2026-07-22 (continuação 4) — Ajuste: layout do "usar patrimônio pretendido" espremido
 
 ### O quê
