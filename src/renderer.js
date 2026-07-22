@@ -5659,7 +5659,6 @@ async function confirmBankImport() {
   try {
     const accountIds = [...new Set(withML.map(r => r.accountId))];
     let allDups = [];
-    let autoSkipGlobalIndices = [];
     let autoSkipInfo = null; // { untilDate, count } — apenas para exibição
     for (const accId of accountIds) {
       const idxMap = []; // local index -> global index in withML
@@ -5678,7 +5677,6 @@ async function confirmBankImport() {
         for (const d of res.potentialDups) allDups.push({ ...d, rowIndex: idxMap[d.rowIndex] });
       }
       if (res?.autoSkippedByBalance?.indices?.length) {
-        autoSkipGlobalIndices.push(...res.autoSkippedByBalance.indices.map(li => idxMap[li]));
         autoSkipInfo = {
           untilDate: res.autoSkippedByBalance.untilDate,
           count: (autoSkipInfo?.count || 0) + res.autoSkippedByBalance.indices.length,
@@ -5687,33 +5685,15 @@ async function confirmBankImport() {
     }
     G('bank-result').innerHTML = '';
 
-    // Contabiliza na auditoria as linhas presumidas já importadas pela
-    // conferência de saldo diário — ANTES de removê-las de keptRows.
-    if (autoSkipGlobalIndices.length && _importAudit) {
-      autoSkipGlobalIndices.forEach(gi => {
-        const r = withML[gi];
-        if (!r) return;
-        _importAudit.accounted.push({ gi: r._gi, accountId: r.accountId, amount: r.amount, kind: 'saldo-diario', memo: r.memo, dateISO: r.dateISO });
-      });
-    }
-
-    // Remove em bloco as linhas presumidas já importadas pela conferência de
-    // saldo diário, e remapeia os índices das duplicatas individuais
-    // restantes para a lista já filtrada (senão o rowIndex fica torto).
-    let keptRows = withML, remappedDups = allDups;
-    if (autoSkipGlobalIndices.length) {
-      const skipSet = new Set(autoSkipGlobalIndices);
-      const oldToNew = new Map();
-      keptRows = [];
-      withML.forEach((r, gi) => {
-        if (skipSet.has(gi)) return;
-        oldToNew.set(gi, keptRows.length);
-        keptRows.push(r);
-      });
-      remappedDups = allDups
-        .filter(d => oldToNew.has(d.rowIndex))
-        .map(d => ({ ...d, rowIndex: oldToNew.get(d.rowIndex) }));
-    }
+    // A conferência por saldo diário não remove mais linhas em bloco —
+    // agora é só uma RECOMENDAÇÃO: as linhas dentro do período onde o saldo
+    // bateu já chegam em `allDups` (main.js as inclui com reason
+    // 'saldo-bate' quando o matcher normal não achou nada), com a ação
+    // padrão "pular" pré-marcada na UI de resolução — mas o usuário decide,
+    // linha a linha ou em bloco, se quer importar mesmo assim. A auditoria
+    // ('matched-skip'/'inserted') é feita no fluxo normal de resolução, não
+    // aqui antecipadamente.
+    const keptRows = withML, remappedDups = allDups;
 
     if (remappedDups.length || autoSkipInfo) {
       showDupResolutionUI(remappedDups, keptRows, parcelInstallments, accountId, checkDailySaldo, autoSkipInfo);
@@ -6547,7 +6527,8 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
       <span style="font-size:20px">💰</span>
       <div style="font-size:12.5px;color:var(--text)">
         <strong>Conferência por saldo diário:</strong> o saldo do extrato bateu com o saldo do Cruzeiro em <strong>${fmtBRDateTop(autoSkipInfo.untilDate)}</strong> —
-        ${autoSkipInfo.count} lançamento(s) até essa data já ${autoSkipInfo.count===1?'foi':'foram'} presumido(s) como já importado(s) e não aparece(m) na lista abaixo.
+        isso pode significar que os ${autoSkipInfo.count} lançamento(s) até essa data já ${autoSkipInfo.count===1?'foi':'foram'} importado(s) antes.
+        Recomendamos <strong>pular</strong> — já vêm marcados assim na lista abaixo —, mas você pode importar mesmo assim, linha a linha ou em bloco, se souber que houve alguma movimentação com valor líquido zero nesse período (ex: dinheiro que entrou e saiu no mesmo dia).
       </div>
     </div>` : '';
 
@@ -6597,6 +6578,7 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
             'mesmo-dia-valor': '⚠️ mesmo dia e valor, mas descrições diferentes — confira!',
             'valor-igual-data-proxima': 'mesmo valor em data próxima',
             'similaridade-alta': 'alta similaridade (valor + data + descrição)',
+            'saldo-bate': '💰 dentro do período em que o saldo do extrato bateu com o Cruzeiro — sem correspondência individual encontrada, mas recomendado pular',
           })[dupInfo?.reason] || 'mesma data e valor') + daysTxt;
           const nickTxt = dupInfo?.nickname
             ? `<div style="font-size:10px;color:var(--accent)">🧠 reconhecido como "${esc(dupInfo.nickname)}"</div>` : '';

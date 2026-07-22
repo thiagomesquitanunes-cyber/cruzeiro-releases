@@ -3056,14 +3056,15 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
     const date = toISO(r.date);
     if (!date) continue;
 
-    if (dryRun && autoSkipUntilISO && date <= autoSkipUntilISO) {
-      // Presumido já importado pela conferência de saldo — nem entra no
-      // matcher linha a linha, e nem aparece na lista de duplicatas pra
-      // revisão manual (o usuário pediu justamente pra pular essa etapa
-      // quando o saldo já garante que está tudo certo até aqui).
-      autoSkippedLocal.push(i);
-      continue;
-    }
+    // Dentro do período em que o saldo bateu: NÃO pula mais o processamento
+    // automaticamente (fazia isso antes — excluía a linha da importação sem
+    // o usuário nunca ver). Continua passando pelo matcher linha a linha
+    // normal abaixo; se ele não achar nada (o cenário que a conferência por
+    // saldo existe pra cobrir — ex.: memo/categoria mudou desde a 1ª
+    // importação), uma recomendação "pular" é adicionada mais abaixo, com a
+    // ação já pré-marcada como pular mas totalmente editável pelo usuário.
+    const inSaldoSafePeriod = dryRun && autoSkipUntilISO && date <= autoSkipUntilISO;
+    if (inSaldoSafePeriod) autoSkippedLocal.push(i); // só contagem informativa pro banner
 
     if (skipSet.has(i)) continue; // user chose to skip this one
 
@@ -3185,6 +3186,27 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
             date: bestMatch.date, amount: bestMatch.amount,
             recurring: !!bestMatch.recurring_id, cleared: !!bestMatch.cleared,
           }],
+        });
+        continue;
+      }
+
+      // O matcher linha a linha não achou nada, mas esta linha está dentro
+      // do período em que o saldo do extrato já bateu com o saldo do
+      // Cruzeiro — exatamente o caso que a conferência por saldo existe pra
+      // cobrir (ex.: memo/categoria mudou desde a 1ª importação, e por isso
+      // o matcher por texto não reconheceu). Sinaliza como recomendação de
+      // pular, mas sem um lançamento específico pareado — o usuário decide.
+      if (inSaldoSafePeriod) {
+        potentialDups.push({
+          rowIndex: i,
+          date: r.date,
+          memo: r.memo || r.desc || '',
+          amount: r.amount,
+          reason: 'saldo-bate',
+          daysDiff: 0,
+          nickname: impNickname || null,
+          score: 0,
+          existing: [],
         });
         continue;
       }

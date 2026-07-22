@@ -46,6 +46,48 @@ duplicada.
 
 ---
 
+## 2026-07-22 (continuação 7) — Conferência por saldo diário vira recomendação, não exclusão automática
+
+### O quê
+Usuário reportou: a conferência por saldo diário (quando o saldo do
+extrato bate com o saldo já registrado no Cruzeiro numa data) descartava
+silenciosamente TODOS os lançamentos até essa data, presumindo que já
+foram importados. Isso quebra em extratos com pouca movimentação onde um
+valor X entra e o MESMO valor X sai depois — o saldo não muda, mas a
+movimentação existiu e era descartada sem o usuário nunca ver.
+
+### Correção
+`ipcMain.handle('bank:import', ...)` em `src/main.js` (~linha 3054) —
+o bloco de conferência por saldo continua encontrando a data mais
+recente em que os saldos batem (`autoSkipUntilISO`), mas não pula mais
+o processamento das linhas dentro desse período. Elas passam pelo
+matcher linha a linha normal; se ele achar uma correspondência
+específica, usa o motivo normal (como sempre). Se NÃO achar nada — o
+cenário que a conferência por saldo existe pra cobrir —, a linha agora
+entra em `potentialDups` com o motivo novo `'saldo-bate'`, em vez de
+desaparecer.
+
+Do lado do `src/renderer.js`: removida a remoção-em-bloco que existia
+DEPOIS do dry-run (`bankImportRows`, ~linha 5690) — ela ainda excluía
+essas linhas de `keptRows` mesmo com o fix acima no main.js, então
+precisou sair também. A UI de resolução de duplicatas
+(`showDupResolutionUI`) ganhou o rótulo do motivo `'saldo-bate'` e o
+banner foi reescrito de "já foram presumidos como importados e não
+aparecem na lista" pra "recomendamos pular — já vêm marcados assim,
+mas você pode importar mesmo assim". O padrão de cada linha continua
+sendo "pular" (like antes), só que agora editável — igual qualquer
+outra duplicata na tela, linha a linha ou via "✅ Importar todas".
+
+### Teste
+Testado ao vivo via CDP contra o app real, com `dryRun:true` (só leitura,
+sem inserir nada) usando dados sintéticos numa conta real: linha no dia
+exato do saldo batido → `'saldo-bate'`; linha fictícia dentro do
+período sem correspondência na base → também `'saldo-bate'` (o cenário
+relatado); linha fora do período → não marcada, segue normal. Os 3
+casos confirmados corretos.
+
+---
+
 ## 2026-07-22 (continuação 6) — Bug: extrato BTG (conta corrente) não reconhecido — layout novo
 
 ### O quê
