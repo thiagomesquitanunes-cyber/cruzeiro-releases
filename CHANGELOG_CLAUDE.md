@@ -12,6 +12,40 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-22 (continuação 2) — Bug: estorno em fatura Santander virava despesa em vez de crédito
+
+### O quê
+Usuário testou o fix anterior (período da fatura) e achou outro problema
+na mesma fatura: valores negativos no PDF (estornos/devoluções) estavam
+todos virando débito na importação.
+
+### Causa
+`pushRow()` em `parseSantanderFaturaPDF()` (`src/renderer.js:11376`)
+forçava `amount = -Math.abs(amount)` pras seções "Despesas"/
+"Parcelamentos", com o comentário "são sempre despesas" — descartando o
+sinal real do PDF. Na fatura do usuário, 3 linhas dentro dessas seções
+tinham valor NEGATIVO no PDF (estorno de compra, ex: "AMAZON
+MARKETPLACE-220,50", "AMAZONMKTPLC*ORALPROXS-0,02") — o `Math.abs()`
+convertia esses estornos em mais uma despesa, em vez de reconhecer como
+crédito.
+
+### Correção
+Removida a distinção — agora as 3 seções (Pagamento, Parcelamentos,
+Despesas) usam a mesma regra: `amount = -amount` (inversão simples do
+sinal do PDF pra nossa convenção). Compra normal (PDF positivo) continua
+virando despesa (negativo); estorno (PDF negativo) agora vira crédito
+(positivo) corretamente, igual já acontecia na seção Pagamento.
+
+### Teste
+Reproduzido e confirmado com o mesmo PDF real do usuário: as 3 linhas
+identificadas (`AMAZONMKTPLC*ORALPROXS-0,02` ×2 datas diferentes,
+`AMAZON MARKETPLACE-220,50`) agora saem com `amount` positivo
+(0.02/0.02/220.50), enquanto as parcelas normais da mesma loja
+continuam negativas — total ainda 61 transações, nenhuma perdida/
+duplicada.
+
+---
+
 ## 2026-07-22 (continuação) — Bug: fatura Santander recusada ("Não foi possível identificar o período")
 
 ### O quê

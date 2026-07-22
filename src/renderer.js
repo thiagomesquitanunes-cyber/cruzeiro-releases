@@ -11373,11 +11373,14 @@ async function parseSantanderFaturaPDF(buffer) {
           if (currentSection === 'pagamento' && /DEBAUTOM/i.test(descText.replace(/\s+/g,''))) return;
           let amount = parseFloat(valStr.replace(/\./g,'').replace(',','.'));
           if (isNaN(amount) || amount === 0) return;
-          if (currentSection !== 'pagamento') {
-            amount = -Math.abs(amount); // Parcelamentos/Despesas are always expenses
-          } else {
-            amount = -amount; // Pagamento e Demais Créditos: PDF sign is inverted vs our convention
-          }
+          // PDF sign é sempre invertido vs. nossa convenção — vale igual pras
+          // 3 seções. Compra normal (PDF positivo) vira despesa (app negativo);
+          // mas o Santander também usa valor negativo DENTRO de "Despesas"/
+          // "Parcelamentos" pra estorno de compra (ex: devolução de produto,
+          // "AMAZON MARKETPLACE-220,50") — forçar Math.abs() aqui (versão
+          // anterior) descartava esse sinal e classificava o estorno como se
+          // fosse mais uma despesa, dobrando o impacto no lugar de zerá-lo.
+          amount = -amount;
           const iso = resolveDate(dateStr, currentSection === 'parcelamento' ? frac : null);
           let memo = descText;
           if (frac) memo += ` ${frac}`;
