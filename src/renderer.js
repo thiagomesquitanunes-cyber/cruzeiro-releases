@@ -8232,6 +8232,7 @@ function parseBTGBroker(buffer) {
   }
 
   // ── 6. Conta Corrente ──
+  result.nonAssetMovements = [];
   const ccWs = wb.Sheets['Conta Corrente'];
   if (ccWs) {
     const rows = XLSX.utils.sheet_to_json(ccWs, { header:1, defval:null, raw:true });
@@ -8240,6 +8241,33 @@ function parseBTGBroker(buffer) {
       // naquele mês) é um valor real, não "ausência de dado".
       if (isDate(row[1]) && typeof row[2]==='number' && !isNaN(row[2])) {
         result.caixaValue = row[2]; break;
+      }
+    }
+
+    // Movimentações da conta corrente: a corretora pode ser usada também
+    // como conta do dia a dia (PIX, TED, taxas avulsas), não só pra ativos.
+    // Linhas que não sejam consequência de um evento de ativo já refletido
+    // em outra seção do extrato (Fundos/Renda Fixa/Previdência/Renda
+    // Variável) viram candidatas a lançamento individual (task #86).
+    const ccHeaderIdx = rows.findIndex(r => norm(String(r[1]||''))==='data' && norm(String(r[2]||'')).includes('descri'));
+    if (ccHeaderIdx >= 0) {
+      const CC_ASSET_TERMS = ['cupom','rendimento','dividend','provent','jcp','juros',
+        'resgate','aplicacao','aporte','compra','contribuicao','venda','amortizacao',
+        'aquisicao de cotas','vencimento','irrf','iof','liq bolsa'];
+      const isCCAssetFlow = desc => CC_ASSET_TERMS.some(t => norm(String(desc||'')).includes(t));
+      for (let i = ccHeaderIdx + 1; i < rows.length; i++) {
+        const row = rows[i];
+        const dateVal = row[1], descVal = row[2], amtVal = row[3];
+        if (!isDate(dateVal)) continue;
+        const desc = String(descVal||'').trim();
+        if (!desc || norm(desc)==='saldo anterior') continue;
+        const amount = typeof amtVal==='number' ? amtVal : toNum(amtVal);
+        if (!amount) continue;
+        if (isCCAssetFlow(desc)) continue;
+        const iso = dateVal instanceof Date
+          ? `${dateVal.getUTCFullYear()}-${String(dateVal.getUTCMonth()+1).padStart(2,'0')}-${String(dateVal.getUTCDate()).padStart(2,'0')}`
+          : String(dateVal).slice(0,10);
+        result.nonAssetMovements.push({ date: iso, desc, amount });
       }
     }
   }
@@ -8506,6 +8534,13 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
     const d = new Date(ms);
     return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;
   };
+  const serialToISO = serial => {
+    if (!serial || typeof serial !== 'number' || serial < 40000) return null;
+    const totalDays = Math.floor(serial);
+    const ms = (totalDays - 25569) * 86400 * 1000;
+    const d = new Date(ms);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+  };
 
   // Find header row and the actual column where "Movimentação" lives — não
   // assume índice fixo, porque essa aba às vezes começa na coluna B (não A),
@@ -8531,7 +8566,10 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
   // revisão manual em vez de simplesmente desaparecer.
   function classifyXPFlowLocal(desc) {
     const d = normA(desc);
-    if (d.includes('ted bco') && d.includes('retirada em c/c')) return { flow:'ignore' }; // saída de caixa pro banco — fora do escopo de ativos
+    // Saída de caixa pro banco via TED — não é evento de ativo, mas é dinheiro
+    // real saindo da conta. Em vez de simplesmente desaparecer, vai pra
+    // revisão como candidato a lançamento individual (task #86).
+    if (d.includes('ted bco') && d.includes('retirada em c/c')) return { flow:'nonasset' };
     if (d.startsWith('ted ter bco'))                             return { flow:'external', sign:-1 }; // TED aplicação fundos
     if (d.trim() === 'lancamento')                                return { flow:'ignore' };
     if (d.includes('come cota') || d.includes('come-cota'))       return { flow:'ignore' };
@@ -8621,6 +8659,7 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
   }
 
   const unresolvedMovements = [];
+  const nonAssetMovements = [];
 
   for (let ri = dataStart; ri < extRows.length; ri++) {
     const row = extRows[ri];
@@ -8641,6 +8680,14 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
     const rawVal = typeof amtVal === 'number' ? amtVal
       : parseFloat(String(amtVal).replace(',','.'));
     if (isNaN(rawVal) || rawVal === 0) continue;
+
+    // Movimentação real, mas confirmadamente sem relação com ativos (ex:
+    // TED de retirada pro banco) — candidata a lançamento individual
+    // (task #86), nunca tenta casar com um ativo.
+    if (cls.flow === 'nonasset') {
+      nonAssetMovements.push({ date: serialToISO(row[dateColIdx]) || rowMonth + '-01', desc, amount: rawVal });
+      continue;
+    }
 
     // Movimentação real, mas que o parser sabe de antemão que não consegue
     // atribuir com segurança (ex: nota de corretagem agregada) — direto pra
@@ -8706,7 +8753,7 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
   }
 
   const totalLiquido = assets.reduce((s,a) => s + (a.valor||0), 0) + (caixaValue||0);
-  return { month, assets, caixaValue, broker: 'XP', unresolvedMovements, totalLiquido };
+  return { month, assets, caixaValue, broker: 'XP', unresolvedMovements, nonAssetMovements, totalLiquido };
 }
 
 // ── Motor do importador genérico de corretoras ──
@@ -9431,7 +9478,7 @@ async function _bwTestFile(event) {
       `<tr><td>${esc(a.name)}</td><td>${esc(INV_CATEGORIES[a.category]?.label||a.category)}</td><td>${esc(a.inv_type)}</td><td class="right">${fmtBRL(a.valor)}</td></tr>`).join('');
     result.innerHTML = `
       <div class="info-box" style="margin-bottom:8px">
-        ✅ ${parsed.assets.length} ativo(s) encontrado(s)${parsed.unresolvedMovements.length ? ` · ⚠️ ${parsed.unresolvedMovements.length} movimentação(ões) não vinculada(s) a um ativo` : ''}:
+        ✅ ${parsed.assets.length} ativo(s) encontrado(s)${parsed.unresolvedMovements.length ? ` · ⚠️ ${parsed.unresolvedMovements.length} movimentação(ões) não vinculada(s) a um ativo` : ''}${parsed.nonAssetMovements?.length ? ` · 💳 ${parsed.nonAssetMovements.length} lançamento(s) fora de ativos (revisão ao confirmar)` : ''}:
       </div>
       <div class="tbl-outer" style="max-height:220px">
         <table class="ledger"><thead><tr><th>Nome</th><th>Categoria</th><th>Tipo</th><th class="right">Valor</th></tr></thead>
@@ -10029,6 +10076,104 @@ function cancelBrokerImport() {
   _brokerBuffer = null;
 }
 
+// ── Revisão de lançamentos de corretora não relacionados a ativos (task #86) ──
+let _brokerNonAssetResolve = null;
+let _brokerNonAssetRows = [];
+let _brokerNonAssetAccountId = null;
+
+async function showBrokerNonAssetReview(movements, accountId) {
+  _brokerNonAssetAccountId = accountId;
+  _brokerNonAssetRows = movements.map((m, i) => ({ ...m, _idx: i, memo: m.desc, category: '' }));
+
+  // Sugestões de ML em lote — mesma mecânica da importação bancária normal.
+  let preds = [];
+  try {
+    preds = await ff.mlPredictBatch({ rows: _brokerNonAssetRows.map(r => ({ desc: r.desc, amount: r.amount })) });
+  } catch(e) { preds = []; }
+  _brokerNonAssetRows.forEach((r, i) => {
+    const p = preds[i];
+    r.memo = (p && p.memo) ? p.memo : r.desc;
+    if (p && p.transfer_account_id) {
+      const destAcc = accounts.find(a => a.id === p.transfer_account_id);
+      r.category = destAcc ? `⇄ Transferência: ${destAcc.name}` : '';
+    } else {
+      r.category = (p && p.category && !isTransferCategory(p.category)) ? p.category : '';
+    }
+  });
+
+  G('broker-nonasset-sub').textContent =
+    `${_brokerNonAssetRows.length} lançamento(s) do extrato não foram reconhecidos como movimentação de nenhum ativo. Escolha quais registrar individualmente na conta — o restante é absorvido pelo ajuste de saldo ao final.`;
+  renderBrokerNonAssetRows();
+  const btn = document.querySelector('#modal-broker-nonasset button.primary');
+  if (btn) { btn.disabled = false; btn.textContent = 'Importar selecionadas'; }
+  openModal('modal-broker-nonasset');
+
+  return new Promise(resolve => { _brokerNonAssetResolve = resolve; });
+}
+
+function renderBrokerNonAssetRows() {
+  const el = G('broker-nonasset-rows');
+  if (!el) return;
+  el.innerHTML = _brokerNonAssetRows.map(r => `
+    <div style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+      <input type="checkbox" class="broker-nonasset-chk" data-idx="${r._idx}" checked>
+      <div style="width:76px;flex-shrink:0;font-size:12px;color:var(--text2)">${fmtDateBR(r.date)}</div>
+      <div style="width:110px;flex-shrink:0;font-size:13px;font-weight:600;text-align:right;color:${r.amount<0?'#c0392b':'#1a7f37'}">${fmtBRL(r.amount)}</div>
+      <input class="inp broker-nonasset-memo" data-idx="${r._idx}" style="flex:1;min-width:140px" value="${esc(r.memo)}" title="${esc(r.desc)}">
+      <input class="inp broker-nonasset-cat" data-idx="${r._idx}" style="width:180px" value="${esc(r.category)}" oninput="openGlobalCatDrop(this)" onfocus="openGlobalCatDrop(this)" placeholder="Categoria">
+    </div>
+  `).join('');
+}
+
+function toggleAllBrokerNonAsset(checked) {
+  document.querySelectorAll('.broker-nonasset-chk').forEach(c => { c.checked = checked; });
+}
+
+async function resolveBrokerNonAsset(action) {
+  if (action === 'ignore') {
+    closeModal('modal-broker-nonasset');
+    if (_brokerNonAssetResolve) { _brokerNonAssetResolve({ imported: 0 }); _brokerNonAssetResolve = null; }
+    return;
+  }
+
+  document.querySelectorAll('.broker-nonasset-memo').forEach(inp => {
+    const r = _brokerNonAssetRows[parseInt(inp.dataset.idx)];
+    if (r) r.memo = inp.value.trim();
+  });
+  document.querySelectorAll('.broker-nonasset-cat').forEach(inp => {
+    const r = _brokerNonAssetRows[parseInt(inp.dataset.idx)];
+    if (r) r.category = inp.value.trim();
+  });
+  const checkedIdx = new Set();
+  document.querySelectorAll('.broker-nonasset-chk').forEach(c => { if (c.checked) checkedIdx.add(parseInt(c.dataset.idx)); });
+  const toImport = _brokerNonAssetRows.filter(r => checkedIdx.has(r._idx));
+
+  const btn = document.querySelector('#modal-broker-nonasset button.primary');
+  if (btn) { btn.disabled = true; btn.textContent = 'Importando…'; }
+
+  let imported = 0;
+  for (const r of toImport) {
+    const tfMatch = (r.category || '').match(/^⇄ Transferência: (.+)$/);
+    const destAcc = tfMatch ? accounts.find(a => a.name === tfMatch[1]) : null;
+    try {
+      if (destAcc) {
+        await ff.transfer({ fromAccountId: _brokerNonAssetAccountId, toAccountId: destAcc.id, date: r.date, amount: Math.abs(r.amount), memo: r.memo || r.desc });
+        ff.mlLearn({ desc: r.desc, memo: r.memo || r.desc, category: 'Transferência', amount: r.amount || 0, transfer_account_id: destAcc.id }).catch(() => {});
+      } else {
+        await ff.bankImport({ accountId: _brokerNonAssetAccountId, rows: [{
+          date: r.date.split('-').reverse().join('/'), amount: r.amount, memo: r.memo || r.desc, category: r.category || '',
+        }], checkDailySaldo: false, skipIds: [] });
+        if (r.memo || r.category) ff.mlLearn({ desc: r.desc, memo: r.memo || r.desc, category: r.category || '', amount: r.amount || 0 }).catch(() => {});
+      }
+      imported++;
+    } catch(e) { /* segue pras próximas */ }
+  }
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Importar selecionadas'; }
+  closeModal('modal-broker-nonasset');
+  if (_brokerNonAssetResolve) { _brokerNonAssetResolve({ imported }); _brokerNonAssetResolve = null; }
+}
+
 async function confirmBrokerImport() {
   if (_licStatus?.status === 'payment_required') {
     openLicenseModal();
@@ -10133,6 +10278,17 @@ async function confirmBrokerImport() {
       broker:     parsed.broker,
     });
 
+    // Lançamentos do extrato que não puderam ser atribuídos a nenhum ativo
+    // (ex: PIX/TED avulsos, taxas, cashback — a conta de investimento sendo
+    // usada também como conta corrente). Revisão acontece ANTES do ajuste de
+    // saldo, de propósito: cada linha importada aqui já entra no saldo da
+    // conta, então o ajuste calculado depois cobre só a diferença residual.
+    let nonAssetMsg = '';
+    if (brokerAccountId && parsed.nonAssetMovements?.length) {
+      const naResult = await showBrokerNonAssetReview(parsed.nonAssetMovements, brokerAccountId);
+      if (naResult?.imported) nonAssetMsg = `<br>📥 ${naResult.imported} lançamento(s) fora de ativos importado(s) individualmente`;
+    }
+
     let adjMsg = '';
     // Create balance adjustment transaction if account selected and totalLiquido available
     if (brokerAccountId && parsed.totalLiquido != null) {
@@ -10157,7 +10313,7 @@ async function confirmBrokerImport() {
       ✅ <strong>Importação concluída — ${parsed.broker} · ${fmtMonth(parsed.month)}</strong><br>
       • ${result.createdAssets} ativo(s) criado(s)<br>
       • ${result.updatedAssets} ativo(s) atualizado(s)<br>
-      • ${result.txInserted} transação(ões) registrada(s)${result.skippedDuplicates ? ` · ⏭ ${result.skippedDuplicates} já existente(s), não duplicada(s)` : ''}${adjMsg}
+      • ${result.txInserted} transação(ões) registrada(s)${result.skippedDuplicates ? ` · ⏭ ${result.skippedDuplicates} já existente(s), não duplicada(s)` : ''}${nonAssetMsg}${adjMsg}
     </div>`;
     cancelBrokerImport();
     if (currentPage === 'patrimonio') await refreshPatrimonio();

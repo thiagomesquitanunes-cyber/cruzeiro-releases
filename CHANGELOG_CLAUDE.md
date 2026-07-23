@@ -12,6 +12,104 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-23 (continuação) — Importação de corretora: detecta lançamentos não relacionados a ativos (XP/BTG)
+
+### O quê
+Pedido do usuário: a conta de investimento pode, para alguns usuários, ser
+usada também como conta corrente (PIX, TED, taxas avulsas — não só
+dividendos/aportes/resgates de ativos). Antes desta mudança, qualquer
+lançamento do extrato que não fosse reconhecido como movimentação de um
+ativo específico era silenciosamente absorvido no ajuste de saldo de fim
+de mês (ou, no caso específico de TED de retirada na XP, nem chegava a
+ser considerado — descartado direto). Agora o app detecta esses
+lançamentos e oferece ao usuário a opção de importá-los individualmente
+como transações normais na conta, com memorando/categoria e sugestão de
+ML — igual à importação de extrato bancário.
+
+### Causa / o que já existia
+- BTG: o parser (`parseBTGBroker`, `renderer.js:7844`) só lia o SALDO da
+  aba "Conta Corrente" (`caixaValue`) — a tabela de "Movimentações"
+  daquela mesma aba (que lista PIX, TED, cashback, taxa de consultoria
+  etc., junto com os efeitos em caixa de cupom/rendimento/vencimento de
+  ativos) nunca era percorrida.
+- XP: o parser (`parseXPBroker`, `renderer.js:8330`) já classificava cada
+  linha do extrato (`classifyXPFlowLocal`), mas a linha "TED BCO ...
+  RETIRADA EM C/C" (saída de dinheiro pro banco, sem relação com ativos)
+  tinha `flow:'ignore'` — descartada sem deixar rastro, ao contrário de
+  outras linhas não-reconhecidas (que já iam pra `unresolvedMovements`,
+  um mecanismo existente, mas para um problema diferente: linha que É de
+  um ativo mas cujo ativo não foi encontrado na posição).
+
+### Correção
+- **Parsers**: cada resultado de parse ganhou um novo array
+  `nonAssetMovements` (`{date, desc, amount}`), separado do
+  `unresolvedMovements` já existente (esse continua servindo só pro caso
+  "é de um ativo mas não achei qual").
+  - BTG: nova varredura da tabela "Movimentações" da aba "Conta
+    Corrente". Um classificador local (`isCCAssetFlow`, termos: cupom,
+    rendimento, dividendo, provento, JCP, juros, resgate, aplicação,
+    aporte, compra, contribuição, venda, amortização, aquisição de
+    cotas, vencimento, IRRF, IOF, "liq bolsa") decide se a linha é
+    consequência de um evento de ativo já refletido em outra seção do
+    extrato (excluída) ou não (vai pra `nonAssetMovements`). A linha
+    "Saldo Anterior" é descartada (é só o saldo inicial, não um
+    lançamento).
+  - XP: a linha "TED BCO ... RETIRADA EM C/C" passou de `flow:'ignore'`
+    pra `flow:'nonasset'`, indo pra `nonAssetMovements` com a data exata
+    (novo helper `serialToISO`, ao lado do já existente `serialToMonth`)
+    em vez de simplesmente desaparecer.
+- **Revisão pós-importação** (`confirmBrokerImport`, `renderer.js`):
+  depois de salvar os ativos (`brokerSaveParsed`) e ANTES de calcular o
+  ajuste de saldo (`brokerCreateAdjustment`), se houver
+  `nonAssetMovements`, abre um novo modal (`showBrokerNonAssetReview`,
+  `#modal-broker-nonasset` em `index.html`) listando cada lançamento com
+  checkbox (selecionado por padrão), memorando e categoria editáveis —
+  memorando/categoria pré-preenchidos via `ff.mlPredictBatch` (mesma
+  sugestão de ML da importação bancária, incluindo sugestão de
+  transferência real quando aplicável — reaproveita o trabalho da tarefa
+  anterior desta sessão). Duas opções: "Ignorar tudo" (comportamento
+  antigo — só o ajuste de saldo absorve a diferença) ou "Importar
+  selecionadas" (cria as transações escolhidas via `ff.bankImport`, ou
+  `ff.transfer` quando a categoria escolhida for uma transferência —
+  aprendendo com `ff.mlLearn` em ambos os casos).
+- Como a revisão acontece ANTES do cálculo do ajuste, e o ajuste já
+  funciona por diferença (`totalLiquido` vs. saldo atual da conta —
+  fix da tarefa #82 desta sessão), nenhuma mudança foi necessária na
+  lógica de ajuste em si: os lançamentos importados individualmente já
+  entram no saldo corrente da conta, e o ajuste final cobre só a
+  diferença residual — exatamente o comportamento pedido.
+- `renderBrokerPreview`: linha de resumo no topo da pré-visualização
+  ganhou um contador "💳 N lançamento(s) fora de ativos (revisão ao
+  confirmar)" quando aplicável, pra avisar o usuário antes de chegar na
+  tela de revisão.
+
+### Teste
+Script isolado em Node (`test_nonasset_classify.js`) rodando os
+classificadores novos (copiados literalmente do código) contra as
+descrições REAIS de dois extratos que o usuário enviou nesta sessão
+("004919725.xlsx"/"004919725 (1).xlsx" da BTG, "Extrato XP.xlsx" da XP)
+— 15 casos, todos corretos: CUPOM/IRRF/VENCIMENTO/RENDIMENTO/LIQ
+BOLSA/APORTE PREVIDÊNCIA/AQUISIÇÃO DE COTAS excluídos (asset), CASHBACK/
+TAXA DE CONSULTORIA/TRANSFERÊNCIA VIA PIX/TED RETIRADA surgidos como
+`nonasset` corretamente. `node --check` em `main.js`/`renderer.js` sem
+erro.
+
+Não testado manualmente na UI (fluxo completo: selecionar arquivo →
+preview → confirmar → modal de revisão → importar) nesta sessão — a
+lógica de dados foi validada isoladamente com os arquivos reais
+fornecidos pelo usuário; recomenda-se um teste end-to-end no app antes
+de confiar cegamente numa importação real de produção.
+
+### Arquivos
+`src/renderer.js` (`parseBTGBroker` seção "Conta Corrente",
+`parseXPBroker`/`classifyXPFlowLocal`, novo `serialToISO`,
+`showBrokerNonAssetReview`/`renderBrokerNonAssetRows`/
+`toggleAllBrokerNonAsset`/`resolveBrokerNonAsset`, `confirmBrokerImport`,
+`renderBrokerPreview`), `src/index.html` (novo modal
+`#modal-broker-nonasset`).
+
+---
+
 ## 2026-07-23 — ML sugere transferência real (não só a categoria) + corrige duplicação ao converter categoria de/para transferência
 
 ### O quê
