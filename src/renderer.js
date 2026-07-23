@@ -740,6 +740,10 @@ async function goPage(name) {
       el.style.color = s.status === 'payment_required' ? 'var(--red)' : s.status === 'licensed' ? 'var(--green)' : 'var(--text3)';
     }).catch(()=>{});
     refreshAiKeyStatus();
+    const creditFutureToggle = G('include-credit-future-toggle');
+    if (creditFutureToggle && ff.getIncludeCreditFuturePref) {
+      creditFutureToggle.checked = !!(await ff.getIncludeCreditFuturePref().catch(() => false));
+    }
   }
   if (name === 'aposentadoria') { aposInit(); try { guideMark('visitedApos'); } catch(e) {} }
   // Moedinha: atualiza dicas/badge para a nova página (não bloqueia a navegação)
@@ -17606,6 +17610,19 @@ async function syncToggleInvestments(enabled) {
     ? '✅ Investimentos serão sincronizados com o mobile a partir de agora'
     : '✅ Investimentos não serão mais sincronizados — dados já enviados foram removidos');
   syncRunNow();
+}
+
+async function toggleIncludeCreditFuture(enabled) {
+  if (!ff.setIncludeCreditFuturePref) return;
+  const result = await ff.setIncludeCreditFuturePref(enabled).catch(e => ({ ok: false, error: e.message }));
+  if (!result?.ok) {
+    toast('❌ Erro ao salvar preferência: ' + (result?.error || 'desconhecido'));
+    return;
+  }
+  toast(enabled
+    ? '✅ Cartão de crédito passa a aparecer nos lançamentos futuros'
+    : '✅ Cartão de crédito não aparece mais nos lançamentos futuros');
+  if (currentPage === 'overview') refreshFuturePending();
 }
 
 async function syncDoLogin() {

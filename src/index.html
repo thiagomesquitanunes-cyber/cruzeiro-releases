@@ -3294,6 +3294,26 @@ select.inp option{background:var(--bg2);}
       </div>
     </div>
 
+    <!-- Lançamentos futuros -->
+    <div class="tbl-card" style="margin-bottom:14px">
+      <div class="tbl-header"><h3>🔮 Lançamentos futuros</h3></div>
+      <div style="padding:16px">
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
+          <input type="checkbox" id="include-credit-future-toggle" onchange="toggleIncludeCreditFuture(this.checked)"
+            style="margin-top:2px;width:16px;height:16px;cursor:pointer">
+          <span style="font-size:13px;color:var(--text2)">
+            <strong>Incluir cartão de crédito na lista de lançamentos futuros</strong><br>
+            <span style="font-size:12px;color:var(--text3)">
+              Por padrão, a lista de lançamentos futuros (aqui na Visão Geral, e o card/alerta
+              equivalente no app mobile) mostra só contas correntes — parcelamentos e assinaturas de
+              cartão de crédito continuam aparecendo normalmente na conta do próprio cartão. Ative
+              esta opção se quiser vê-los também nessa lista/alerta.
+            </span>
+          </span>
+        </label>
+      </div>
+    </div>
+
     <!-- Moedinha, tour e manual -->
     <div class="tbl-card" style="margin-bottom:14px">
       <div class="tbl-header"><h3>🪙 Assistente Moedinha, Tour e Manual</h3></div>

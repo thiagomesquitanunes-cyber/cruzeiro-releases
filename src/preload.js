@@ -249,6 +249,8 @@ const api = {
   onSyncCompleted:(cb)              => ipcRenderer.on('sync:completed', (_, data) => cb(data)),
   syncGetInvestmentsPref: ()        => ipcRenderer.invoke('sync:get-investments-pref'),
   syncSetInvestmentsPref: (enabled) => ipcRenderer.invoke('sync:set-investments-pref', enabled),
+  getIncludeCreditFuturePref: ()        => ipcRenderer.invoke('settings:get-include-credit-future'),
+  setIncludeCreditFuturePref: (enabled) => ipcRenderer.invoke('settings:set-include-credit-future', enabled),
 };
 
 contextBridge.exposeInMainWorld('ff', api);

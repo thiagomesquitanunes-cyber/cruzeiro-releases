@@ -1290,14 +1290,32 @@ ipcMain.handle('report:monthly-by-category', (_, { fromDate, excludeTransfers })
     GROUP BY month, category ORDER BY month, total DESC`, p);
 });
 
+// Por padrão, a lista de "lançamentos futuros" (Visão Geral) não mostra
+// parcelamentos/assinaturas de cartão de crédito — não há nada de útil que
+// o usuário possa fazer com esse aviso (ao contrário de conta corrente, onde
+// ele pode precisar se preparar pra ter saldo suficiente).
+function getIncludeCreditFuturePref() {
+  const s = loadSettings();
+  return s.includeCreditInFuturePending === true;
+}
+ipcMain.handle('settings:get-include-credit-future', () => getIncludeCreditFuturePref());
+ipcMain.handle('settings:set-include-credit-future', (_, enabled) => {
+  const s = loadSettings();
+  s.includeCreditInFuturePending = !!enabled;
+  saveSettings(s);
+  return { ok: true };
+});
+
 // Future pending (not cleared, date > today)
 ipcMain.handle('report:future-pending', () => {
   const today = new Date().toISOString().slice(0,10);
+  const creditFilter = getIncludeCreditFuturePref() ? '' : "AND a.type != 'credit'";
   return all(`SELECT t.*, a.name as account_name FROM transactions t
     JOIN accounts a ON a.id = t.account_id
     WHERE t.date > ? AND t.cleared = 0
     AND (t.category IS NULL OR LOWER(t.category) NOT LIKE '%transfer%')
     AND t.transfer_id IS NULL
+    ${creditFilter}
     ORDER BY t.date ASC, (CASE WHEN t.amount < 0 THEN 1 ELSE 0 END) ASC`, [today]);
 });
 // ── Cash-flow projection: starting balances + all future-dated transactions ──

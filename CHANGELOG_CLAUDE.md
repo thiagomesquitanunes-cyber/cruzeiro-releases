@@ -12,6 +12,137 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-23 (continuação 2) — Lançamentos futuros excluem cartão de crédito por padrão (desktop + mobile) + fix do card de orçamento mobile
+
+### O quê
+Três pedidos do usuário nesta continuação:
+
+1. A lista de "lançamentos futuros" (Visão Geral do desktop, card
+   "Próximos lançamentos" na Home do mobile, e o alerta noturno às
+   19h do mobile) mostrava TODOS os lançamentos futuros, inclusive
+   parcelamentos/assinaturas de cartão de crédito — o usuário não vê
+   utilidade nisso pra cartão (nada a se preparar, diferente de conta
+   corrente). Pedido: excluir cartão de crédito por padrão nesses 3
+   pontos, mas manter o lançamento sincronizando normalmente pro
+   mobile (continua aparecendo dentro da própria conta do cartão), e
+   dar uma opção nas Configurações (desktop e mobile) pra reverter.
+2. Bug no card de resumo da Home do mobile (app Android e iOS): o
+   sub-card de orçamento somava `spent`/`monthly_limit` de TODOS os
+   `budgets` (despesa E receita) num único número — reproduzido pelo
+   usuário com números reais (R$168.016,18/R$205.800,00 = soma de
+   R$57.894,32/R$83.800,00 de despesa + R$110.121,86/R$122.000,00 de
+   receita). Pedido inicial: mostrar só despesa; correção do próprio
+   usuário no meio da tarefa: mostrar as DUAS barras, separadas.
+3. Site: 2 screenshots faltando na seção mobile da home (ver próxima
+   entrada do changelog, feito em seguida por uma sessão separada
+   trabalhando no repo do site).
+
+Esta entrada cobre os itens 1 e 2 (mobile + desktop). O item 2 também
+gerou, a pedido do usuário, um `CLAUDE.md` novo no repo
+`Cruzeiro Android`, espelhando as orientações que já existiam no
+`CLAUDE.md` do repo `Cruzeiro iOS` (adaptado pras particularidades do
+Android: `versionCode` em vez de `buildNumber`,
+`react-native-android-widget` em vez de `expo-widgets`+SwiftUI, etc.).
+
+### Causa
+- **Item 1**: `report:future-pending` (`main.js`) não filtrava por
+  `accounts.type` — só existia esse filtro num relatório IRMÃO
+  (`report:cashflow-projection`, que já tinha exatamente o padrão
+  `includeCredit`/`accWhere` certo pra copiar). No mobile,
+  `mobile_scheduled` (que já sincroniza SEM filtro de tipo — a parte
+  "continua sincronizando" já funcionava de graça) não carrega
+  `account_type` direto, só `account_name`; a Home busca
+  `mobile_balances` (que tem `account_type`) na MESMA chamada, então
+  dá pra filtrar client-side por nome sem mudar o schema do Supabase
+  nem o push do desktop.
+- **Item 2**: `loadMonthData()` em `app/(tabs)/index.js` (Android e
+  iOS) buscava `mobile_budgets` sem sequer selecionar `budget_type`, e
+  somava tudo num `reduce()` só. A aba "Orçamento" (`orcamento.js`) já
+  fazia a separação certa (`budget_type !== 'income'` vs
+  `=== 'income'`) — a Home nunca replicou essa lógica.
+
+### Correção
+**Desktop** (`src/main.js`, `src/preload.js`, `src/index.html`,
+`src/renderer.js`):
+- Nova preferência local (arquivo `_settings*.json`, igual ao padrão
+  já usado por `syncInvestmentsToMobile`): `includeCreditInFuturePending`
+  (default `false`). Getter/setter: `getIncludeCreditFuturePref()`,
+  IPC `settings:get-include-credit-future` / `settings:set-include-credit-future`.
+- `report:future-pending` agora aplica `AND a.type != 'credit'`
+  quando a preferência estiver desligada (mesmo idioma de
+  `report:cashflow-projection`).
+- Novo card "🔮 Lançamentos futuros" em Configurações (antes do card
+  "Assistente Moedinha"), com o toggle `#include-credit-future-toggle`
+  → `toggleIncludeCreditFuture()`. Ao trocar, se a Visão Geral estiver
+  aberta, recarrega a lista na hora (`refreshFuturePending()`).
+
+**Mobile** (`app/(tabs)/index.js`, `app/(tabs)/configuracoes.js`,
+`src/lib/notifications.js` — espelhado nos dois repos, Android e iOS):
+- `notifications.js` ganhou `isIncludeCreditFutureEnabled()` /
+  `setIncludeCreditFutureEnabled()` (SecureStore, chave
+  `cruzeiro_include_credit_future` — preferência local do aparelho,
+  não sincroniza com o desktop, mesmo padrão de `cruzeiro_notif_enabled`).
+- `index.js`: a query de `mobile_scheduled` passou a selecionar
+  também `account_name` (não selecionava antes) e o limite subiu de 8
+  pra 20 linhas (parte pode ser filtrada como cartão logo em seguida —
+  sem isso o card podia mostrar menos de 8 itens à toa mesmo havendo
+  mais lançamentos de conta corrente adiante na lista). Depois de
+  buscar `mobile_balances` (que já tem `account_type`) na mesma
+  chamada, filtra `mobile_scheduled` por nome de conta cujo tipo seja
+  `'credit'` (quando a preferência estiver desligada), corta pra 8 e
+  usa esse array filtrado tanto pro `setScheduled()` (card da Home)
+  quanto pro `scheduleFromData()` (agendamento das notificações de
+  véspera) — um filtro só, dois consumidores.
+- `configuracoes.js`: novo `Switch` "Incluir cartão de crédito nos
+  lançamentos futuros" dentro do card "Notificações" já existente.
+- Mesma tela (`index.js`), correção do item 2 (bug do orçamento):
+  `budget` state ganhou `incomeSpent`/`incomeTotal`; `loadMonthData()`
+  agora separa `expenseBuds`/`incomeBuds` por `budget_type` (mesma
+  lógica de `orcamento.js`) e soma cada um separadamente; o card
+  "Orçamento" da Home agora mostra duas barras (Despesas e Receitas),
+  cada uma com sua cor/percentual/rótulo próprios, em vez de uma barra
+  só com número errado.
+
+### Publicação
+- **Android**: `eas update --branch production --platform android`
+  (commit `fe5aa7a` pro fix do orçamento + CLAUDE.md, `57d99ee` pro
+  filtro de cartão nos futuros). ⚠️ Nota: a primeira tentativa de
+  publicar usei `eas update --auto` (sem `--branch`/`--platform`
+  explícitos) rodando do repo Android — isso publicou pra branch
+  `main` (nome da branch git atual), que NÃO está ligada a nenhum
+  canal ativo (`eas channel:list` só mostra `production`→`production`
+  e `preview`→`preview`) — ou seja, não chegou a nenhum usuário real,
+  mas também não substituiu nada. Recomendo sempre `--branch
+  production --platform <ios|android>` explícitos daqui pra frente
+  (documentado agora no `CLAUDE.md` novo do Android).
+- **iOS**: `eas update --branch production --environment production
+  --platform ios` (commits `59033fa` com o fix de orçamento
+  INCOMPLETO — só despesa, esquecido de espelhar a correção do
+  usuário — depois `65888de` completando com receita+despesa
+  separadas E o filtro de cartão). Publicado 2x: uma vez só com o fix
+  de despesa (antes de eu perceber a lacuna), outra vez já com tudo
+  certo — o usuário só recebe a versão final publicada por último.
+
+### Teste
+`node --check` não serve pra JSX — usei
+`@babel/core.transformFileSync` com `babel-preset-expo` (já presente
+em `node_modules` de cada repo mobile) pra confirmar que os 3 arquivos
+editados em cada repo (Android e iOS) parseiam sem erro de sintaxe.
+Confirmei os dois repos com `diff` que `app/(tabs)/index.js`,
+`app/(tabs)/configuracoes.js` e `src/lib/notifications.js` ficaram
+byte-a-byte idênticos entre Android e iOS depois de todas as edições
+(inclusive a correção da lacuna do item 2). Não testado manualmente em
+dispositivo real nesta sessão — recomenda-se conferir no app depois
+que o OTA chegar (pode levar alguns minutos/reabrir o app).
+
+### Arquivos
+Desktop: `src/main.js`, `src/preload.js`, `src/index.html`,
+`src/renderer.js`. Mobile (Android + iOS, espelhado):
+`app/(tabs)/index.js`, `app/(tabs)/configuracoes.js`,
+`src/lib/notifications.js`. Novo: `Cruzeiro Android/CLAUDE.md`.
+
+---
+
 ## 2026-07-23 (continuação) — Importação de corretora: detecta lançamentos não relacionados a ativos (XP/BTG)
 
 ### O quê
