@@ -3636,17 +3636,26 @@ ipcMain.handle('broker:create-adjustment', (_, { accountId, month, totalLiquido,
   }
 
   const account = first('SELECT name FROM accounts WHERE id=?', [accountId]);
-  const adjDate = month + '-28'; // safe last day for any month
+  // Precisa ser o ÚLTIMO DIA DO MÊS de verdade (não um "dia 28 seguro") —
+  // senão qualquer movimentação registrada entre o dia 28 e o fim do mês
+  // real fica de fora da comparação de saldo, e o ajuste sai errado.
+  const [adjYear, adjMonthNum] = month.split('-').map(Number);
+  const lastDayOfMonth = new Date(adjYear, adjMonthNum, 0).getDate();
+  const adjDate = `${month}-${String(lastDayOfMonth).padStart(2, '0')}`;
   const memo = `Ajuste de saldo — extrato ${broker} ${month}`;
 
-  // Check for existing adjustment for this month to avoid duplicates
+  // Procura um ajuste já existente pra este mês por MEMO + PREFIXO de data
+  // (não data exata) — versões anteriores deste código gravavam sempre no
+  // dia 28 (bug corrigido acima); buscar por prefixo encontra esse ajuste
+  // antigo também e o migra pra data certa, em vez de criar um duplicado
+  // ao lado dele.
   const existing = first(
-    `SELECT id FROM transactions WHERE account_id=? AND date=? AND memo=?`,
-    [accountId, adjDate, memo]
+    `SELECT id FROM transactions WHERE account_id=? AND memo=? AND date LIKE ?`,
+    [accountId, memo, month + '-%']
   );
   if (existing) {
-    // Update it
-    run(`UPDATE transactions SET amount=? WHERE id=?`, [diff, existing.id]);
+    // Update it (inclui a data — migra o dia 28 antigo pro último dia real)
+    run(`UPDATE transactions SET amount=?, date=? WHERE id=?`, [diff, adjDate, existing.id]);
   } else {
     run(`INSERT INTO transactions (account_id,date,category,memo,amount,cleared) VALUES (?,?,?,?,?,1)`,
       [accountId, adjDate, 'Renda Financeira', memo, diff]);
@@ -3797,7 +3806,11 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
     // create "Valores em Caixa" desta corretora especificamente — nunca cai
     // no nome de qualquer corretora, pelo mesmo motivo do loop principal:
     // cada corretora tem seu próprio saldo em caixa).
-    if (caixaValue != null && caixaValue > 0) {
+    // != null (não > 0!) — caixa zerado é um valor real do extrato (ex:
+    // usuário resgatou tudo naquele mês) e precisa ser lançado como 0,
+    // senão o Patrimônio simplesmente repete o valor do mês anterior por
+    // não ter nenhum registro pra este mês.
+    if (caixaValue != null) {
       const caixaName = 'Valores em Caixa';
       let caixaAsset = first('SELECT id FROM inv_assets WHERE name=? AND lower(COALESCE(broker,\'\'))=lower(?)', [caixaName, broker||'']);
       let caixaId;

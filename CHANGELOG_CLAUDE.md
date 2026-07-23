@@ -46,6 +46,49 @@ duplicada.
 
 ---
 
+## 2026-07-23 — Importação de corretora: data do ajuste + caixa zerado
+
+### O quê
+Usuário reportou dois bugs no importador de corretora (início de uma
+leva maior de melhorias no importador, pedidas em lote):
+1. O ajuste de saldo ao final da importação sempre caía no dia 28 do
+   mês, mesmo em meses com 29/30/31 dias — qualquer movimentação real
+   entre o dia 28 e o fim do mês ficava de fora da comparação de saldo.
+2. Quando o saldo em caixa do extrato da corretora é exatamente zero, o
+   app pulava o lançamento (tratava como "sem dado"), e o Patrimônio
+   repetia o valor do mês anterior em vez de mostrar zero.
+
+### Correção
+**Bug 1** — `broker:create-adjustment` em `src/main.js` (~linha 3623):
+`adjDate` calculado de verdade (`new Date(ano, mes, 0).getDate()`, mesmo
+idiom já usado em outros pontos do arquivo pra "último dia do mês") em
+vez do literal `month + '-28'`. A busca por ajuste já existente (pra não
+duplicar numa reimportação) também mudou de "data exata" pra "mesmo mês,
+por prefixo" — isso tem o efeito colateral bom de MIGRAR automaticamente
+qualquer ajuste antigo gravado no dia 28 (pelo bug) pra data certa, na
+próxima vez que aquele mês for reimportado, em vez de criar um duplicado
+ao lado dele.
+
+**Bug 2** — três lugares tratavam `caixaValue` com checagem "truthy"
+(`caixaValue > 0`, `if (!v)`, `if (caixaValue)`), que descarta
+incorretamente o número `0`: no parser BTG (`src/renderer.js`, seção
+"Conta Corrente"), no parser XP (seção "Saldo Disponível histórico"), e
+no handler `broker:save-parsed` em `src/main.js`. Todos trocados pra
+checagem "existe" (`!= null`), preservando zero como valor real.
+Também corrigida a linha da PRÉVIA da importação (antes de confirmar)
+que escondia a linha "Valores em Caixa" quando o valor era zero.
+
+### Teste
+Bug 1 testado com script isolado (sql.js) contra cópia do banco fake:
+mês de 30 dias, fevereiro normal (28), fevereiro bissexto (29),
+reimportação do mesmo mês (não duplica, atualiza a mesma linha), e
+migração de um ajuste antigo simulado no dia 28 (migra pra data certa,
+sem duplicar) — todos corretos. Bug 2 verificado por leitura do código
+(sintaxe conferida) — sem extrato real com caixa zerado disponível pra
+teste end-to-end nesta sessão.
+
+---
+
 ## 2026-07-22 (continuação 7) — Conferência por saldo diário vira recomendação, não exclusão automática
 
 ### O quê

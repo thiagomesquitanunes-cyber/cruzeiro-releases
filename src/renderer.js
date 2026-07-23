@@ -8175,7 +8175,9 @@ function parseBTGBroker(buffer) {
   if (ccWs) {
     const rows = XLSX.utils.sheet_to_json(ccWs, { header:1, defval:null, raw:true });
     for (const row of rows.slice(0, 15)) {
-      if (isDate(row[1]) && typeof row[2]==='number' && row[2]>0) {
+      // Sem ">0" — caixa zerado (R$0,00 na conta corrente da corretora
+      // naquele mês) é um valor real, não "ausência de dado".
+      if (isDate(row[1]) && typeof row[2]==='number' && !isNaN(row[2])) {
         result.caixaValue = row[2]; break;
       }
     }
@@ -8291,7 +8293,9 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
       const valRow = posRows[ri+1] || [];
       const parsed = (() => {
         const v = valRow[colIdx];
-        if (!v) return null;
+        // v==null (não !v) — se a célula vier como número 0 puro (caixa
+        // zerado), "!v" descartaria incorretamente um valor real.
+        if (v == null || v === '') return null;
         const s = String(v).replace(/R\$\s*/,'').replace(/\./g,'').replace(',','.').trim();
         const n = parseFloat(s);
         return isNaN(n) ? null : n;
@@ -9675,7 +9679,7 @@ function renderBrokerPreview(parsed) {
     </tr>${unkRow}`;
   }).join('');
 
-  if (caixaValue) {
+  if (caixaValue != null) {
     rows += `<tr style="background:var(--bg3)">
       <td style="font-size:11px;padding:4px 6px" colspan="4">Valores em Caixa (${broker})</td>
       <td class="amt-inc right" style="font-size:11px;padding:4px 8px;font-family:'DM Mono',monospace">${fmtBRL(caixaValue)}</td>
