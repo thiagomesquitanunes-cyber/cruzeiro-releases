@@ -12,6 +12,108 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-23 — ML sugere transferência real (não só a categoria) + corrige duplicação ao converter categoria de/para transferência
+
+### O quê
+Duas melhorias relacionadas pedidas pelo usuário:
+
+1. Quando o machine learning aprendia que um padrão de lançamento
+   costumava ser transferência entre contas, ele só sugeria a categoria
+   genérica `"Transferência"` (texto), tanto na importação quanto no
+   lançamento manual. Isso cria uma transação solta com essa categoria,
+   **sem** as duas pernas (`transfer_id` ligando origem e destino) —
+   exatamente o estado de "transferência fantasma" que o resto do app
+   trata como corrompido (ver migração de pernas órfãs em `main.js:719`).
+2. Editar um lançamento pra transformá-lo em transferência (ou uma perna
+   de transferência real pra deixar de ser) duplicava dados: no primeiro
+   caso, o lançamento original ficava para trás junto com a transferência
+   nova; no segundo, a perna editada ficava com categoria nova mas ainda
+   ligada por `transfer_id` à perna antiga (agora órfã/inconsistente).
+
+### Causa
+- `ml_rules` não tinha nenhum conceito de "conta destino" — só
+  `keyword/memo/category`. Então uma regra aprendida de uma transferência
+  real só conseguia guardar o texto da categoria, nunca pra qual conta.
+- `openTransferFromCat()` (`renderer.js:12827`) só sabia recuperar o
+  lançamento de origem a excluir quando disparado a partir de uma linha
+  da tabela (`tr[data-id]`) — quando disparado pelo campo de categoria do
+  modal "Editar Lançamento" (`#tx-category`, sem `<tr>` ancestral), o
+  `hidField` de origem nunca era preenchido, então `saveTransfer()` nunca
+  chamava `ff.deleteTx()` no lançamento original.
+- `tx:update` e `tx:inline-update` (`main.js`) já sincronizavam
+  data/memo/valor entre as duas pernas de uma transferência ao editar,
+  mas nunca verificavam se a **categoria** deixou de indicar transferência
+  — nesse caso simplesmente ignoravam `transfer_id`, deixando a perna
+  editada com categoria nova mas ainda "grudada" na perna antiga.
+
+### Correção
+- Nova coluna `ml_rules.transfer_account_id` (nullable). `ml:learn`
+  (`main.js`) só grava um valor nela quando a categoria aprendida é
+  transferência (`isTransferCat()`, novo helper); ao reaprender o mesmo
+  padrão como categoria comum, a coluna é explicitamente limpa (evita
+  reaproveitar destino de uma transferência antiga numa regra que não é
+  mais transferência).
+- `saveTransfer()` (renderer.js) agora chama `ff.mlLearn()` com
+  `category:'Transferência', transfer_account_id` após criar uma
+  transferência manual pelo modal — é o ponto central de aprendizado.
+- `doImport()`: o loop de aprendizado ao final da importação agora
+  aprende `transfer_account_id` (resolvido, não o texto `"⇄
+  Transferência: Nome"`) pras linhas que viraram transferência real.
+- Sugestão de transferência (nunca mais categoria `"Transferência"` pura):
+  - `mlSuggest()` (lançamento manual): quando a regra tem
+    `transfer_account_id`, resolve o nome ATUAL da conta (não guarda
+    nome — sobrevive a renomeação) e preenche o campo com o marcador
+    `"⇄ Transferência: Nome"` + `dataset.isTransfer`/`transferDest`.
+  - Importação em lote (`withML`, dentro de `confirmBankImport`):
+    mesma lógica, reconstrói o marcador a partir do `transfer_account_id`
+    salvo. Se a regra tem categoria "Transferência" mas SEM
+    `transfer_account_id` (dado antigo, de antes desta correção, ou
+    conta destino excluída), a sugestão é suprimida em vez de reproduzir
+    o bug antigo.
+  - `saveTx()` agora intercepta, antes de salvar, um campo de categoria
+    marcado como transferência (`dataset.isTransfer==='1'` + texto no
+    formato `"⇄ Transferência: Nome"`) e redireciona pro fluxo real de
+    transferência (`openTransferFromCat`) em vez de salvar o texto
+    literal como categoria comum.
+- `openTransferFromCat()`: agora também preenche o `hidField` de origem
+  quando disparado do campo `#tx-category` **e** existe `editingTxId`
+  (edição em andamento) — assim `saveTransfer()` exclui corretamente o
+  lançamento original nesse caminho também. Também zera esse campo no
+  início da função (evitava um valor de uma chamada anterior vazar pra
+  uma chamada seguinte sem lançamento de origem).
+- `tx:update` e `tx:inline-update` (main.js): quando a transação editada
+  pertencia a uma transferência real (`transfer_id` setado) e a nova
+  categoria deixou de indicar transferência, agora excluem as DUAS pernas
+  antigas e recriam um único lançamento comum com os dados editados —
+  com undo completo (restaura as duas pernas originais).
+
+### Teste
+Script isolado com `sql.js` contra cópia do banco fake (não altera dados
+reais), 5 cenários — todos passaram:
+1. `tx:update` convertendo perna de transferência pra categoria normal:
+   as duas pernas antigas somem, sobra 1 lançamento novo com a categoria
+   editada e `transfer_id=null`.
+2. Mesmo cenário via `tx:inline-update` (edição inline na tabela da conta).
+3. `ml:learn` gravando `transfer_account_id` ao aprender uma transferência.
+4. `ml:learn` limpando `transfer_account_id` ao reaprender o mesmo padrão
+   como categoria comum depois.
+5. (Reaproveitado de sessão anterior) `node --check` em `main.js` e
+   `renderer.js` — sem erro de sintaxe.
+
+Os fluxos de UI (modal "Editar Lançamento" → transferência, sugestão do
+ML aparecendo no campo, importação em lote) não foram testados
+manualmente na interface nesta sessão — a lógica de dados foi validada
+isoladamente; recomenda-se um teste manual rápido no app antes de confiar
+cegamente em cenários de produção incomuns (ex.: conta destino oculta).
+
+### Arquivos
+`src/main.js` (`ml:learn`, `ml:predict-batch`, `tx:update`,
+`tx:inline-update`, novo helper `isTransferCat`, migração
+`ALTER TABLE ml_rules ADD COLUMN transfer_account_id`), `src/renderer.js`
+(`mlSuggest`, `saveTx`, `saveTransfer`, `openTransferFromCat`, `doImport`).
+
+---
+
 ## 2026-07-22 (continuação 2) — Bug: estorno em fatura Santander virava despesa em vez de crédito
 
 ### O quê

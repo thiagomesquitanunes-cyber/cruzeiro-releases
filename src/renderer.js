@@ -3431,9 +3431,31 @@ async function mlSuggest() {
       return;
     }
     const pred = await ff.mlPredict({ desc: memo, amount });
-    if (pred) {
+    const catInp = G('tx-category');
+    if (pred && pred.transfer_account_id) {
+      // ML aprendeu que este padrão costuma ser uma transferência de verdade —
+      // sugere a transferência (com conta destino), nunca a categoria genérica
+      // "Transferência" sozinha (que não cria as duas pernas).
+      const destAcc = accounts.find(a => a.id === pred.transfer_account_id);
+      if (destAcc) {
+        G('ml-suggestion').textContent = `🧠 ML: ⇄ Transferência para "${destAcc.name}" (${pred.count} usos)`;
+        if (!catInp.value) {
+          catInp.value = `⇄ Transferência: ${destAcc.name}`;
+          catInp.dataset.isTransfer = '1';
+          catInp.dataset.transferDest = String(destAcc.id);
+        }
+      } else {
+        // Conta destino aprendida não existe mais (excluída/oculta) — não dá
+        // pra sugerir a transferência real, então não sugere nada (evita
+        // voltar a cair na categoria "Transferência" fantasma).
+        G('ml-suggestion').textContent = '';
+      }
+    } else if (pred && pred.category && !isTransferCategory(pred.category)) {
       G('ml-suggestion').textContent = `🧠 ML: ${pred.category||'—'} · "${pred.memo||''}" (${pred.count} usos)`;
-      if (!G('tx-category').value && pred.category) G('tx-category').value = pred.category;
+      if (!catInp.value) {
+        catInp.value = pred.category;
+        catInp.dataset.isTransfer = '';
+      }
     } else {
       G('ml-suggestion').textContent = '';
     }
@@ -3465,6 +3487,18 @@ async function saveTx() {
   if (_licStatus?.status === 'payment_required' && !editingTxId) {
     openLicenseModal();
     return;
+  }
+  // Categoria marcada como transferência (escolhida manualmente no dropdown ou
+  // preenchida pela sugestão do ML) — não salva como lançamento comum com
+  // texto literal "⇄ Transferência: X"; abre o fluxo real de transferência
+  // (duas pernas), que também cuida de excluir o lançamento original se for edição.
+  const catInpChk = G('tx-category');
+  if (catInpChk?.dataset.isTransfer === '1' && catInpChk.value.trim().match(/^⇄ Transferência: (.+)$/)) {
+    const destName = catInpChk.value.trim().match(/^⇄ Transferência: (.+)$/)[1];
+    const destAcc = catInpChk.dataset.transferDest
+      ? accounts.find(a => a.id === parseInt(catInpChk.dataset.transferDest))
+      : accounts.find(a => a.name === destName);
+    if (destAcc) { _globalCatActiveInput = catInpChk; openTransferFromCat(destAcc); return; }
   }
   const account_id = parseInt(G('tx-account').value);
   const date       = G('tx-date').value;
@@ -3652,6 +3686,12 @@ async function saveTransfer() {
   if (btn) { btn.disabled = true; btn.textContent = 'Registrando…'; }
   try {
   await ff.transfer({ fromAccountId, toAccountId, date, amount, memo });
+  // Ensina o ML que esse padrão de memorando costuma ser uma transferência
+  // para esta conta de destino — assim uma próxima importação/lançamento
+  // parecido já sugere a transferência real, não só a categoria "Transferência".
+  if (memo) {
+    ff.mlLearn({ desc: memo, memo, category: 'Transferência', amount, transfer_account_id: toAccountId }).catch(() => {});
+  }
   // Delete the original transaction if this was triggered from an inline edit
   if (originTxId) {
     await ff.deleteTx(originTxId).catch(() => {});
@@ -5624,13 +5664,26 @@ async function confirmBankImport() {
   } catch(e) { mlPreds = []; }
   const withML = normalised.map((r, i) => {
     const p = mlPreds[i];
+    // Quando o ML aprendeu que este padrão costuma ser uma transferência de
+    // verdade, sugere o marcador "⇄ Transferência: Conta" (reconstruído a
+    // partir do ID salvo — sempre com o nome ATUAL da conta, mesmo se ela foi
+    // renomeada), que o fluxo de confirmação já sabe converter numa
+    // transferência real de duas pernas. Sem conta destino válida, nunca
+    // sugere a categoria "Transferência" pura (evita o bug original).
+    let sugCat = (p && p.category) ? p.category : (r.category || '');
+    if (p && p.transfer_account_id) {
+      const destAcc = accounts.find(a => a.id === p.transfer_account_id);
+      sugCat = destAcc ? `⇄ Transferência: ${destAcc.name}` : '';
+    } else if (p && isTransferCategory(p.category || '')) {
+      sugCat = '';
+    }
     return {
       ...r,
       _gi: i, // índice estável — sobrevive a todo filter/spread subsequente,
               // usado pela auditoria de saldo pós-importação para saber
               // exatamente qual linha da fatura acabou em qual destino
       sugMemo: (p && p.memo) ? p.memo : r.memo,
-      sugCat:  (p && p.category) ? p.category : (r.category || ''),
+      sugCat,
     };
   });
 
@@ -6404,6 +6457,7 @@ async function doImport(finalRows, parcelInstallments, accountId, checkDailySald
     // Separate transfer rows from regular rows
     const transferRows = [];
     const regularRows  = [];
+    const transferDestByRow = new Map(); // r (referência original) -> toAccountId, usado pro aprendizado do ML abaixo
     for (const r of finalRows) {
       const tfMatch = (r.category||'').match(/^⇄ Transferência: (.+)$/);
       if (tfMatch) {
@@ -6411,6 +6465,7 @@ async function doImport(finalRows, parcelInstallments, accountId, checkDailySald
         const destAcc = accounts.find(a => a.name === destName);
         if (destAcc) {
           transferRows.push({ ...r, toAccountId: destAcc.id });
+          transferDestByRow.set(r, destAcc.id);
         } else {
           regularRows.push(r); // dest account not found, import as regular
         }
@@ -6485,12 +6540,18 @@ async function doImport(finalRows, parcelInstallments, accountId, checkDailySald
       if (r.category || r.memo) {
         const keyword = r.desc || r.origDesc || r.memo || '';
         if (keyword) {
+          const destId = transferDestByRow.get(r);
           try {
             await ff.mlLearn({
               desc:     keyword,
               memo:     r.memo || keyword,
-              category: r.category || '',
+              // Linha convertida em transferência real: aprende a categoria
+              // canônica + a conta destino (nunca o texto literal "⇄
+              // Transferência: Nome", que fica obsoleto se a conta for
+              // renomeada e não existe fora do fluxo de importação).
+              category: destId ? 'Transferência' : (r.category || ''),
               amount:   r.amount || 0,
+              transfer_account_id: destId || null,
             });
           } catch(e) { /* skip */ }
         }
@@ -12825,8 +12886,9 @@ function openTransferFromImportRow(row, destAcc) {
 }
 
 function openTransferFromCat(destAcc) {
-  // Limpa qualquer marcação de linha de importação de uma chamada anterior
+  // Limpa qualquer marcação de linha de importação/lançamento-origem de uma chamada anterior
   const f = G('tr-import-row-idx'); if (f) f.value = '';
+  const hf0 = G('tr-origin-tx-id'); if (hf0) hf0.value = '';
   setupCurrencyInput(G('tr-amount'));
   G('tr-amount').setValue?.(null);
   G('tr-memo').value = '';
@@ -12871,6 +12933,18 @@ function openTransferFromCat(destAcc) {
         G('modal-transfer')?.appendChild(hidField);
       }
       hidField.value = row.dataset.id || '';
+    } else if (inp.id === 'tx-category' && editingTxId) {
+      // Categoria trocada para transferência dentro do modal "Editar Lançamento"
+      // (não veio de uma linha da tabela) — sem isso, o lançamento original
+      // ficava para trás com a categoria antiga, duplicando junto com a
+      // transferência nova recém-criada.
+      let hidField = G('tr-origin-tx-id');
+      if (!hidField) {
+        hidField = document.createElement('input');
+        hidField.type = 'hidden'; hidField.id = 'tr-origin-tx-id';
+        G('modal-transfer')?.appendChild(hidField);
+      }
+      hidField.value = String(editingTxId);
     }
   }
 

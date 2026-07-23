@@ -369,6 +369,7 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_inv_tx_asset ON inv_transactions(asset_id, month);
   `)
   try { db.run(`ALTER TABLE inv_assets ADD COLUMN benchmark TEXT DEFAULT 'cdi'`); } catch(e) {};
+  try { db.run('ALTER TABLE ml_rules ADD COLUMN transfer_account_id INTEGER'); } catch(e) {};
 
   // No default account seeds — user creates their own accounts on first run
 
@@ -1005,6 +1006,26 @@ ipcMain.handle('tx:create', (_, tx) => {
 });
 ipcMain.handle('tx:update', (_, { id, date, category, memo, amount, cleared, pat_asset_id, pat_tx_id, pat_debt_id }) => {
   const old = first('SELECT * FROM transactions WHERE id=?', [id]);
+
+  // Esta perna pertencia a uma transferência real (transfer_id) e deixou de
+  // ter categoria de transferência: desfaz as DUAS pernas e recria como um
+  // único lançamento comum, em vez de deixar uma perna órfã/inconsistente.
+  if (old?.transfer_id && !isTransferCat(category)) {
+    const paired = first('SELECT * FROM transactions WHERE transfer_id=? AND id!=?', [old.transfer_id, id]);
+    run('DELETE FROM transactions WHERE transfer_id=?', [old.transfer_id]);
+    const newId = run('INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_tx_id,pat_debt_id) VALUES (?,?,?,?,?,?,?,?,?)',
+      [old.account_id, date, category, memo, amount, cleared?1:0, pat_asset_id||null, pat_tx_id||null, pat_debt_id||null]);
+    pushUndo(`Editar "${old.memo||old.category}"`, [
+      { sql: 'DELETE FROM transactions WHERE id=?', params: [newId] },
+      { sql: 'INSERT INTO transactions (id,account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,?,?,?)',
+        params: [old.id, old.account_id, old.date, old.category, old.memo, old.amount, old.cleared, old.transfer_id] },
+      ...(paired ? [{ sql: 'INSERT INTO transactions (id,account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,?,?,?)',
+        params: [paired.id, paired.account_id, paired.date, paired.category, paired.memo, paired.amount, paired.cleared, paired.transfer_id] }] : [])
+    ]);
+    save();
+    return first('SELECT * FROM transactions WHERE id=?', [newId]);
+  }
+
   run('UPDATE transactions SET date=?,category=?,memo=?,amount=?,cleared=?,pat_asset_id=?,pat_tx_id=?,pat_debt_id=? WHERE id=?',
     [date, category, memo, amount, cleared?1:0, pat_asset_id||null, pat_tx_id||null, pat_debt_id||null, id]);
 
@@ -1614,19 +1635,24 @@ ipcMain.handle('ml:predict-batch', (_, { rows }) => {
       if (score > bestScore) { bestScore = score; best = r; }
     }
     if (!best || bestScore < ML_MIN_SCORE) return null;
-    return { memo: best.memo || '', category: best.category || '', score: Math.round(bestScore * 100) / 100 };
+    return { memo: best.memo || '', category: best.category || '', score: Math.round(bestScore * 100) / 100, transfer_account_id: best.transfer_account_id || null };
   });
 });
-ipcMain.handle('ml:learn', (_, { desc, memo, category, amount }) => {
+ipcMain.handle('ml:learn', (_, { desc, memo, category, amount, transfer_account_id }) => {
   const key = normKey(desc).substring(0,50); if (!key) return;
   const abs = Math.abs(amount||0);
+  // transfer_account_id só é gravado quando a categoria aprendida é de fato
+  // "Transferência" — nos demais casos zera qualquer associação antiga (evita
+  // reaproveitar destino de uma transferência velha numa regra reaprendida
+  // depois como categoria comum).
+  const tAcc = isTransferCat(category) ? (transfer_account_id || null) : null;
   const ex  = first('SELECT * FROM ml_rules WHERE keyword=?', [key]);
   if (ex) {
-    run('UPDATE ml_rules SET memo=?,category=?,count=count+1,sum_val=sum_val+?,n_val=n_val+1, min_val=CASE WHEN ?<min_val OR min_val IS NULL THEN ? ELSE min_val END, max_val=CASE WHEN ?>max_val OR max_val IS NULL THEN ? ELSE max_val END WHERE keyword=?',
-      [memo||'', category||'', abs, abs, abs, abs, abs, key]);
+    run('UPDATE ml_rules SET memo=?,category=?,count=count+1,sum_val=sum_val+?,n_val=n_val+1, min_val=CASE WHEN ?<min_val OR min_val IS NULL THEN ? ELSE min_val END, max_val=CASE WHEN ?>max_val OR max_val IS NULL THEN ? ELSE max_val END, transfer_account_id=? WHERE keyword=?',
+      [memo||'', category||'', abs, abs, abs, abs, abs, tAcc, key]);
   } else {
-    run('INSERT INTO ml_rules (keyword,memo,category,count,sum_val,n_val,min_val,max_val) VALUES (?,?,?,1,?,1,?,?)',
-      [key, memo||'', category||'', abs, abs, abs]);
+    run('INSERT INTO ml_rules (keyword,memo,category,count,sum_val,n_val,min_val,max_val,transfer_account_id) VALUES (?,?,?,1,?,1,?,?,?)',
+      [key, memo||'', category||'', abs, abs, abs, tAcc]);
   }
 });
 ipcMain.handle('ml:list',   () => all('SELECT * FROM ml_rules ORDER BY count DESC'));
@@ -2115,6 +2141,7 @@ function parseQIFAmount(s) {
   return parseFloat(abs)*(neg?-1:1)||0;
 }
 function normKey(s) { return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }
+function isTransferCat(cat) { return normKey(cat).includes('transfer'); }
 
 // ── WINDOW ──
 // ── BACKUP ──
@@ -2285,6 +2312,26 @@ ipcMain.handle('tx:inline-update', (_, { id, field, value }) => {
   if (!allowed.includes(field)) return { ok: false };
   const old = first('SELECT * FROM transactions WHERE id=?', [id]);
   if (!old) return { ok: false };
+
+  // Esta perna pertencia a uma transferência real e a categoria deixou de ser
+  // de transferência: desfaz as DUAS pernas e recria como lançamento comum
+  // (mesma lógica de tx:update — evita perna órfã/inconsistente).
+  if (field === 'category' && old.transfer_id && !isTransferCat(value)) {
+    const paired = first('SELECT * FROM transactions WHERE transfer_id=? AND id!=?', [old.transfer_id, id]);
+    run('DELETE FROM transactions WHERE transfer_id=?', [old.transfer_id]);
+    const newId = run('INSERT INTO transactions (account_id,date,category,memo,amount,cleared,pat_asset_id,pat_tx_id,pat_debt_id) VALUES (?,?,?,?,?,?,?,?,?)',
+      [old.account_id, old.date, value, old.memo, old.amount, old.cleared, old.pat_asset_id||null, old.pat_tx_id||null, old.pat_debt_id||null]);
+    pushUndo(`Editar category de "${old.memo||old.category}"`, [
+      { sql: 'DELETE FROM transactions WHERE id=?', params: [newId] },
+      { sql: 'INSERT INTO transactions (id,account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,?,?,?)',
+        params: [old.id, old.account_id, old.date, old.category, old.memo, old.amount, old.cleared, old.transfer_id] },
+      ...(paired ? [{ sql: 'INSERT INTO transactions (id,account_id,date,category,memo,amount,cleared,transfer_id) VALUES (?,?,?,?,?,?,?,?)',
+        params: [paired.id, paired.account_id, paired.date, paired.category, paired.memo, paired.amount, paired.cleared, paired.transfer_id] }] : [])
+    ]);
+    save();
+    return { ok: true, id: newId };
+  }
+
   db.run(`UPDATE transactions SET ${field}=? WHERE id=?`, [value, id]);
 
   // Sync transfer pair for date, memo, and amount changes
