@@ -12,6 +12,49 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-24 (continuação) — Fix crítico: crash "Object has been destroyed" trava o app após auto-update
+
+### O quê
+Usuário reportou, após a atualização automática para a v4.84.0/4.84.1,
+que o app "não abria mais" — mostrava um diálogo de erro nativo do
+Electron: `TypeError: Object has been destroyed at App.<anonymous>
+(main.js:22:15)`.
+
+### Causa raiz
+Em `src/main.js`, a variável de módulo `win` (janela principal) nunca
+era zerada quando a janela era fechada/destruída — só o handler
+`win.on('closed', ...)` existia, sem `win = null`. O handler de
+`second-instance` (que foca a janela existente quando uma segunda
+cópia do app tenta abrir) fazia só `if (win) { win.isMinimized()... }`
+— um objeto já destruído continua truthy em JS, então a checagem
+passava e a chamada de método na janela morta lançava a exceção.
+
+O gatilho real: o fluxo de auto-update (`update:install` →
+`win.hide()` → `quitAndInstall(false, true)`) fecha/destrói a janela e
+relança o app. Nesse meio-tempo, um evento `second-instance` disparado
+no processo antigo (ainda fechando) batia direto nesse bug e
+crashava com uma exceção não tratada no processo principal — o que
+podia deixar um processo "zumbi" preso segurando o lock de instância
+única (`requestSingleInstanceLock`), fazendo TODA tentativa seguinte
+de abrir o app crashar da mesma forma (o processo zumbi respondia ao
+`second-instance` e crashava de novo).
+
+### Correção (`src/main.js`)
+- `win.on('closed', ...)`: agora zera `win = null` antes de fechar a
+  `loginWin`.
+- Handler de `app.on('second-instance', ...)`: checagem trocada de
+  `if (win)` para `if (win && !win.isDestroyed())`, blindando contra
+  qualquer outra referência a uma janela já destruída que passe pelo
+  mesmo caminho no futuro.
+
+### Ação imediata pro usuário afetado
+Caso o app trave dessa forma: finalizar qualquer processo "Cruzeiro"
+remanescente no Gerenciador de Tarefas (ou reiniciar o Windows) para
+liberar o lock de instância única, e abrir o app de novo — a versão
+já publicada com esse fix substitui o binário problemático.
+
+---
+
 ## 2026-07-24 — Fix no modal de lançamentos não relacionados a ativos (importação de corretora)
 
 ### O quê

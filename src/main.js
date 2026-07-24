@@ -18,7 +18,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', () => {
     try { logAuth('SEGUNDA_INSTANCIA bloqueada — outra cópia do app já estava aberta'); } catch(e) {}
-    if (win) {
+    if (win && !win.isDestroyed()) {
       if (win.isMinimized()) win.restore();
       win.show();
       win.focus();
@@ -2731,7 +2731,7 @@ function createWindow(showImmediately = false) {
   win.webContents.on('did-fail-load', (e, code, desc) => {
     console.error('[Load failed]', code, desc);
   });
-  win.on('closed', () => { if (loginWin) loginWin.close(); });
+  win.on('closed', () => { win = null; if (loginWin) loginWin.close(); });
 }
 
 async function mainStartupFlow() {
