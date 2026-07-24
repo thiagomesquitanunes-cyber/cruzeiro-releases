@@ -12,6 +12,41 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-24 — Fix no modal de lançamentos não relacionados a ativos (importação de corretora)
+
+### O quê
+Bug reportado pelo usuário com print: o modal "Lançamentos não
+relacionados a ativos" (surgido da task #86, que detecta movimentações
+do extrato de corretora que não batem com nenhum ativo e deixa o
+usuário registrá-las manualmente) tinha dois problemas:
+
+1. As colunas de Memorando e Categoria não tinham cabeçalho — ficava
+   sem contexto o que cada campo da linha significava.
+2. O dropdown de sugestão de categoria (`#global-cat-drop`, acionado ao
+   focar o campo de categoria) renderizava atrás do próprio modal,
+   impossibilitando selecionar qualquer categoria da lista.
+
+### Causa
+O `#modal-broker-nonasset` tinha `z-index:21000` (mesmo nível de
+`modal-confirm`/`modal-prompt`, modais de alerta "topo de tudo"),
+enquanto `#global-cat-drop` — o dropdown global de categorias, usado
+por vários campos do app — tem `z-index:9999`. Como 9999 < 21000, o
+dropdown sempre ficava coberto pelo modal.
+
+### Correção (`src/index.html`)
+- `#modal-broker-nonasset`: `z-index` baixado de `21000` para `8000`
+  (mesmo nível de outros modais de importação/revisão como
+  `modal-goal`, `modal-budget`, `modal-custom-parser`), abaixo do
+  `global-cat-drop` (9999) — dropdown agora aparece por cima.
+- Adicionada uma linha de cabeçalho acima de `#broker-nonasset-rows`
+  (Data / Valor / Memorando / Categoria), com as mesmas larguras/flex
+  das linhas geradas por `renderBrokerNonAssetRows()` em `renderer.js`,
+  pra alinhar corretamente com as colunas.
+
+App rodado localmente (`npm start`) pra validação visual pelo usuário.
+
+---
+
 ## 2026-07-23 (continuação 2) — Lançamentos futuros excluem cartão de crédito por padrão (desktop + mobile) + fix do card de orçamento mobile
 
 ### O quê
