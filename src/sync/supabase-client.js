@@ -8,6 +8,15 @@
 const https = require('https');
 const fs    = require('fs');
 
+// Data de HOJE no fuso do usuário (não UTC). new Date().toISOString() no
+// Brasil (UTC−3) devolve o dia SEGUINTE a partir das 21h — o que datava
+// lançamentos da noite no dia errado.
+const _pad2 = n => String(n).padStart(2, '0');
+function todayLocal() {
+  const d = new Date();
+  return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`;
+}
+
 const SUPABASE_URL    = 'https://nfpjxmwrtwogctocqtxp.supabase.co';
 const SUPABASE_ANON   = 'sb_publishable_rCikC0YRWCUwicYs0v7W8Q_k5sniHIl';
 
@@ -31,7 +40,7 @@ function _logEgress(pathname, method, bytes) {
   if (!_egressLogPath || !bytes) return;
   try {
     const table = pathname.replace(/^\/rest\/v1\//, '').split('?')[0] || '(outro)';
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocal();
     let log = {};
     try { log = JSON.parse(fs.readFileSync(_egressLogPath, 'utf8')); } catch (e) {}
     if (!log[today]) log[today] = {};
@@ -47,7 +56,7 @@ function printEgressSummary() {
   if (!_egressLogPath) return;
   try {
     const log = JSON.parse(fs.readFileSync(_egressLogPath, 'utf8'));
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocal();
     const todayLog = log[today];
     if (!todayLog) return;
     const rows = Object.entries(todayLog).sort((a, b) => b[1] - a[1]);

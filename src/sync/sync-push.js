@@ -129,21 +129,40 @@ function invalidateCache(table) {
 // Converte reais (float) para centavos (integer)
 const toCents = v => Math.round((v || 0) * 100);
 
-// Formata data JS para YYYY-MM-DD
-const toDate = d => (d ? new Date(d).toISOString().slice(0, 10) : null);
-
-// Retorna YYYY-MM de N meses atrás
-function monthsAgo(n) {
+// Data/mês de HOJE no fuso do usuário. new Date().toISOString() devolve UTC —
+// no Brasil (UTC−3) isso faz o app "virar o dia" às 21h, datando lançamentos
+// da noite no dia seguinte (e, no último dia do mês, no mês seguinte).
+const pad2 = n => String(n).padStart(2, '0');
+function todayLocal() {
   const d = new Date();
-  d.setMonth(d.getMonth() - n);
-  return d.toISOString().slice(0, 7);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+function monthLocal() { return todayLocal().slice(0, 7); }
+// Hoje ± N dias, também no fuso local — usado como limite das janelas de
+// consulta. setDate() com dias (diferente de setMonth com meses) rola
+// corretamente de mês/ano, então não precisa de âncora.
+function shiftDaysLocal(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+// Retorna YYYY-MM de N meses atrás.
+// Monta a data com DIA 1 fixo: `d.setMonth(d.getMonth() - n)` no dia 31 não
+// existe no mês de destino (31/abr) e o JS rola pro mês seguinte, devolvendo
+// o mês ERRADO — o que gerava meses duplicados na lista e derrubava o upsert
+// de mobile_patrimonio ("ON CONFLICT cannot affect row a second time").
+function monthsAgo(n) {
+  const [y, m] = monthLocal().split('-').map(Number);
+  const d = new Date(y, m - 1 - n, 1);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
 }
 
 // ─────────────────────────────────────────────────────────────
 // 1. Saldos por conta
 // ─────────────────────────────────────────────────────────────
 async function pushBalances(all, userId, syncInvestments) {
-  const today    = new Date().toISOString().slice(0, 10);
+  const today    = todayLocal();
   let accounts = all('SELECT * FROM accounts WHERE hidden=0 ORDER BY sort_order');
 
   // Por padrão, contas de investimento não são enviadas ao mobile —
@@ -194,10 +213,8 @@ async function pushBalances(all, userId, syncInvestments) {
 // 2. Transações recentes (últimos 90 dias)
 // ─────────────────────────────────────────────────────────────
 async function pushTransactions(all, userId, syncInvestments) {
-  const from = new Date();
-  from.setDate(from.getDate() - 90);
-  const fromDate = from.toISOString().slice(0, 10);
-  const today = new Date().toISOString().slice(0, 10);
+  const fromDate = shiftDaysLocal(-90);
+  const today = todayLocal();
 
   // Por padrão, exclui transações de contas de investimento (mesma regra
   // de pushBalances) — evita vazar extrato de aportes/resgates mesmo que
@@ -265,7 +282,7 @@ async function pushTransactions(all, userId, syncInvestments) {
 // 3. Orçamentos do mês atual
 // ─────────────────────────────────────────────────────────────
 async function pushBudgets(all, userId) {
-  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const month = monthLocal(); // YYYY-MM
   const from  = `${month}-01`;
   const to    = `${month}-31`;
 
@@ -371,7 +388,7 @@ async function pushGoals(all, userId) {
       progressPct  = target > 0 ? Math.min(100, (currentAmount / target) * 100) : 0;
     } else if (g.type === 'monthly' && g.monthly_amount) {
       // Progresso do mês atual
-      const month  = new Date().toISOString().slice(0, 7);
+      const month  = monthLocal();
       const saved  = all(`
         SELECT COALESCE(SUM(amount),0) as s
         FROM transactions
@@ -445,8 +462,8 @@ async function pushGoals(all, userId) {
 // décadas). 60 dias é mais que suficiente pro caso de uso mobile.
 // ─────────────────────────────────────────────────────────────
 async function pushScheduled(all, userId, syncInvestments) {
-  const today   = new Date().toISOString().slice(0, 10);
-  const horizon = new Date(Date.now() + 60 * 86400000).toISOString().slice(0, 10);
+  const today   = todayLocal();
+  const horizon = shiftDaysLocal(60);
   const investmentFilter = syncInvestments ? '' : `AND a.type != 'investment'`;
 
   const txns = all(`

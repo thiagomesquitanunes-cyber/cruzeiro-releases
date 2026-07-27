@@ -6220,7 +6220,7 @@ async function finishImportWithPatLinks(finalRows, updatedInstallments, accountI
 }
 
 async function findCancelamentoMatches(groups) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayStr();
   const out = [];
   for (const g of groups) {
     try {
@@ -17943,7 +17943,18 @@ async function openBackupFolder() {
 function fmtBRL(v){ return (v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
 function fmtBRLshort(v){ const abs=Math.abs(v||0),sign=v<0?'-':''; if(abs>=1e6) return sign+(abs/1e6).toFixed(1)+'M'; if(abs>=1e3) return sign+(abs/1e3).toFixed(1)+'k'; return sign+abs.toFixed(0); }
 function fmtDate(s){ if(!s) return ''; const [y,m,d]=s.split('-'); return `${d}/${m}/${y}`; }
-function todayStr(){ return new Date().toISOString().slice(0,10); }
+// Data/mês de HOJE no fuso do usuário. Usava toISOString(), que serializa em
+// UTC: no Brasil (UTC−3) o app "virava o dia" às 21h — um lançamento feito às
+// 22h nascia datado no dia seguinte, e no último dia do mês o mês corrente
+// (orçamento, resumo) pulava pro seguinte 3h antes da meia-noite.
+// _pad2 é function declaration (não const) de propósito: todayStr() é chamada
+// de pontos do arquivo ANTERIORES a esta linha, e só declarações de função são
+// içadas — um `const` aqui ficaria na zona morta temporal nesses casos.
+function _pad2(n){ return String(n).padStart(2,'0'); }
+function todayStr(){
+  const d = new Date();
+  return `${d.getFullYear()}-${_pad2(d.getMonth()+1)}-${_pad2(d.getDate())}`;
+}
 function norm(s){ return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }
 // Categorias de transferência entre contas usam o formato "⇄ Transferência:
 // [conta destino]" (com emoji e sufixo) — um Set de comparação EXATA (como
@@ -22065,7 +22076,7 @@ function patTxRenderTable() {
 
   // Bank accounts available for sync (non-hidden bank/cash accounts)
   const bankAccounts = (accounts||[]).filter(a => !a.hidden && (a.type === 'bank' || a.type === 'cash'));
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayStr();
 
   // Default account: the first one chosen anywhere in this table (any row,
   // regardless of order), used to pre-fill rows that don't have one set yet.
@@ -22703,7 +22714,7 @@ async function savePatAsset() {
       await ff.patHistorySet({ assetId, month: pvMonth, value: pvTotal, manual: true });
       // Registra cada parcela como tipo 'parcela_compra' (saldo devedor ao vendedor)
       const pvRows = document.querySelectorAll('#pv-installments-list .pv-row');
-      const today = new Date().toISOString().slice(0,10);
+      const today = todayStr();
       for (const row of pvRows) {
         const dateStr = row.querySelector('.pv-date')?.value || '';
         const val2 = parseFloat((row.querySelector('.pv-value')?.value || '').replace(/[R$ .]/g,'').replace(',','.')) || 0;
@@ -23582,7 +23593,7 @@ function patRenderSchedulePreview(schedule) {
   const preview = G('fin-schedule-preview');
   const body    = G('fin-schedule-body');
   if (!preview || !body || !schedule.length) return;
-  const curM = new Date().toISOString().slice(0,7);
+  const curM = todayStr().slice(0,7);
   const sorted = schedule.slice().sort((a,b) => a.month.localeCompare(b.month));
   // Show a window around "now": a couple of recent/paid installments plus the
   // next several projected ones — more useful than always showing the very
@@ -23637,7 +23648,7 @@ async function debtShowFullSchedule() {
 
 function showFullScheduleModal(type, rows, ctx) {
   if (!rows.length) { toast('Nenhuma parcela encontrada.'); return; }
-  const curM = new Date().toISOString().slice(0,7);
+  const curM = todayStr().slice(0,7);
   const sorted = rows.slice().sort((a,b) => a.month.localeCompare(b.month));
   const totalInstall = sorted.reduce((s,r) => s+r.installment, 0);
   // Larguras suficientes para valores grandes sem sobrepor (coluna extra de checkbox)
@@ -23853,7 +23864,7 @@ function debtRenderSchedulePreview(schedule) {
   const preview = G('debt-fin-schedule-preview');
   const body    = G('debt-fin-schedule-body');
   if (!preview || !body || !schedule.length) return;
-  const curM = new Date().toISOString().slice(0,7);
+  const curM = todayStr().slice(0,7);
   const rows = schedule.slice(0, 6);
   body.innerHTML = rows.map(r => {
     const isPast = r.month <= curM && r.is_projection === 0;
@@ -25912,7 +25923,7 @@ async function aposGetRealizedSavings() {
     // isso não é afetado pela mudança feita no Resumo/Comparação mensal.
     const rows = await ff.reportMonthly({
       fromDate: '2000-01-01',
-      toDate: new Date().toISOString().slice(0,10),
+      toDate: todayStr(),
       excludeTransfers: true,
     });
     (rows || []).forEach(row => {
@@ -27386,7 +27397,7 @@ async function exportData() {
     const blob = new Blob([json], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    const date = new Date().toISOString().slice(0, 10);
+    const date = todayStr();
     a.href     = url;
     a.download = `cruzeiro-export-${date}.json`;
     a.click();
@@ -27419,7 +27430,7 @@ async function exportCSV() {
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' }); // BOM for Excel
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    const date = new Date().toISOString().slice(0, 10);
+    const date = todayStr();
     a.href     = url;
     a.download = `cruzeiro-lancamentos-${date}.csv`;
     a.click();
@@ -27486,7 +27497,7 @@ T${qifType(type)}
     const blob = new Blob([qif], { type: 'text/plain;charset=utf-8' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    const date = new Date().toISOString().slice(0, 10);
+    const date = todayStr();
     a.href     = url;
     a.download = `cruzeiro-export-${date}.qif`;
     a.click();

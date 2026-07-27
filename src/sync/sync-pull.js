@@ -11,6 +11,15 @@
 const sb = require('./supabase-client');
 const cryptoUtils = require('./crypto-utils');
 
+// Data de HOJE no fuso do usuário (não UTC). new Date().toISOString() no
+// Brasil (UTC−3) devolve o dia SEGUINTE a partir das 21h — o que datava
+// lançamentos da noite no dia errado.
+const _pad2 = n => String(n).padStart(2, '0');
+function todayLocal() {
+  const d = new Date();
+  return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`;
+}
+
 // Decifra um campo vindo do mobile (quick_entries agora são cifrados
 // no aparelho antes do insert). Fallback: se o valor não estiver
 // cifrado (app mobile antigo, ou chave indisponível no momento do
@@ -91,7 +100,7 @@ async function pullQuickEntries(all, run, first, save, userId) {
       const amount = entryType === 'income'
         ? Math.abs(entry.amount) / 100
         : -(Math.abs(entry.amount) / 100);
-      const date   = entry.date || new Date().toISOString().slice(0, 10);
+      const date   = entry.date || todayLocal();
 
       // Insere a transação no SQLite
       const txId = run(
@@ -149,7 +158,7 @@ function importTransferEntry(all, run, first, entry) {
 
   const maxRow = first('SELECT COALESCE(MAX(transfer_id),0) as m FROM transactions');
   const tid    = (maxRow?.m || 0) + 1;
-  const date   = entry.date || new Date().toISOString().slice(0, 10);
+  const date   = entry.date || todayLocal();
   const amount = Math.abs(entry.amount) / 100;
   const memo   = entry.memo || 'Transferência';
 

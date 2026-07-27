@@ -871,6 +871,19 @@ function _backfillMissingCompraTx(assetId) {
   } catch(e) { console.warn('[compra backfill] falhou:', e.message); }
 }
 
+// ── DATA LOCAL ──
+// Data/mês de HOJE no fuso do usuário. Todo o app usava a serialização ISO
+// em UTC para descobrir "hoje" — e no Brasil (UTC−3)
+// isso faz o app "virar o dia" às 21h — um lançamento feito às 22h era datado
+// no dia seguinte, e no último dia do mês o orçamento/relatórios pulavam pro
+// mês seguinte 3h antes da hora. Estas duas montam a data no relógio local.
+const _pad2 = n => String(n).padStart(2, '0');
+function todayLocal() {
+  const d = new Date();
+  return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`;
+}
+function monthLocal() { return todayLocal().slice(0, 7); }
+
 // ── DB HELPERS ──
 function save() {
   // CRITICAL: never write to disk while DB is pending decryption (would overwrite encrypted file with empty DB)
@@ -964,7 +977,7 @@ ipcMain.handle('accounts:reorder', (_, orderedIds) => {
   return {ok:true};
 });
 ipcMain.handle('accounts:balance', (_, id) => {
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   return (first('SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND date <= ?', [id, today])?.bal || 0);
 });
 ipcMain.handle('accounts:balance-including-future', (_, id) => {
@@ -1067,7 +1080,7 @@ ipcMain.handle('tx:delete', (_, id) => {
     run('DELETE FROM transactions WHERE transfer_id=? AND id!=?', [tx.transfer_id, id]);
   }
   // If this is a future uncleared recurring tx, remember the exclusion so sync won't recreate it
-  if (tx?.recurring_id && tx.cleared === 0 && tx.date >= new Date().toISOString().slice(0,10)) {
+  if (tx?.recurring_id && tx.cleared === 0 && tx.date >= todayLocal()) {
     try {
       migrateRecurring();
       run('INSERT OR IGNORE INTO recurring_excludes (recurring_id, date) VALUES (?,?)', [tx.recurring_id, tx.date]);
@@ -1308,7 +1321,7 @@ ipcMain.handle('settings:set-include-credit-future', (_, enabled) => {
 
 // Future pending (not cleared, date > today)
 ipcMain.handle('report:future-pending', () => {
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   const creditFilter = getIncludeCreditFuturePref() ? '' : "AND a.type != 'credit'";
   return all(`SELECT t.*, a.name as account_name FROM transactions t
     JOIN accounts a ON a.id = t.account_id
@@ -1323,7 +1336,7 @@ ipcMain.handle('report:future-pending', () => {
 // Future transactions already include recurring instances and financing sync legs,
 // so we just union starting balances with everything dated after today.
 ipcMain.handle('report:cashflow-projection', (_, opts) => {
-  const today    = new Date().toISOString().slice(0,10);
+  const today    = todayLocal();
   const horizon  = opts?.horizonMonths || 6;
   const accIds   = (opts?.accountIds && opts.accountIds.length) ? opts.accountIds : null;
   const includeCredit = opts?.includeCredit ?? false;
@@ -1365,7 +1378,7 @@ ipcMain.handle('report:cashflow-projection', (_, opts) => {
 });
 
 ipcMain.handle('report:net-worth', (_, { date }) => {
-  const d = date || new Date().toISOString().slice(0,10);
+  const d = date || todayLocal();
   return all(`SELECT a.id,a.name,a.type,a.currency,COALESCE(SUM(t.amount),0) as balance
     FROM accounts a LEFT JOIN transactions t ON t.account_id=a.id AND t.date<=?
     WHERE a.hidden=0 GROUP BY a.id ORDER BY a.type,a.sort_order`, [d]);
@@ -1431,7 +1444,7 @@ ipcMain.handle('goal:avg-monthly-expenses', () => {
 // Get average monthly savings (income - expenses, last 3 months)
 ipcMain.handle('goal:avg-monthly-savings', () => {
   // Use up to 12 months of past data (excluding future months)
-  const today = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const today = monthLocal(); // YYYY-MM
   const rows = all(`
     SELECT substr(date,1,7) as month,
       SUM(CASE WHEN amount>0 THEN amount ELSE 0 END) as income,
@@ -1793,7 +1806,7 @@ function nextOccurrence(dateStr, freq) {
 }
 
 function generateFutureDates(rec) {
-  const today  = new Date().toISOString().slice(0,10);
+  const today  = todayLocal();
   const cutoff = addDays(today, 90);
   const horizon = rec.end_date ? (rec.end_date < cutoff ? rec.end_date : cutoff) : cutoff;
   const dates  = [];
@@ -2352,12 +2365,19 @@ ipcMain.handle('tx:inline-update', (_, { id, field, value }) => {
 
   db.run(`UPDATE transactions SET ${field}=? WHERE id=?`, [value, id]);
 
-  // Sync transfer pair for date, memo, and amount changes
+  // Sync transfer pair for date, memo, and amount changes.
+  // pairedUndo guarda a operação que restaura a OUTRA perna. Sem ela, o undo
+  // revertia só a perna editada e deixava a transferência dessincronizada
+  // (ex: -100 de um lado e +150 do outro), corrompendo o saldo das duas contas
+  // em silêncio. `field` já passou pela whitelist `allowed` no topo do handler,
+  // então interpolá-lo no SELECT é seguro.
+  let pairedUndo = null;
   if (old.transfer_id && ['date','memo','amount'].includes(field)) {
-    const paired = first('SELECT id FROM transactions WHERE transfer_id=? AND id!=?', [old.transfer_id, id]);
+    const paired = first(`SELECT id, ${field} as oldValue FROM transactions WHERE transfer_id=? AND id!=?`, [old.transfer_id, id]);
     if (paired) {
       const syncValue = field === 'amount' ? -value : value;
       db.run(`UPDATE transactions SET ${field}=? WHERE id=?`, [syncValue, paired.id]);
+      pairedUndo = { sql: `UPDATE transactions SET ${field}=? WHERE id=?`, params: [paired.oldValue, paired.id] };
     }
   }
 
@@ -2371,7 +2391,8 @@ ipcMain.handle('tx:inline-update', (_, { id, field, value }) => {
 
   save();
   pushUndo(`Editar ${field} de "${old.memo||old.category}"`, [
-    { sql: `UPDATE transactions SET ${field}=? WHERE id=?`, params: [old[field], id] }
+    { sql: `UPDATE transactions SET ${field}=? WHERE id=?`, params: [old[field], id] },
+    ...(pairedUndo ? [pairedUndo] : [])
   ]);
   return { ok: true };
 });
@@ -4080,7 +4101,7 @@ ipcMain.handle('pat:financing-get', (_, { assetId }) =>
 ipcMain.handle('pat:financing-save', (_, { assetId, installments }) => {
   // installments = [{month, installment}]
   db.run('DELETE FROM pat_financing WHERE asset_id=?', [assetId]);
-  const curM = new Date().toISOString().slice(0,7);
+  const curM = monthLocal();
   installments.forEach(({ month, installment }) => {
     if (!month || installment == null) return;
     const paid = month <= curM ? 1 : 0;
@@ -4092,7 +4113,7 @@ ipcMain.handle('pat:financing-save', (_, { assetId, installments }) => {
 });
 ipcMain.handle('pat:financing-paid-value', (_, { assetId }) => {
   // Sum of installments up to current month (what's been "paid" = equity)
-  const curM = new Date().toISOString().slice(0,7);
+  const curM = monthLocal();
   const rows = all('SELECT SUM(installment) as total FROM pat_financing WHERE asset_id=? AND month<=?', [assetId, curM]);
   return { total: rows[0]?.total || 0 };
 });
@@ -4334,7 +4355,7 @@ function generateSchedule({ system, annual_rate, principal, n_installments, firs
 // conta sincronizada, na data prevista. Pagamento único — não é recorrente.
 function _syncKeysBalanceToBank({ assetId, contractId, accountId, syncDay, category, keysBalance, keysBalanceMonth, memoPrefix }) {
   if (!accountId || !keysBalance || !keysBalanceMonth) return { created: 0 };
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   const month = keysBalanceMonth.slice(0,7);
   const [y, mo] = month.split('-').map(Number);
   const lastDay = new Date(y, mo, 0).getDate();
@@ -4517,7 +4538,7 @@ function syncMutuoToBank(assetId) {
 
 function _syncInstallmentsToBank({ schedule, accountId, syncDay, category, assetId, contractId, debtId, memoPrefix }) {
   if (!accountId || !syncDay) return { created: 0, updated: 0 };
-  const today = new Date().toISOString().slice(0,10);
+  const today = todayLocal();
   let created = 0;
   let updated = 0;
 
@@ -5781,7 +5802,7 @@ ipcMain.handle('pat:tx-save', (_, { id, assetId, month, tx_type, total_value, no
     } else if (account_id && tx_date) {
       // Forward sync: create a future bank transaction for this movement, if the
       // date is today or later (never retroactive) and one doesn't already exist.
-      const today = new Date().toISOString().slice(0,10);
+      const today = todayLocal();
       if (tx_date >= today) {
         const sign = PAT_TX_CASH_SIGN[tx_type] ?? 1;
         const asset = first('SELECT name FROM pat_assets WHERE id=?', [assetId]);
@@ -6602,7 +6623,7 @@ function computeLicenseStatus() {
 
   // 2. Check free trial period
   if (!s.firstRun) {
-    s.firstRun = new Date().toISOString().slice(0, 10);
+    s.firstRun = todayLocal();
     saveSettings(s);
   }
   const firstRun   = new Date(s.firstRun);
@@ -7677,7 +7698,7 @@ async function _ensureFirstRun(userId) {
   try {
     const rows = await sb.select('user_first_run', { user_id: userId });
     if (!rows.length) {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayLocal();
       await sb.upsert('user_first_run', [{ user_id: userId, first_run: today }], 'user_id');
       console.log('[firstRun] registrado:', today);
     }

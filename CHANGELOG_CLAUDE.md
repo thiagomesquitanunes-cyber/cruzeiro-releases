@@ -12,6 +12,101 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-27 — Auditoria de código: 3 bugs (sync de patrimônio, undo de transferência, data em UTC)
+
+### O quê
+Varredura geral do código do Desktop procurando bugs/inconsistências (a
+pedido do usuário), seguida da correção dos 3 problemas reais encontrados.
+
+### Bug 1 — `monthsAgo()` derrubava o sync de patrimônio 7x por ano
+`src/sync/sync-push.js`. A função fazia `d.setMonth(d.getMonth() - n)`
+partindo de HOJE. Rodando no dia 31, o mês de destino não tem dia 31
+(31/abr não existe) e o JS rola pro mês seguinte — `monthsAgo(1)` em
+31/mai devolvia `"2026-05"` em vez de `"2026-04"`.
+
+Consequência: a lista `months` usada em `pushPatrimonio()` ficava
+`["2026-05","2026-05","2026-03"]` — mês duplicado e abril faltando. Como
+o destino é `sb.upsert('mobile_patrimonio', rows, 'user_id,month')`, o
+Postgres rejeita batch com chave de conflito repetida (*"ON CONFLICT DO
+UPDATE cannot affect row a second time"*) e o `pushPatrimonio` inteiro
+lançava exceção. O `pushAll` tem try/catch por step, então o erro só ia
+pro console: o usuário não via nada e o mobile ficava com patrimônio
+desatualizado. Acontecia em jan/mar/mai/jul/ago/out/dez, recuperando
+sozinho no dia seguinte.
+
+Correção: `monthsAgo()` agora monta a data com DIA 1 fixo
+(`new Date(y, m - 1 - n, 1)`), que nunca transborda. É o mesmo cuidado
+que o resto do código já tinha (o renderer ancora no dia 2 —
+`new Date(mes + '-02')` — em `budgetChartPrevMonth`, `apos2Compute12mAvg`
+etc.); essa função era a única fora do padrão.
+
+### Bug 2 — undo de edição inline em transferência restaurava só uma perna
+`src/main.js`, handler `tx:inline-update`. Editar data/memo/valor de uma
+transferência atualiza as DUAS pernas (a perna espelho recebe o valor
+com sinal invertido), mas o `pushUndo` registrava apenas a operação de
+reversão da perna editada. Dar Ctrl+Z depois de editar o valor deixava,
+por exemplo, -100 de um lado e +150 do outro: as duas contas ficavam com
+saldo errado, em silêncio. (O branch de `category` logo acima já tratava
+as duas pernas corretamente — a inconsistência estava dentro do mesmo
+handler.)
+
+Correção: o SELECT da perna espelho agora também lê o valor ANTIGO do
+campo (`SELECT id, ${field} as oldValue`) e monta um `pairedUndo`, que é
+anexado aos `reverseOps` do `pushUndo`. Validado contra uma instância
+real de sql.js: após editar -100→-150 e desfazer, as pernas voltam a
+-100/+100 e somam zero.
+
+### Bug 3 — o app inteiro considerava "hoje" em UTC, não no fuso local
+`new Date().toISOString().slice(0,10)` serializa em UTC. No Brasil
+(UTC−3) isso faz o app "virar o dia" às 21h: um lançamento feito às 22h
+nascia datado no dia seguinte, e no último dia do mês o mês corrente
+(orçamento, resumo, projeções) pulava pro seguinte 3 horas antes da
+meia-noite. Verificado com `TZ=America/Sao_Paulo`: às 21h30 de 31/jul o
+app entendia data `2026-08-01` e mês `2026-08`.
+
+Como o erro era consistente em todo o código, não gerava divergência
+interna — por isso passou despercebido — mas estava errado contra o
+calendário do usuário.
+
+Correção: helpers `todayLocal()`/`monthLocal()` (e `shiftDaysLocal()` no
+sync, para as janelas de −90/+60 dias) que montam a data pelos getters
+locais (`getFullYear`/`getMonth`/`getDate`). Substituídas TODAS as 27
+ocorrências de uma vez, de propósito: trocar só algumas criaria mistura
+de fusos, que seria pior que o bug original.
+
+- `main.js`: 12 × `todayLocal()`, 3 × `monthLocal()`
+- `renderer.js`: corpo de `todayStr()` + 7 × `todayStr()`, 3 × `.slice(0,7)`
+- `sync/sync-push.js`: 5 + janelas de 90/60 dias
+- `sync/sync-pull.js`: 2 (data de fallback de quick_entry vinda do mobile)
+- `sync/supabase-client.js`: 2 (chave diária do log de egress)
+
+Os `synced_at: new Date().toISOString()` foram mantidos em UTC de
+propósito — são timestamps absolutos, não datas de calendário.
+
+Detalhe de implementação: em `renderer.js` o `_pad2` é `function`
+declaration (não `const`), porque `todayStr()` é chamada de pontos do
+arquivo anteriores à linha da definição e só declarações de função são
+içadas — um `const` ficaria na zona morta temporal.
+
+### Arquivos tocados
+`src/main.js`, `src/renderer.js`, `src/sync/sync-push.js`,
+`src/sync/sync-pull.js`, `src/sync/supabase-client.js`
+
+### Verificação
+`node --check` nos 7 arquivos, teste do undo contra sql.js real, teste
+de `monthsAgo` nas datas que falhavam (31/jan, 31/mar, 31/mai, 31/jul
+21h30) e `npm start` completo — sync subiu com todos os steps `ok`,
+incluindo `patrimonio`.
+
+### Pendências conhecidas (não corrigidas, baixa severidade)
+- `report:export-pdf` (`main.js`): se `printToPDF` falhar, o HTML
+  temporário do relatório não é apagado (o `finally` só destrói a
+  janela), deixando dados financeiros em `%TEMP%`.
+- `onDbReloaded` exposto em `preload.js` sem nenhum consumidor no
+  renderer.
+
+---
+
 ## 2026-07-24 (continuação) — Fix crítico: crash "Object has been destroyed" trava o app após auto-update
 
 ### O quê
