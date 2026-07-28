@@ -12,6 +12,157 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-28 — Correções após relatório de bugs: Orçamento, Visão Geral, sync de Patrimônio
+
+### O quê
+O usuário reportou 9 problemas de uma vez, testando as mudanças da sessão
+anterior (nova aba Patrimônio no mobile). Corrigi o que consegui verificar
+com confiança; documentei o que fica incerto sem acesso interativo ao
+app rodando de verdade (GUI do Electron) ou ao mobile (sem simulador
+disponível aqui).
+
+### 1. Orçamento: categoria-mãe + subcategoria contava planejado em dobro
+`totalIncomePlanned`/`totalExpensePlanned` (e os totais "realizado"
+equivalentes) somavam `budgets.reduce((s,b)=>s+b.monthly_limit,0)` sobre
+TODAS as linhas de orçamento — se o usuário cadastrasse um valor
+planejado tanto pra categoria-mãe quanto pra uma subcategoria dela, as
+duas linhas eram somadas, embora o valor da subcategoria já esteja
+embutido no da mãe (via `actualFor(...,consolidate=true)` no lado
+"realizado"). Nova função `dedupBudgetsForTotal()` em `renderer.js`:
+remove da soma qualquer linha de subcategoria cuja mãe também tenha
+orçamento cadastrado E consolide subcategorias (`consolidate_subs !== 0`,
+o padrão) — usada em `refreshBudget()` (aba Orçamento) e
+`renderDashBudgetGauges()` (os dois gauges "Receitas/Despesas vs.
+planejado" na Visão Geral, que tinham o mesmo bug).
+
+### 2. Legenda nos gauges "Receitas/Despesas vs. planejado" (Visão Geral)
+`index.html`: ícone ⓘ com tooltip ao lado dos dois títulos, explicando
+que o cálculo só considera categorias com planejamento cadastrado —
+importante porque, se nem toda categoria tiver planejamento, esse número
+não bate com os cards de receita/despesa total do mês.
+
+### 3-8. Reescrita do sync de patrimônio pro mobile (`sync-push.js`)
+Investigação profunda usando sql.js direto no banco real do usuário
+(`cruzeiro_data.db`) pra reproduzir os números reportados como errados.
+Achados e correções:
+
+- **Contas bancárias/cartões somavam TODAS as transações sem limite de
+  data.** Uma conta com saldo real de ~R$9 mil somava
+  **-R$2,66 milhões** sem esse limite — por causa de lançamentos
+  futuros (recorrências materializadas anos à frente). Nova função
+  `accountBalanceAt()`: soma só até o fim do mês pedido
+  (`date < date(mes||'-01','+1 month')`). Isso sozinho explica os
+  "cartões zerados"/"contas com valor errado" — cartão de crédito tinha
+  o mesmo problema.
+- **"Cartões e dívidas" apareciam em dobro.** O app cria automaticamente
+  uma linha em `personal_debts` espelhando cada conta de cartão de
+  crédito (`linked_account_id`, usado pro relatório de IRPF — ver
+  `main.js` ~linha 5219). Meu código somava a conta `type='credit'` E
+  essa dívida pessoal espelhada como duas linhas separadas. Fix: filtro
+  `linked_account_id IS NULL` nas duas queries de `personal_debts`
+  (`pushPatrimonio` e `pushPatrimonioItems`).
+- **Saldo devedor de financiamento saía zero.** O filtro `paid=0 AND
+  is_projection=0` quase nunca bate com nenhuma linha do cronograma
+  (a maioria das parcelas futuras fica `is_projection=1` até o mês
+  chegar). Nova função `bemDebtAndRate()`: usa o ÚLTIMO registro de
+  `pat_financing` até o mês, independente de paid/projection — mesmo
+  critério que `debtByAsset`/`assetTotalByMonth` usam no renderer.
+  Mesmo ajuste em `personal_debt_installments` pra dívidas pessoais
+  reais.
+- **"Saldo em conta" do total agregado (`pushPatrimonio`) somava TODAS
+  as contas não-cartão**, ignorando a escolha do usuário
+  (`pat_accounts.included`, a mesma lista que a aba Patrimônio do
+  desktop usa pro "Total Patrimônio") — e contava contas
+  `type='investment'` cujo saldo já está representado nos próprios
+  `inv_assets`, contando o mesmo dinheiro duas vezes. Agora usa só
+  `pat_accounts WHERE included=1`.
+- **Valor de investimento inconsistente entre as duas funções de push.**
+  `pushPatrimonio` usava só a última transação `tx_type='atualizacao'`
+  (ignorando aportes feitos sem atualização de valor logo depois);
+  `pushPatrimonioItems` já tinha a lógica completa (aportes/resgates +
+  resets de avaliação). Extraí pra uma função só, `investmentBookValue()`,
+  usada pelas duas.
+- **TIR de bens financiados não refletia o financiamento** até existir
+  uma `pat_transactions` real do tipo `parcela_financiamento`.
+  `computeBemReturns()` agora injeta o mesmo fluxo de caixa hipotético
+  que o renderer usa (`refreshPatrimonioTable`): toda parcela projetada
+  e ainda não paga entra como saída de caixa no mês dela.
+- **Comparação com benchmark muito diferente do desktop.** Eu calculava
+  um "retorno anualizado do benchmark no período" — a aba "Rendimentos"
+  do desktop (`refreshReturns`/`cumulativeReturn`) usa uma conta bem
+  mais simples: retorno TOTAL acumulado (não anualizado) do investimento
+  menos o retorno acumulado do benchmark no mesmo período (`vsCDI =
+  totalRet - periodCDI`). Reescrevi `benchmark_return` pra seguir essa
+  mesma matemática.
+- **Estratégia de envio trocada de upsert para DELETE+INSERT.** A tabela
+  `mobile_patrimonio_items` já existia no Supabase antes de eu rodar meu
+  próprio SQL de criação (motivo que não consegui determinar — não fui eu
+  quem criou, nem achei outro indício de quem/quando) — não dava pra
+  confiar que a constraint única que meu `upsert(...,'user_id,desktop_id')`
+  dependia batia exatamente com a da tabela real, o que é a explicação
+  mais provável pra "cartões aparecem duas vezes" e outras inconsistências.
+  Agora `pushPatrimonioItems` faz `DELETE` de todas as linhas do usuário
+  e `INSERT` limpo a cada sync — elimina esse risco por completo, ao
+  custo de reescrever a tabela inteira em vez de só o delta.
+  `supabase/patrimonio_items.sql` reescrito com `ALTER TABLE ADD COLUMN
+  IF NOT EXISTS` coluna a coluna (em vez de só `CREATE TABLE IF NOT
+  EXISTS`), pra garantir que todas as colunas existem mesmo numa tabela
+  que já existia com formato diferente. **Preciso que o usuário rode
+  este SQL de novo no Supabase Dashboard.**
+
+**TIR real "dando erro" nos investimentos**: reproduzi o cálculo
+isoladamente com sql.js pros 3 investimentos reais do usuário e os
+números saíram corretos e plausíveis (2,7%/7,4%/8,8% reais) — não
+encontrei um bug concreto na fórmula em si. Minha hipótese é que isso
+era um efeito colateral do mesmo problema de schema/upsert do item
+acima (linha duplicada ou tipo de coluna incompatível corrompendo
+especificamente esse campo) — deve estar resolvido pela troca pra
+DELETE+INSERT, mas não consigo confirmar sem visualizar o app mobile de
+verdade.
+
+**Número exato do patrimônio total não bateu com a referência dada
+(R$3.473.248,30).** Depois de todas as correções acima, meu cálculo pro
+banco real do usuário deu R$558.642,10 (bens líquidos R$333.480,58 +
+investimentos R$226.706 + conta incluída R$9.215,52 − dívidas
+R$5.380). Achei uma pista relevante: `pat_history` e
+`pat_financing_contracts` têm linhas ÓRFÃS pros `asset_id` 2 e 3, que
+não existem mais em `pat_assets` (só os ids 1 e 4 existem hoje) — dados
+de um bem de teste que parece ter sido apagado sem os registros
+relacionados serem limpos junto (apesar de `PRAGMA foreign_keys = ON`
+estar ativo). Não toquei nesses dados órfãos — não tenho certeza se são
+só lixo de teste ou algo que o usuário quer manter, e apagar dado sem
+confirmação não é algo que eu faça sozinho. Mas é possível que a
+referência de R$3,47 milhões que o usuário tinha em mente venha de um
+cálculo (talvez `computeLicenseStatus`, que usa `pat_history`/
+`inv_transactions` sem filtrar por asset válido) que inclui esse dado
+órfão — vale o usuário confirmar o total mostrado ao vivo na aba
+Patrimônio do desktop antes de eu investigar mais.
+
+### 9. Totalização por seção/categoria no mobile
+`app/(tabs)/patrimonio.js` (iOS + Android, espelhados): cada seção
+(bens, cartões/dívidas, contas, investimentos) agora mostra o total no
+cabeçalho. Investimentos ficam agrupados por `category`
+(`groupByCategory`), cada grupo com sua totalização (valor, TIR real —
+média ponderada pelo valor de cada item, já que o mobile só recebe a
+TIR pronta por item, não as transações originais pra recalcular uma TIR
+real de categoria — e ganho/perda somado).
+
+### Verificação
+`node --check` em todos os arquivos JS tocados. Reproduzi a lógica nova
+de `pushPatrimonio`/`pushPatrimonioItems` isoladamente com sql.js contra
+o banco real (não só um teste sintético) pra validar os números antes
+de rodar o app de verdade. Rodei o app (`npm start`) depois de aplicar
+tudo — `sync:push` completou com `patrimonio: 'ok'` e
+`patrimonio_items: 'ok'`, sem erro (o `ai_config` deu timeout de rede,
+sem relação com esta mudança). Validei sintaxe do JS/JSX mobile
+compilando com o Babel do próprio projeto nos dois repositórios
+(iOS/Android), confirmando os arquivos compartilhados byte-idênticos —
+não pude testar a UI do mobile de verdade (sem simulador) nem clicar na
+aba Patrimônio do desktop pra comparar visualmente os números (sem
+automação de GUI nativa disponível aqui).
+
+---
+
 ## 2026-07-27 — Nova aba "Patrimônio" no mobile: sync de itens detalhados
 
 ### O quê

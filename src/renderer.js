@@ -2003,6 +2003,22 @@ async function renderDashBudget(monthStr) {
   }
 }
 
+// Evita contar duas vezes uma subcategoria e sua categoria-mãe num total
+// planejado/realizado: se a mãe também tem orçamento cadastrado E consolida
+// as subcategorias (consolidate_subs !== 0, o padrão), o valor da sub já
+// está embutido no total da mãe (via actualFor(...,consolidate=true)) — sem
+// este filtro, somar as duas linhas (mãe + sub) inflava o total planejado
+// em dobro, já que o valor da sub é parte do valor da mãe, não adicional.
+function dedupBudgetsForTotal(budgets) {
+  return budgets.filter(b => {
+    const parts = b.category.split(':');
+    if (parts.length < 2) return true; // não é subcategoria
+    const parentBudget = budgets.find(pb => pb.category === parts[0]);
+    if (!parentBudget) return true; // mãe sem orçamento próprio — sub conta normal
+    return parentBudget.consolidate_subs === 0; // mãe não consolida — sub continua separada
+  });
+}
+
 // (i-b) Dois gauges de totalização do orçamento — receitas e despesas
 // realizadas vs. planejadas no mês selecionado (mesmos dois gauges
 // grandes que aparecem ao lado dos cards na aba Orçamento).
@@ -2032,10 +2048,12 @@ async function renderDashBudgetGauges(byCatFull, monthStr) {
     return type === 'income' ? (income - expenses) : (expenses - income);
   };
 
-  const totalIncomePlanned  = incomeBudgets.reduce((s,b) => s + b.monthly_limit, 0);
-  const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + b.monthly_limit, 0);
-  const totalIncomeActual   = incomeBudgets.reduce((s,b) => s + actualFor(b.category, 'income', b.consolidate_subs !== 0), 0);
-  const totalExpenseActual  = expenseBudgets.reduce((s,b) => s + actualFor(b.category, 'expense', b.consolidate_subs !== 0), 0);
+  const incomeBudgetsForTotal  = dedupBudgetsForTotal(incomeBudgets);
+  const expenseBudgetsForTotal = dedupBudgetsForTotal(expenseBudgets);
+  const totalIncomePlanned  = incomeBudgetsForTotal.reduce((s,b) => s + b.monthly_limit, 0);
+  const totalExpensePlanned = expenseBudgetsForTotal.reduce((s,b) => s + b.monthly_limit, 0);
+  const totalIncomeActual   = incomeBudgetsForTotal.reduce((s,b) => s + actualFor(b.category, 'income', b.consolidate_subs !== 0), 0);
+  const totalExpenseActual  = expenseBudgetsForTotal.reduce((s,b) => s + actualFor(b.category, 'expense', b.consolidate_subs !== 0), 0);
 
   const pctInc = totalIncomePlanned  > 0 ? (totalIncomeActual  / totalIncomePlanned  * 100) : 0;
   const pctExp = totalExpensePlanned > 0 ? (totalExpenseActual / totalExpensePlanned * 100) : 0;
@@ -16366,26 +16384,32 @@ async function refreshBudget() {
   const effLimitOf = b => b.monthly_limit + ((b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0);
 
   // ── Resumo: disponível, orçado, poupança planejada vs necessária ──
-  const totalIncomePlanned  = incomeBudgets.reduce((s,b) => s + b.monthly_limit, 0);
+  // dedupBudgetsForTotal: sem isso, uma categoria-mãe E uma de suas
+  // subcategorias com orçamento cadastrado eram somadas as duas — mas o
+  // valor da sub já está embutido no da mãe (via actualFor consolidando
+  // subcategorias), então a soma inflava em dobro.
+  const incomeBudgetsForTotal  = dedupBudgetsForTotal(incomeBudgets);
+  const expenseBudgetsForTotal = dedupBudgetsForTotal(expenseBudgets);
+  const totalIncomePlanned  = incomeBudgetsForTotal.reduce((s,b) => s + b.monthly_limit, 0);
   // "Total orçado (despesas)" e os percentuais usam SEMPRE o planejamento
   // MENSAL puro (sem rollover). O rollover é um extra de meses anteriores e
   // aparece à parte (coluna Rollover na tabela e "sobra de rollover" no resumo)
   // — somá-lo aqui inflava o planejado e confundia a leitura.
-  const totalExpensePlanned = expenseBudgets.reduce((s,b) => s + b.monthly_limit, 0);
+  const totalExpensePlanned = expenseBudgetsForTotal.reduce((s,b) => s + b.monthly_limit, 0);
   // "Poupança planejada" usa só o limite PURO do mês (sem rollover) — o
   // rollover é uma folga adicional de meses passados, não faz sentido somar
   // ele na meta de poupança do MÊS ATUAL (senão um rollover grande faria a
   // poupança planejada parecer artificialmente menor/negativa, mesmo que a
   // pessoa nunca pretenda de fato gastar aquele acumulado este mês).
-  const totalExpensePlannedPure = expenseBudgets.reduce((s,b) => s + b.monthly_limit, 0);
+  const totalExpensePlannedPure = totalExpensePlanned;
   const plannedSavings = totalIncomePlanned - totalExpensePlannedPure;
   // Total de "sobra" de rollover disponível (só a parte positiva — rollover
   // negativo é dívida a descontar do limite deste mês, não uma folga extra)
-  const rolloverSurplusTotal = expenseBudgets
+  const rolloverSurplusTotal = expenseBudgetsForTotal
     .filter(b => b.rollover)
     .reduce((s,b) => s + Math.max(0, rolloverMap[b.category] || 0), 0);
-  const totalIncomeActual  = incomeBudgets.reduce((s,b) => s + actualFor(b.category, curMonthStr, 'income', b.consolidate_subs !== 0), 0);
-  const totalExpenseActual = expenseBudgets.reduce((s,b) => s + actualFor(b.category, curMonthStr, 'expense', b.consolidate_subs !== 0), 0);
+  const totalIncomeActual  = incomeBudgetsForTotal.reduce((s,b) => s + actualFor(b.category, curMonthStr, 'income', b.consolidate_subs !== 0), 0);
+  const totalExpenseActual = expenseBudgetsForTotal.reduce((s,b) => s + actualFor(b.category, curMonthStr, 'expense', b.consolidate_subs !== 0), 0);
 
   let neededSavings = null;
   try {

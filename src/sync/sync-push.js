@@ -505,151 +505,6 @@ async function pushScheduled(all, userId, syncInvestments) {
 // investimento com o mobile — patrimônio é fundamentalmente
 // sobre ativos/investimentos, então segue a mesma regra.
 // ─────────────────────────────────────────────────────────────
-async function pushPatrimonio(all, userId, syncInvestments) {
-  if (!syncInvestments) {
-    // Não basta pular o push: se o usuário JÁ tinha sincronizado
-    // patrimônio antes e depois desativou a opção, os dados antigos
-    // ficariam parados no Supabase para sempre (vazando pra meta de
-    // aposentadoria de longo prazo no mobile, que não deveria nem
-    // aparecer nesse caso). hasChanged() evita repetir esse DELETE em
-    // todo sync — só dispara na primeira vez que o estado vira "off".
-    if (hasChanged('patrimonio', ['sync_disabled'])) {
-      await sb.remove('mobile_patrimonio', { user_id: userId }).catch(() => {});
-      console.log('[sync:push] patrimonio: sync de investimentos desativado — dados remotos removidos');
-      markSynced('patrimonio', ['sync_disabled']);
-    }
-    return;
-  }
-
-  const months = [];
-  for (let i = 0; i < 3; i++) months.push(monthsAgo(i));
-
-  const patAssets = all('SELECT * FROM pat_assets WHERE hidden=0 AND sold_month IS NULL');
-  const invAssets = all('SELECT id FROM inv_assets WHERE hidden=0 AND closed_month IS NULL');
-
-  const rows = months.map(month => {
-    // Valor de cada bem no mês (último registro de pat_history até o mês)
-    const breakdown = {};
-    let totalBens = 0;
-
-    patAssets.forEach(asset => {
-      const hist = all(`
-        SELECT value FROM pat_history
-        WHERE asset_id=? AND month<=?
-        ORDER BY month DESC LIMIT 1
-      `, [asset.id, month]);
-      const value = hist[0]?.value || 0;
-      const type  = asset.asset_type || 'outros';
-      breakdown[type] = (breakdown[type] || 0) + value;
-      totalBens += value;
-    });
-
-    // Investimentos financeiros — valor da última "atualização" até o mês.
-    // ANTES desta correção, "total_assets"/net_worth incluíam só pat_assets
-    // (bens e direitos: imóvel, veículo etc.) — o mobile lê net_worth pra
-    // meta de aposentadoria de longo prazo (app/(tabs)/metas.js), então o
-    // "patrimônio atual" mostrado lá vinha SEM investimentos nem saldo em
-    // conta, bem abaixo do patrimônio real. Mesma fonte de dado que
-    // computeLicenseStatus() usa em main.js pra "totalWealth".
-    let totalInv = 0;
-    invAssets.forEach(asset => {
-      const tx = all(`
-        SELECT total_value FROM inv_transactions
-        WHERE asset_id=? AND tx_type='atualizacao' AND month<=?
-        ORDER BY month DESC LIMIT 1
-      `, [asset.id, month]);
-      totalInv += tx[0]?.total_value || 0;
-    });
-    if (totalInv) breakdown.investimentos = (breakdown.investimentos || 0) + totalInv;
-
-    // Saldo em conta (banco, caixa, corretora — TUDO que não é cartão) como
-    // estava no FIM do mês — soma das transações dessas contas até o último
-    // dia do mês. Cartão de crédito fica de fora daqui de propósito: entra
-    // do lado da dívida logo abaixo, não como saldo positivo.
-    const accBalRow = all(`
-      SELECT COALESCE(SUM(t.amount),0) as total
-      FROM transactions t
-      JOIN accounts a ON a.id = t.account_id
-      WHERE a.type != 'credit'
-        AND t.date < date(? || '-01', '+1 month')
-    `, [month]);
-    const totalAcc = Math.max(0, accBalRow[0]?.total || 0);
-    if (totalAcc) breakdown.contas = (breakdown.contas || 0) + totalAcc;
-
-    const totalAssets = totalBens + totalInv + totalAcc;
-
-    // Cartões e dívidas — saldo devedor de cartão de crédito (contas
-    // type='credit'; amount negativo = valor devido na fatura) + saldo
-    // devedor de financiamentos ativos (pat_financing, como já era).
-    const cardRow = all(`
-      SELECT COALESCE(SUM(t.amount),0) as total
-      FROM transactions t
-      JOIN accounts a ON a.id = t.account_id
-      WHERE a.type='credit'
-        AND t.date < date(? || '-01', '+1 month')
-    `, [month]);
-    // amount negativo = devendo; positivo (cartão "no azul") não é dívida
-    const cardDebt = Math.max(0, -(cardRow[0]?.total || 0));
-
-    const financingRow = all(`
-      SELECT COALESCE(SUM(pf.balance_end),0) as total
-      FROM pat_financing pf
-      JOIN pat_financing_contracts pfc ON pfc.id = pf.contract_id
-      WHERE pfc.status='active'
-        AND pf.paid=0
-        AND pf.is_projection=0
-    `);
-    const financingDebt = financingRow[0]?.total || 0;
-
-    const totalDebts = cardDebt + financingDebt;
-
-    // Converte breakdown para centavos
-    const breakdownCents = {};
-    Object.entries(breakdown).forEach(([k, v]) => {
-      breakdownCents[k] = toCents(v);
-    });
-
-    return {
-      user_id:      userId,
-      month,
-      total_assets: toCents(totalAssets),
-      total_debts:  toCents(totalDebts),
-      net_worth:    toCents(totalAssets - totalDebts),
-      breakdown:    breakdownCents,
-      synced_at:    new Date().toISOString(),
-    };
-  });
-
-  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
-  if (!hasChanged('patrimonio', hashableRows)) {
-    console.log('[sync:push] patrimonio sem mudança — pulando');
-    return;
-  }
-  const syncedAtP = new Date().toISOString();
-  rows.forEach(r => r.synced_at = syncedAtP);
-  encFields(rows, ['total_assets', 'total_debts', 'net_worth'], ['breakdown']);
-  await sb.upsert('mobile_patrimonio', rows, 'user_id,month');
-  markSynced('patrimonio', hashableRows);
-}
-
-// ─────────────────────────────────────────────────────────────
-// 6b. Itens detalhados de patrimônio (bens, investimentos, cartões/
-// dívidas, contas) — alimenta a aba "Patrimônio" do mobile, item a
-// item (mobile_patrimonio acima só manda totais agregados por mês).
-//
-// TIR/ganho-perda são recalculados aqui com a MESMA função pura usada
-// pela aba Patrimônio do desktop (calcIRR, ver src/lib/irr.js) e as
-// MESMAS tabelas de sinal de fluxo de caixa (PAT_TX_CASH_SIGN /
-// INV_TX_CASH_SIGN, espelhadas de PAT_TX_CASH/INV_TX_CASH em
-// renderer.js) — mas com uma montagem de fluxo de caixa mais simples
-// que a da tela: só transações REAIS (sem parcelas de financiamento
-// projetadas/não pagas como fluxo hipotético, sem o caso de "venda
-// hipotética" de ativo já vendido — ativos vendidos/ocultos nem
-// entram aqui, já filtrados por hidden=0/sold_month IS NULL). Por
-// isso a TIR mostrada no mobile pode divergir ligeiramente da tela
-// de Patrimônio do desktop para bens financiados com parcelas futuras
-// ainda não pagas.
-// ─────────────────────────────────────────────────────────────
 const { calcIRR } = require('../lib/irr');
 
 const PAT_TX_CASH_SIGN = {
@@ -685,10 +540,58 @@ function makeIpcaCumFn(ipcaMonthly, curM) {
   };
 }
 
-// Bens: fluxo de caixa puro de pat_transactions (PAT_TX_CASH_SIGN);
-// o valor atual vem de fora (pat_history), não das transações.
-function computeBemReturns(txs, currentValue, ipcaCumFn, curM) {
-  if (!txs.length) return { tirNominal: null, tirReal: null, gainLoss: null };
+// Saldo de uma conta em transactions.amount, como estava no FIM do mês —
+// sem esse limite superior, lançamentos FUTUROS (recorrências materializadas
+// anos à frente) entravam na soma e distorciam o saldo "atual" pra valores
+// completamente irreais (achado ao investigar os bugs de patrimônio no
+// mobile: uma conta com saldo real de ~R$9 mil somava -R$2,6 milhões sem
+// esse filtro, por causa de parcelas de financiamento projetadas décadas
+// à frente).
+function accountBalanceAt(all, accountId, month) {
+  const row = all(`
+    SELECT COALESCE(SUM(amount),0) as total FROM transactions
+    WHERE account_id=? AND date < date(? || '-01', '+1 month')
+  `, [accountId, month]);
+  return row[0]?.total || 0;
+}
+
+// Saldo devedor + taxa de juros de um bem financiado, no mês. Usa o
+// ÚLTIMO registro de pat_financing até o mês, INDEPENDENTE de paid/
+// is_projection — é o mesmo critério que assetTotalByMonth usa no
+// renderer (debtByAsset, refreshPatrimonioTable) pra "saldo devedor
+// atual". Filtrar por paid=0 AND is_projection=0 (como a versão
+// anterior fazia) quase sempre não bate com NENHUMA linha — a maioria
+// das parcelas futuras de um financiamento fica marcada is_projection=1
+// até o mês chegar — e o saldo devedor saía como zero.
+function bemDebtAndRate(all, assetId) {
+  const contracts = all("SELECT id, annual_rate FROM pat_financing_contracts WHERE asset_id=? AND status='active'", [assetId]);
+  if (!contracts.length) return { debt: null, rate: null, rows: [] };
+  let debt = 0;
+  const rows = [];
+  contracts.forEach(c => {
+    const schedule = all('SELECT month, installment, balance_end, is_projection, paid FROM pat_financing WHERE contract_id=? ORDER BY month', [c.id]);
+    rows.push(...schedule);
+    const upToNow = schedule.filter(r => r.month <= _todayMonth());
+    const latest = upToNow[upToNow.length - 1];
+    if (latest) debt += latest.balance_end || 0;
+  });
+  return { debt, rate: contracts[0].annual_rate, rows };
+}
+function _todayMonth() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// Bens: fluxo de caixa de pat_transactions (PAT_TX_CASH_SIGN) — o valor
+// atual vem de fora (pat_history), não das transações. `financingRows`
+// (schedule completo do(s) contrato(s) ativo(s), se houver) injeta a
+// MESMA parcela hipotética que o renderer usa (refreshPatrimonioTable):
+// toda parcela projetada e ainda não paga entra como saída de caixa no
+// mês dela, exceto quando já existe uma pat_transactions real
+// 'parcela_financiamento' naquele mês — sem isso, a TIR de um bem
+// financiado ficava sem refletir o financiamento até a parcela ser de
+// fato registrada, divergindo da tela do desktop.
+function computeBemReturns(txs, currentValue, ipcaCumFn, curM, financingRows) {
   const netCash = {};
   txs.forEach(t => {
     const sign = PAT_TX_CASH_SIGN[t.tx_type];
@@ -696,6 +599,15 @@ function computeBemReturns(txs, currentValue, ipcaCumFn, curM) {
     const m = t.month.slice(0, 7);
     netCash[m] = (netCash[m] || 0) + sign * t.total_value;
   });
+  if (financingRows && financingRows.length) {
+    const realFlowMonths = new Set(txs.filter(t => t.tx_type === 'parcela_financiamento').map(t => t.month.slice(0, 7)));
+    financingRows.forEach(r => {
+      const m = (r.month || '').slice(0, 7);
+      if (r.is_projection === 1 && r.paid !== 1 && !realFlowMonths.has(m)) {
+        netCash[m] = (netCash[m] || 0) - Math.abs(r.installment || 0);
+      }
+    });
+  }
   const months = Object.keys(netCash).sort();
   if (!months.length) return { tirNominal: null, tirReal: null, gainLoss: null };
   const irrMonths = monthRange(months[0], curM);
@@ -707,14 +619,17 @@ function computeBemReturns(txs, currentValue, ipcaCumFn, curM) {
   return { tirNominal: calcIRR(nomFlows), tirReal: calcIRR(realFlows), gainLoss };
 }
 
-// Investimentos: valor "contábil" é derivado das próprias transações
+// Investimentos: valor "contábil" derivado das próprias transações
 // (aportes/resgates + resets de avaliação), igual à lógica de
-// buildInvRows/calcAssetRealIRR no renderer.
-function computeInvReturns(txs, ipcaCumFn, curM) {
-  if (!txs.length) return { tirNominal: null, tirReal: null, gainLoss: null, currentValue: 0 };
+// buildInvRows/calcAssetRealIRR no renderer. Compartilhada entre
+// pushPatrimonio (total agregado) e pushPatrimonioItems (por item) —
+// antes cada uma tinha sua própria versão simplificada (só
+// tx_type='atualizacao'), e podiam divergir entre si.
+function investmentBookValue(txs, uptoMonth) {
   const byMonth = {};
   txs.forEach(t => { const m = t.month.slice(0, 7); (byMonth[m] = byMonth[m] || []).push(t); });
   const txMonths = Object.keys(byMonth).sort();
+  if (!txMonths.length) return { netCash: {}, currentValue: 0, firstMonth: null, allMonths: [] };
 
   const netCash = {};
   let running = 0;
@@ -736,13 +651,15 @@ function computeInvReturns(txs, ipcaCumFn, curM) {
   });
 
   let lastVal = 0;
-  const allMonths = monthRange(txMonths[0], curM);
+  const allMonths = monthRange(txMonths[0], uptoMonth);
   allMonths.forEach(m => { if (bookValueByMonth[m] !== undefined) lastVal = bookValueByMonth[m]; });
-  const currentValue = bookValueByMonth[curM] ?? lastVal;
+  const currentValue = bookValueByMonth[uptoMonth] ?? lastVal;
+  return { netCash, currentValue, firstMonth: txMonths[0], allMonths };
+}
 
-  const hasCash = Object.keys(netCash).length > 0;
-  if (!hasCash) return { tirNominal: null, tirReal: null, gainLoss: null, currentValue };
-
+function computeInvReturns(txs, ipcaCumFn, curM) {
+  const { netCash, currentValue, allMonths } = investmentBookValue(txs, curM);
+  if (!allMonths.length || !Object.keys(netCash).length) return { tirNominal: null, tirReal: null, gainLoss: null, currentValue };
   const nomFlows  = allMonths.map(m => netCash[m] ?? 0);
   const realFlows = allMonths.map(m => (netCash[m] ?? 0) * ipcaCumFn(m));
   nomFlows[nomFlows.length - 1]   += currentValue;
@@ -751,21 +668,14 @@ function computeInvReturns(txs, ipcaCumFn, curM) {
   return { tirNominal: calcIRR(nomFlows), tirReal: calcIRR(realFlows), gainLoss, currentValue };
 }
 
-// Retorno acumulado (anualizado) de um benchmark (CDI/IBOV) no MESMO
-// período de um investimento — pra comparação lado a lado com a TIR
-// nominal. benchmarkMonthly = { 'YYYY-MM': taxa_decimal_do_mes }.
-function computeBenchmarkReturn(benchmarkMonthly, fromMonth, curM) {
-  if (!benchmarkMonthly || !fromMonth) return null;
-  const months = monthRange(fromMonth, curM);
+// Retorno acumulado (NÃO anualizado) de um benchmark (CDI/IBOV) no mesmo
+// período — mesma função cumulativeReturn() usada pela aba "Rendimentos"
+// do desktop (refreshReturns/vsCDI). benchmarkMonthly = { 'YYYY-MM': taxa
+// decimal do mês }.
+function cumulativeReturn(benchmarkMonthly, months) {
   let cum = 1;
-  let any = false;
-  months.forEach(m => {
-    const r = benchmarkMonthly[m];
-    if (r !== undefined && r !== null) { cum *= (1 + r); any = true; }
-  });
-  if (!any) return null;
-  const nMonths = months.length;
-  return Math.pow(cum, 12 / nMonths) - 1; // anualiza
+  months.forEach(m => { cum *= (1 + (benchmarkMonthly?.[m] ?? 0)); });
+  return cum - 1;
 }
 
 async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) {
@@ -777,8 +687,7 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
     return;
   }
 
-  const now = new Date();
-  const curM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const curM = _todayMonth();
 
   let ipcaMonthly = {};
   let benchmarks = {};
@@ -802,21 +711,10 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
     const hist = all('SELECT value FROM pat_history WHERE asset_id=? ORDER BY month DESC LIMIT 1', [asset.id]);
     const currentValue = hist[0]?.value || 0;
     const txs = all('SELECT tx_type, total_value, month FROM pat_transactions WHERE asset_id=?', [asset.id]);
-    const { tirNominal, tirReal, gainLoss } = computeBemReturns(txs, currentValue, ipcaCumFn, curM);
-
-    let debtBalance = null, interestRate = null;
-    if (asset.financed) {
-      const contracts = all('SELECT id, annual_rate FROM pat_financing_contracts WHERE asset_id=? AND status=\'active\'', [asset.id]);
-      if (contracts.length) {
-        interestRate = contracts[0].annual_rate; // simplificação: taxa do 1º contrato ativo (raro ter mais de um)
-        const debtRow = all(`
-          SELECT COALESCE(SUM(pf.balance_end),0) as total
-          FROM pat_financing pf
-          WHERE pf.contract_id IN (${contracts.map(() => '?').join(',')}) AND pf.paid=0 AND pf.is_projection=0
-        `, contracts.map(c => c.id));
-        debtBalance = debtRow[0]?.total || 0;
-      }
-    }
+    const { debt: debtBalance, rate: interestRate, rows: financingRows } = asset.financed
+      ? bemDebtAndRate(all, asset.id)
+      : { debt: null, rate: null, rows: [] };
+    const { tirNominal, tirReal, gainLoss } = computeBemReturns(txs, currentValue, ipcaCumFn, curM, financingRows);
 
     rows.push({
       user_id: userId, desktop_id: `bem_${asset.id}`, section: 'bem',
@@ -836,11 +734,26 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
   // ── Investimentos financeiros ──
   const invAssets = all('SELECT * FROM inv_assets WHERE hidden=0 AND closed_month IS NULL');
   invAssets.forEach(asset => {
-    const txs = all('SELECT tx_type, total_value, month FROM inv_transactions WHERE asset_id=?', [asset.id]);
+    const txs = all('SELECT tx_type, total_value, month FROM inv_transactions WHERE asset_id=? AND month<=? ORDER BY month', [asset.id, curM]);
     const { tirNominal, tirReal, gainLoss, currentValue } = computeInvReturns(txs, ipcaCumFn, curM);
-    const firstMonth = txs.length ? [...txs].map(t => t.month.slice(0, 7)).sort()[0] : null;
-    const bmSeries = benchmarks?.[asset.benchmark || 'cdi'] || null;
-    const benchmarkReturn = computeBenchmarkReturn(bmSeries, firstMonth, curM);
+    const { netCash, firstMonth, allMonths } = investmentBookValue(txs, curM);
+
+    // vs benchmark: retorno TOTAL do investimento (soma simples do fluxo de
+    // caixa + valor atual, sobre o capital investido) MENOS o retorno
+    // acumulado do benchmark no MESMO período — mesma matemática de vsCDI
+    // na aba "Rendimentos" do desktop (totalRet - periodCDI), não anualizada.
+    let benchmarkReturn = null;
+    if (firstMonth && Object.keys(netCash).length) {
+      const totalInvested = Object.values(netCash).reduce((s, v) => s + (v < 0 ? -v : 0), 0);
+      if (totalInvested > 0) {
+        const totalRet = (gainLoss ?? 0) / totalInvested;
+        const bmSeries = benchmarks?.[asset.benchmark || 'cdi'] || null;
+        if (bmSeries) {
+          const periodReturn = cumulativeReturn(bmSeries, allMonths);
+          benchmarkReturn = totalRet - periodReturn;
+        }
+      }
+    }
 
     rows.push({
       user_id: userId, desktop_id: `inv_${asset.id}`, section: 'investimento',
@@ -861,8 +774,7 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
   // ── Cartões e dívidas ──
   const cardAccounts = all("SELECT * FROM accounts WHERE type='credit' AND hidden=0");
   cardAccounts.forEach(acc => {
-    const balRow = all('SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE account_id=?', [acc.id]);
-    const owed = Math.max(0, -(balRow[0]?.total || 0)); // amount negativo = devendo
+    const owed = Math.max(0, -accountBalanceAt(all, acc.id, curM)); // amount negativo = devendo
     rows.push({
       user_id: userId, desktop_id: `cartao_${acc.id}`, section: 'cartao_divida',
       name: acc.name, subtype: 'cartão de crédito',
@@ -872,14 +784,21 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
       synced_at: new Date().toISOString(),
     });
   });
-  const personalDebts = all('SELECT * FROM personal_debts WHERE hidden=0');
+  // linked_account_id IS NULL: exclui dívidas pessoais que são espelho
+  // automático de um cartão de crédito (o app cria um personal_debts pra
+  // cada conta type='credit', pra aparecer no relatório de IRPF — ver
+  // main.js linha ~5219). Sem esse filtro, o mesmo cartão virava DUAS
+  // linhas na seção "cartões e dívidas": uma pela conta, outra pela
+  // dívida pessoal espelhada — a causa da duplicação relatada pelo usuário.
+  const personalDebts = all('SELECT * FROM personal_debts WHERE hidden=0 AND linked_account_id IS NULL');
   personalDebts.forEach(debt => {
     const contract = all('SELECT annual_rate FROM personal_debt_contracts WHERE debt_id=?', [debt.id]);
-    const balRow = all(`
-      SELECT COALESCE(SUM(balance_end),0) as total FROM personal_debt_installments
-      WHERE debt_id=? AND paid=0 AND is_projection=0
-    `, [debt.id]);
-    const owed = balRow[0]?.total || 0;
+    // Último registro até o mês, independente de paid/is_projection — mesmo
+    // critério de bemDebtAndRate (ver comentário lá) e do próprio renderer
+    // (computeDebtBalByMonth), em vez de exigir paid=0 AND is_projection=0
+    // (que raramente bate com alguma linha e dava saldo zero).
+    const row = all('SELECT balance_end FROM personal_debt_installments WHERE debt_id=? AND month<=? ORDER BY month DESC LIMIT 1', [debt.id, curM]);
+    const owed = row[0]?.balance_end || 0;
     rows.push({
       user_id: userId, desktop_id: `divida_${debt.id}`, section: 'cartao_divida',
       name: debt.name, subtype: 'dívida pessoal',
@@ -891,15 +810,15 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
     });
   });
 
-  // ── Contas bancárias ──
+  // ── Contas bancárias ── (mesmo valor que aparece na coluna do mês
+  // corrente da aba Patrimônio do desktop: saldo acumulado até o fim do mês)
   const bankAccounts = all("SELECT * FROM accounts WHERE type IN ('bank','cash') AND hidden=0");
   bankAccounts.forEach(acc => {
-    const balRow = all('SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE account_id=?', [acc.id]);
     rows.push({
       user_id: userId, desktop_id: `conta_${acc.id}`, section: 'conta',
       name: acc.name, subtype: acc.type,
       category: null, broker: null, maturity_month: null, liquidity: null, benchmark: null,
-      current_value: toCents(balRow[0]?.total || 0),
+      current_value: toCents(accountBalanceAt(all, acc.id, curM)),
       debt_balance: null, interest_rate: null,
       tir_nominal: null, tir_real: null, gain_loss: null, benchmark_return: null,
       synced_at: new Date().toISOString(),
@@ -918,9 +837,127 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
      'current_value', 'debt_balance', 'interest_rate', 'tir_nominal', 'tir_real', 'gain_loss', 'benchmark_return'],
     []
   );
-  if (rows.length) await sb.upsert('mobile_patrimonio_items', rows, 'user_id,desktop_id');
-  await sb.pruneNotIn('mobile_patrimonio_items', userId, 'desktop_id', rows.map(r => r.desktop_id));
+  // DELETE + INSERT em vez de upsert com on_conflict: a tabela
+  // mobile_patrimonio_items já existia no Supabase antes de eu rodar meu
+  // próprio SQL de criação nesta sessão (motivo desconhecido) — não dá pra
+  // garantir que a constraint única (user_id,desktop_id) que meu upsert
+  // depende bate exatamente com a da tabela real. DELETE tudo do usuário e
+  // INSERT de novo elimina esse risco (e qualquer duplicata que já exista
+  // de execuções anteriores), ao custo de reescrever a tabela inteira a
+  // cada sync em vez de só o delta.
+  await sb.remove('mobile_patrimonio_items', { user_id: userId }).catch(() => {});
+  if (rows.length) await sb.upsert('mobile_patrimonio_items', rows);
   markSynced('patrimonio_items', hashableRows);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 6. Patrimônio (últimos 3 meses) — totais agregados por mês
+// ─────────────────────────────────────────────────────────────
+async function pushPatrimonio(all, userId, syncInvestments) {
+  if (!syncInvestments) {
+    // Não basta pular o push: se o usuário JÁ tinha sincronizado
+    // patrimônio antes e depois desativou a opção, os dados antigos
+    // ficariam parados no Supabase para sempre (vazando pra meta de
+    // aposentadoria de longo prazo no mobile, que não deveria nem
+    // aparecer nesse caso). hasChanged() evita repetir esse DELETE em
+    // todo sync — só dispara na primeira vez que o estado vira "off".
+    if (hasChanged('patrimonio', ['sync_disabled'])) {
+      await sb.remove('mobile_patrimonio', { user_id: userId }).catch(() => {});
+      console.log('[sync:push] patrimonio: sync de investimentos desativado — dados remotos removidos');
+      markSynced('patrimonio', ['sync_disabled']);
+    }
+    return;
+  }
+
+  const months = [];
+  for (let i = 0; i < 3; i++) months.push(monthsAgo(i));
+
+  const patAssets = all('SELECT * FROM pat_assets WHERE hidden=0 AND sold_month IS NULL');
+  const invAssets = all('SELECT * FROM inv_assets WHERE hidden=0 AND closed_month IS NULL');
+  // Contas que contam pro patrimônio: só as que o usuário marcou como
+  // incluídas na aba Patrimônio (pat_accounts.included=1) — mesma escolha
+  // que o "Total Patrimônio" do desktop usa (pat:account-balances). Antes
+  // este push somava TODAS as contas não-cartão, o que (a) ignorava a
+  // escolha do usuário e (b) misturava contas type='investment' cujo saldo
+  // já está representado nos próprios inv_assets, contando o mesmo dinheiro
+  // duas vezes.
+  const includedAccountIds = all('SELECT account_id FROM pat_accounts WHERE included=1').map(r => r.account_id);
+
+  const rows = months.map(month => {
+    const breakdown = {};
+    let totalBens = 0;
+
+    patAssets.forEach(asset => {
+      const hist = all('SELECT value FROM pat_history WHERE asset_id=? AND month<=? ORDER BY month DESC LIMIT 1', [asset.id, month]);
+      const value = hist[0]?.value || 0;
+      const type  = asset.asset_type || 'outros';
+      breakdown[type] = (breakdown[type] || 0) + value;
+      totalBens += value;
+      if (asset.financed) totalBens -= (bemDebtAndRate(all, asset.id).debt || 0);
+    });
+
+    // Investimentos — valor "contábil" completo (aportes/resgates + resets
+    // de avaliação), mesma função usada por pushPatrimonioItems — antes
+    // este total usava só a última transação tx_type='atualizacao', que
+    // não reflete aportes feitos sem uma atualização de valor logo depois.
+    let totalInv = 0;
+    invAssets.forEach(asset => {
+      const txs = all('SELECT tx_type, total_value, month FROM inv_transactions WHERE asset_id=? AND month<=? ORDER BY month', [asset.id, month]);
+      totalInv += investmentBookValue(txs, month).currentValue || 0;
+    });
+    if (totalInv) breakdown.investimentos = (breakdown.investimentos || 0) + totalInv;
+
+    // Saldo em conta — só as contas incluídas na aba Patrimônio do desktop,
+    // saldo acumulado até o FIM do mês (sem isso, lançamentos futuros
+    // distorciam o saldo "atual" pra valores irreais — ver accountBalanceAt).
+    let totalAcc = 0;
+    includedAccountIds.forEach(id => { totalAcc += accountBalanceAt(all, id, month); });
+    if (totalAcc) breakdown.contas = (breakdown.contas || 0) + totalAcc;
+
+    const totalAssets = totalBens + totalInv + totalAcc;
+
+    // Cartões e dívidas — saldo devedor de cartão de crédito (amount
+    // negativo = valor devido na fatura) + financiamentos ativos (já
+    // subtraídos de totalBens acima) + dívidas pessoais.
+    const cardAccounts = all("SELECT id FROM accounts WHERE type='credit' AND hidden=0");
+    let cardDebt = 0;
+    cardAccounts.forEach(acc => { cardDebt += Math.max(0, -accountBalanceAt(all, acc.id, month)); });
+
+    // linked_account_id IS NULL: mesma exclusão de espelho de cartão — ver
+    // comentário equivalente em pushPatrimonioItems.
+    const personalDebts = all('SELECT id FROM personal_debts WHERE hidden=0 AND linked_account_id IS NULL');
+    let personalDebtTotal = 0;
+    personalDebts.forEach(d => {
+      const row = all('SELECT balance_end FROM personal_debt_installments WHERE debt_id=? AND month<=? ORDER BY month DESC LIMIT 1', [d.id, month]);
+      personalDebtTotal += row[0]?.balance_end || 0;
+    });
+
+    const totalDebts = cardDebt + personalDebtTotal;
+
+    const breakdownCents = {};
+    Object.entries(breakdown).forEach(([k, v]) => { breakdownCents[k] = toCents(v); });
+
+    return {
+      user_id:      userId,
+      month,
+      total_assets: toCents(totalAssets),
+      total_debts:  toCents(totalDebts),
+      net_worth:    toCents(totalAssets - totalDebts),
+      breakdown:    breakdownCents,
+      synced_at:    new Date().toISOString(),
+    };
+  });
+
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('patrimonio', hashableRows)) {
+    console.log('[sync:push] patrimonio sem mudança — pulando');
+    return;
+  }
+  const syncedAtP = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAtP);
+  encFields(rows, ['total_assets', 'total_debts', 'net_worth'], ['breakdown']);
+  await sb.upsert('mobile_patrimonio', rows, 'user_id,month');
+  markSynced('patrimonio', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────

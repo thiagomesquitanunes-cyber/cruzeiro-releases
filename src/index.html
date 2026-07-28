@@ -1050,7 +1050,9 @@ select.inp option{background:var(--bg2);}
       </div>
       <div class="dash-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative">
         <button class="ev-action-btn" style="position:absolute;top:18px;right:18px;padding:4px 9px;font-size:10px" onclick="dashGoToBudget('table')" title="Ver detalhes no Orçamento">↗</button>
-        <h3 style="align-self:flex-start;margin-bottom:8px">📈 Receitas vs. planejado</h3>
+        <h3 style="align-self:flex-start;margin-bottom:8px">📈 Receitas vs. planejado
+          <span style="cursor:help;color:var(--text3);font-size:11px" title="Considera só as categorias com planejamento cadastrado na aba Orçamento. Se nem toda categoria de receita tiver um valor planejado, este número não bate com o total de receitas do mês mostrado em outros cards.">ⓘ</span>
+        </h3>
         <div style="position:relative;width:130px;height:130px">
           <canvas id="dash-budget-gauge-income"></canvas>
           <div id="dash-budget-gauge-income-label" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"></div>
@@ -1059,7 +1061,9 @@ select.inp option{background:var(--bg2);}
       </div>
       <div class="dash-card" style="display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative">
         <button class="ev-action-btn" style="position:absolute;top:18px;right:18px;padding:4px 9px;font-size:10px" onclick="dashGoToBudget('table')" title="Ver detalhes no Orçamento">↗</button>
-        <h3 style="align-self:flex-start;margin-bottom:8px">📉 Despesas vs. planejado</h3>
+        <h3 style="align-self:flex-start;margin-bottom:8px">📉 Despesas vs. planejado
+          <span style="cursor:help;color:var(--text3);font-size:11px" title="Considera só as categorias com planejamento cadastrado na aba Orçamento. Se nem toda categoria de despesa tiver um valor planejado, este número não bate com o total de despesas do mês mostrado em outros cards.">ⓘ</span>
+        </h3>
         <div style="position:relative;width:130px;height:130px">
           <canvas id="dash-budget-gauge-expense"></canvas>
           <div id="dash-budget-gauge-expense-label" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"></div>
