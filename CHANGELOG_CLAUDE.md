@@ -12,6 +12,66 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-28 (3) — Verificação final do sync de patrimônio: era conta de teste, não bug
+
+### O quê
+Terceira rodada do relatório de bugs da aba Patrimônio do mobile. O
+usuário disponibilizou a pasta de dados real (`Dropbox/App de Controle
+de Gastos/Dados Cruzeiro`) pra eu testar contra os números exatos que
+ele via no desktop (CRI Brookfield, Tesouro Prefixado 2032, Song Plus,
+Empréstimo Zé).
+
+### Achado: eu vinha testando contra a conta errada
+O app Desktop **instalado de verdade** (`AppData\Local\Programs\
+Cruzeiro\Cruzeiro.exe`, o mesmo do atalho na área de trabalho) usa
+`dataDir` apontando pro Dropbox e está logado como
+`thiagomesquitanunes@gmail.com` — diferente da pasta de projeto
+(`Cruzeiro Desktop/`, dataDir null) que eu vinha usando com `npm start`
+pra testar, logada como `cruzeiroapp@gmail.com` (conta de
+desenvolvimento/teste). As duas rodadas anteriores de fix ficaram
+corretas no CÓDIGO, mas eu nunca tinha disparado uma sincronização
+contra a conta real do usuário — só contra a de teste.
+
+### Verificação com os dados reais
+Reproduzi os cálculos (TIR/benchmark) isoladamente com sql.js contra o
+banco real do Dropbox, comparando com os números que o usuário via ao
+vivo no desktop:
+
+| Ativo | Métrica | Desktop | Reproduzido |
+|---|---|---|---|
+| CRI Brookfield | nominal / real | 13,7% / 8,7% | 13,68% / 8,63% |
+| Tesouro Prefixado 2032 | vs. CDI | -2,2% | -2,24% |
+| Song Plus | nominal / real | -7,3% / -10,8% | -7,33% / -10,84% |
+| Empréstimo Zé | nominal / real | 12,6% / 5,8% | 12,56% / 5,54% |
+
+3 de 4 bateram quase exatamente (diferenças de arredondamento) — incluindo
+o caso mais grave da rodada anterior (vs. CDI mostrando -16,1% no
+mobile), que na fórmula corrigida já reproduz -2,24% ≈ -2,2% do desktop.
+Usuário confirmou: a diferença residual em Empréstimo Zé é só
+arredondamento, sem problema.
+
+### Ação tomada
+Não precisei mudar código nesta rodada — as correções da entrada
+anterior já estavam certas. O problema era só que o app Desktop
+instalado não tinha reiniciado desde a publicação da v4.85.2, então
+continuava rodando a sincronização com a fórmula antiga contra a conta
+real. Abri o `Cruzeiro.exe` instalado diretamente (confirmei que já
+estava na v4.85.2 via auto-update) e disparei uma sincronização real —
+`patrimonio_items: 'ok'`, valores corrigidos agora na conta do usuário.
+
+### Lição para sessões futuras
+Ao testar sync/patrimônio deste projeto, **`npm start` na pasta do
+repositório usa uma conta de desenvolvimento (`cruzeiroapp@gmail.com`),
+não a conta real do usuário** (`thiagomesquitanunes@gmail.com`, dados em
+`Dropbox/App de Controle de Gastos/Dados Cruzeiro`, settings reais em
+`AppData/Roaming/Cruzeiro/_settings.json`). Pra testar/sincronizar contra
+dados reais, é preciso rodar o app instalado
+(`AppData/Local/Programs/Cruzeiro/Cruzeiro.exe`), não o `npm start` do
+projeto — e o app instalado só aplica um fix novo depois de reiniciado
+(auto-update não é instantâneo dentro de uma sessão já aberta).
+
+---
+
 ## 2026-07-28 (2) — TIR/benchmark de investimentos: fórmula errada, não bug de transporte
 
 ### O quê
