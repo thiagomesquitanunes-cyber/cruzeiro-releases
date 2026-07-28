@@ -375,6 +375,7 @@ let colConfig = [
 // ── INIT ──
 (async () => {
   try {
+  await checkTermsConsent();
   await fetchFxRates();
   await loadAccounts();
   await loadOverviewSettings();
@@ -14287,6 +14288,57 @@ async function openManual() {
   }
 }
 
+// ── Consentimento obrigatório com os Termos de Uso ────────────────────────
+// Bloqueia o boot do app (await na IIFE de INIT) até o usuário aceitar a
+// versão vigente dos Termos. Não é dispensável: sem backdrop-click, sem
+// botão de fechar — só sai daqui pelo botão "Aceitar e continuar", com o
+// checkbox marcado. window.TERMS_VERSION/TERMS_HTML/TERMS_UPDATED_LABEL
+// vêm de legal-terms-content.js (mesmo texto do site e do
+// legal/TERMOS_DE_USO.md — ver CHANGELOG_CLAUDE.md).
+let _termsConsentResolve = null;
+
+function checkTermsConsent() {
+  return new Promise(async (resolve) => {
+    let s;
+    try { s = await ff.settingsGet(); } catch(e) { s = {}; }
+    if (s && s.termsAcceptedVersion === window.TERMS_VERSION) {
+      resolve();
+      return;
+    }
+    _termsConsentResolve = resolve;
+    const textEl = G('terms-consent-text');
+    if (textEl) textEl.innerHTML = window.TERMS_HTML || '';
+    const checkbox = G('terms-consent-checkbox');
+    if (checkbox) checkbox.checked = false;
+    const acceptBtn = G('terms-consent-accept');
+    if (acceptBtn) acceptBtn.disabled = true;
+    G('terms-consent-backdrop').style.display = '';
+    G('terms-consent-modal').style.display = 'flex';
+  });
+}
+
+function onTermsConsentCheckChange() {
+  const checkbox = G('terms-consent-checkbox');
+  const acceptBtn = G('terms-consent-accept');
+  if (acceptBtn) acceptBtn.disabled = !checkbox?.checked;
+}
+
+async function acceptTermsConsent() {
+  const checkbox = G('terms-consent-checkbox');
+  if (!checkbox?.checked) return;
+  try {
+    const s = await ff.settingsGet();
+    await ff.settingsSave({ ...s, termsAcceptedVersion: window.TERMS_VERSION, termsAcceptedAt: new Date().toISOString() });
+  } catch(e) {}
+  // Best-effort: registra o comprovante no Supabase se o usuário já tiver
+  // conta/sessão (ver terms:record-acceptance em main.js). Não bloqueia o
+  // fechamento do modal — o aceite local acima já é o que libera o boot.
+  ff.termsRecordAcceptance(window.TERMS_VERSION).catch(()=>{});
+  G('terms-consent-backdrop').style.display = 'none';
+  G('terms-consent-modal').style.display = 'none';
+  if (_termsConsentResolve) { _termsConsentResolve(); _termsConsentResolve = null; }
+}
+
 async function checkFirstRun() {
   try {
     const s = await ff.settingsGet();
@@ -25056,24 +25108,9 @@ function calcAssetRealIRR(txs, ipcaCumFn, curM) {
   return calcIRR(realFlows);
 }
 
-function calcIRR(cashflows) {
-  // Newton-Raphson monthly IRR, then annualize
-  if (!cashflows.length) return null;
-  let rate = 0.01;
-  for (let iter = 0; iter < 200; iter++) {
-    let npv = 0, dnpv = 0;
-    cashflows.forEach((cf, i) => {
-      npv  += cf / Math.pow(1 + rate, i);
-      dnpv -= i * cf / Math.pow(1 + rate, i + 1);
-    });
-    if (Math.abs(dnpv) < 1e-10) break;
-    const newRate = rate - npv / dnpv;
-    if (Math.abs(newRate - rate) < 1e-8) { rate = newRate; break; }
-    rate = newRate;
-  }
-  if (!isFinite(rate) || rate <= -1) return null;
-  return Math.pow(1 + rate, 12) - 1; // annualize
-}
+// calcIRR agora vive em src/lib/irr.js (compartilhado com sync-push.js,
+// que roda no processo principal — carregado via <script> antes deste
+// arquivo, então window.calcIRR já está disponível aqui).
 
 // ── Build inv rows for the patrimônio table ──
 function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths) {

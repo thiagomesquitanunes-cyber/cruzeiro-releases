@@ -6488,6 +6488,7 @@ ipcMain.handle('settings:get', () => {
     benchmarks: s.benchmarks || null,
     hasRecoveryEmail: !!s.recoveryEmail,
     recoveryEmailMasked: s.recoveryEmail ? s.recoveryEmail.replace(/(.{2}).*(@.*)/, '$1***$2') : null,
+    termsAcceptedVersion: s.termsAcceptedVersion || null,
   };
 });
 
@@ -8069,6 +8070,14 @@ ipcMain.handle('sync:login', async (_, { email, password }) => {
     s.supabaseRefreshToken = result.refresh_token;
     saveSettings(s);
 
+    // Se o usuário já tinha aceitado os Termos ANTES de logar (ordem comum:
+    // aceita no primeiro boot, só configura o Mobile depois em
+    // Configurações), este é o primeiro momento em que temos e-mail/sessão
+    // pra registrar o comprovante remoto — ver _recordTermsAcceptance.
+    if (s.termsAcceptedVersion) {
+      _recordTermsAcceptance(s.termsAcceptedVersion, s.termsAcceptedAt).catch(() => {});
+    }
+
     // Dispara sync imediato após login
     runMobileSync('login').catch(() => {});
     return { ok: true, email: result.user.email };
@@ -8089,6 +8098,47 @@ ipcMain.handle('sync:logout', async () => {
     saveSettings(s);
     return { ok: true };
   } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// ── Registra comprovante de aceite dos Termos de Uso no Supabase ──
+// Best-effort: o aceite em si já fica salvo localmente (settings:save-data)
+// — isso aqui é só o registro remoto, auditável, pra quem já está logado
+// (tem e-mail/sessão). Quem usa o Desktop 100% local nunca teve conta
+// criada, então não há "quem" registrar além do que já está local — nesse
+// caso simplesmente não grava nada remoto. Ver supabase/terms_acceptances.sql
+// pro schema (tabela append-only, RLS).
+//
+// Chamada em DOIS pontos, porque aceite e login podem acontecer em ordens
+// diferentes: (1) direto ao aceitar, se o usuário já estiver logado; (2) ao
+// logar, se ele já tinha aceitado os termos localmente ANTES de configurar
+// a sincronização — sem esse segundo ponto, quem aceita primeiro e loga
+// depois nunca gerava registro remoto nenhum. `acceptedAt` é sempre o
+// momento real do aceite (settings.termsAcceptedAt), não o momento em que
+// esta função roda, pra não distorcer o comprovante.
+async function _recordTermsAcceptance(version, acceptedAt) {
+  if (!version) return { ok: false, reason: 'no-version' };
+  if (!sb.isLoggedIn()) return { ok: false, reason: 'not-logged-in' };
+  const s = loadSettings();
+  const userId = sb.getUserId();
+  if (!userId || !s.supabaseEmail) return { ok: false, reason: 'no-identity' };
+  await sb.upsert('terms_acceptances', [{
+    user_id:     userId,
+    email:       s.supabaseEmail,
+    version:     String(version),
+    accepted_at: acceptedAt || new Date().toISOString(),
+    app_version: app.getVersion(),
+    platform:    process.platform,
+  }]);
+  return { ok: true };
+}
+
+ipcMain.handle('terms:record-acceptance', async (_, version) => {
+  try {
+    return await _recordTermsAcceptance(version, new Date().toISOString());
+  } catch (e) {
+    console.warn('[terms] falha ao registrar aceite no Supabase:', e.message);
     return { ok: false, error: e.message };
   }
 });

@@ -525,11 +525,12 @@ async function pushPatrimonio(all, userId, syncInvestments) {
   for (let i = 0; i < 3; i++) months.push(monthsAgo(i));
 
   const patAssets = all('SELECT * FROM pat_assets WHERE hidden=0 AND sold_month IS NULL');
+  const invAssets = all('SELECT id FROM inv_assets WHERE hidden=0 AND closed_month IS NULL');
 
   const rows = months.map(month => {
-    // Valor de cada ativo no mês (último registro de pat_history até o mês)
+    // Valor de cada bem no mês (último registro de pat_history até o mês)
     const breakdown = {};
-    let totalAssets = 0;
+    let totalBens = 0;
 
     patAssets.forEach(asset => {
       const hist = all(`
@@ -540,11 +541,57 @@ async function pushPatrimonio(all, userId, syncInvestments) {
       const value = hist[0]?.value || 0;
       const type  = asset.asset_type || 'outros';
       breakdown[type] = (breakdown[type] || 0) + value;
-      totalAssets += value;
+      totalBens += value;
     });
 
-    // Dívidas de financiamentos ativos — saldo devedor da última parcela não paga
-    const debts = all(`
+    // Investimentos financeiros — valor da última "atualização" até o mês.
+    // ANTES desta correção, "total_assets"/net_worth incluíam só pat_assets
+    // (bens e direitos: imóvel, veículo etc.) — o mobile lê net_worth pra
+    // meta de aposentadoria de longo prazo (app/(tabs)/metas.js), então o
+    // "patrimônio atual" mostrado lá vinha SEM investimentos nem saldo em
+    // conta, bem abaixo do patrimônio real. Mesma fonte de dado que
+    // computeLicenseStatus() usa em main.js pra "totalWealth".
+    let totalInv = 0;
+    invAssets.forEach(asset => {
+      const tx = all(`
+        SELECT total_value FROM inv_transactions
+        WHERE asset_id=? AND tx_type='atualizacao' AND month<=?
+        ORDER BY month DESC LIMIT 1
+      `, [asset.id, month]);
+      totalInv += tx[0]?.total_value || 0;
+    });
+    if (totalInv) breakdown.investimentos = (breakdown.investimentos || 0) + totalInv;
+
+    // Saldo em conta (banco, caixa, corretora — TUDO que não é cartão) como
+    // estava no FIM do mês — soma das transações dessas contas até o último
+    // dia do mês. Cartão de crédito fica de fora daqui de propósito: entra
+    // do lado da dívida logo abaixo, não como saldo positivo.
+    const accBalRow = all(`
+      SELECT COALESCE(SUM(t.amount),0) as total
+      FROM transactions t
+      JOIN accounts a ON a.id = t.account_id
+      WHERE a.type != 'credit'
+        AND t.date < date(? || '-01', '+1 month')
+    `, [month]);
+    const totalAcc = Math.max(0, accBalRow[0]?.total || 0);
+    if (totalAcc) breakdown.contas = (breakdown.contas || 0) + totalAcc;
+
+    const totalAssets = totalBens + totalInv + totalAcc;
+
+    // Cartões e dívidas — saldo devedor de cartão de crédito (contas
+    // type='credit'; amount negativo = valor devido na fatura) + saldo
+    // devedor de financiamentos ativos (pat_financing, como já era).
+    const cardRow = all(`
+      SELECT COALESCE(SUM(t.amount),0) as total
+      FROM transactions t
+      JOIN accounts a ON a.id = t.account_id
+      WHERE a.type='credit'
+        AND t.date < date(? || '-01', '+1 month')
+    `, [month]);
+    // amount negativo = devendo; positivo (cartão "no azul") não é dívida
+    const cardDebt = Math.max(0, -(cardRow[0]?.total || 0));
+
+    const financingRow = all(`
       SELECT COALESCE(SUM(pf.balance_end),0) as total
       FROM pat_financing pf
       JOIN pat_financing_contracts pfc ON pfc.id = pf.contract_id
@@ -552,7 +599,9 @@ async function pushPatrimonio(all, userId, syncInvestments) {
         AND pf.paid=0
         AND pf.is_projection=0
     `);
-    const totalDebts = debts[0]?.total || 0;
+    const financingDebt = financingRow[0]?.total || 0;
+
+    const totalDebts = cardDebt + financingDebt;
 
     // Converte breakdown para centavos
     const breakdownCents = {};
@@ -581,6 +630,297 @@ async function pushPatrimonio(all, userId, syncInvestments) {
   encFields(rows, ['total_assets', 'total_debts', 'net_worth'], ['breakdown']);
   await sb.upsert('mobile_patrimonio', rows, 'user_id,month');
   markSynced('patrimonio', hashableRows);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 6b. Itens detalhados de patrimônio (bens, investimentos, cartões/
+// dívidas, contas) — alimenta a aba "Patrimônio" do mobile, item a
+// item (mobile_patrimonio acima só manda totais agregados por mês).
+//
+// TIR/ganho-perda são recalculados aqui com a MESMA função pura usada
+// pela aba Patrimônio do desktop (calcIRR, ver src/lib/irr.js) e as
+// MESMAS tabelas de sinal de fluxo de caixa (PAT_TX_CASH_SIGN /
+// INV_TX_CASH_SIGN, espelhadas de PAT_TX_CASH/INV_TX_CASH em
+// renderer.js) — mas com uma montagem de fluxo de caixa mais simples
+// que a da tela: só transações REAIS (sem parcelas de financiamento
+// projetadas/não pagas como fluxo hipotético, sem o caso de "venda
+// hipotética" de ativo já vendido — ativos vendidos/ocultos nem
+// entram aqui, já filtrados por hidden=0/sold_month IS NULL). Por
+// isso a TIR mostrada no mobile pode divergir ligeiramente da tela
+// de Patrimônio do desktop para bens financiados com parcelas futuras
+// ainda não pagas.
+// ─────────────────────────────────────────────────────────────
+const { calcIRR } = require('../lib/irr');
+
+const PAT_TX_CASH_SIGN = {
+  compra: -1, parcela_compra: -1, aporte: -1, despesa: -1, parcela_financiamento: -1,
+  reducao: +1, aluguel: +1, dividendo: +1, jcp: +1, juros_mutuo: +1, venda: +1, venda_parcela: +1,
+};
+const INV_TX_EXTERNAL_SIGN   = { compra: -1, aporte: -1, venda: +1, amortizacao: +1 };
+const INV_TX_INCOME_SIGN     = { dividendo: +1, juros: +1, taxa: -1, jcp: +1, cupom: +1 };
+const INV_TX_CASH_SIGN       = { ...INV_TX_EXTERNAL_SIGN, ...INV_TX_INCOME_SIGN };
+const INV_TX_VALUATION_TYPES = new Set(['atualizacao', 'cota', 'incorporacao', 'correcao']);
+
+function monthRange(from, to) {
+  const out = [];
+  let m = from;
+  while (m <= to) {
+    out.push(m);
+    const [y, mo] = m.split('-').map(Number);
+    m = mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`;
+  }
+  return out;
+}
+
+function makeIpcaCumFn(ipcaMonthly, curM) {
+  return (m) => {
+    let cum = 1, cur = m;
+    while (cur < curM) {
+      const [y, mo] = cur.split('-').map(Number);
+      const next = mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`;
+      cum *= (1 + (ipcaMonthly[next] ?? 0));
+      cur = next;
+    }
+    return cum;
+  };
+}
+
+// Bens: fluxo de caixa puro de pat_transactions (PAT_TX_CASH_SIGN);
+// o valor atual vem de fora (pat_history), não das transações.
+function computeBemReturns(txs, currentValue, ipcaCumFn, curM) {
+  if (!txs.length) return { tirNominal: null, tirReal: null, gainLoss: null };
+  const netCash = {};
+  txs.forEach(t => {
+    const sign = PAT_TX_CASH_SIGN[t.tx_type];
+    if (sign === undefined) return;
+    const m = t.month.slice(0, 7);
+    netCash[m] = (netCash[m] || 0) + sign * t.total_value;
+  });
+  const months = Object.keys(netCash).sort();
+  if (!months.length) return { tirNominal: null, tirReal: null, gainLoss: null };
+  const irrMonths = monthRange(months[0], curM);
+  const nomFlows  = irrMonths.map(m => netCash[m] ?? 0);
+  const realFlows = irrMonths.map(m => (netCash[m] ?? 0) * ipcaCumFn(m));
+  nomFlows[nomFlows.length - 1]   += currentValue;
+  realFlows[realFlows.length - 1] += currentValue;
+  const gainLoss = Object.values(netCash).reduce((s, v) => s + v, 0) + currentValue;
+  return { tirNominal: calcIRR(nomFlows), tirReal: calcIRR(realFlows), gainLoss };
+}
+
+// Investimentos: valor "contábil" é derivado das próprias transações
+// (aportes/resgates + resets de avaliação), igual à lógica de
+// buildInvRows/calcAssetRealIRR no renderer.
+function computeInvReturns(txs, ipcaCumFn, curM) {
+  if (!txs.length) return { tirNominal: null, tirReal: null, gainLoss: null, currentValue: 0 };
+  const byMonth = {};
+  txs.forEach(t => { const m = t.month.slice(0, 7); (byMonth[m] = byMonth[m] || []).push(t); });
+  const txMonths = Object.keys(byMonth).sort();
+
+  const netCash = {};
+  let running = 0;
+  const bookValueByMonth = {};
+  txMonths.forEach(m => {
+    let cd = 0, lastValuation = null;
+    byMonth[m].forEach(t => {
+      if (t.tx_type in INV_TX_CASH_SIGN) {
+        if (t.tx_type in INV_TX_EXTERNAL_SIGN && INV_TX_EXTERNAL_SIGN[t.tx_type] < 0) cd += t.total_value;
+        if (t.tx_type === 'venda' || t.tx_type === 'amortizacao') cd -= t.total_value;
+        netCash[m] = (netCash[m] || 0) + INV_TX_CASH_SIGN[t.tx_type] * t.total_value;
+      } else if (INV_TX_VALUATION_TYPES.has(t.tx_type)) {
+        lastValuation = t.total_value;
+      }
+    });
+    running += cd;
+    if (lastValuation !== null) running = lastValuation;
+    bookValueByMonth[m] = running;
+  });
+
+  let lastVal = 0;
+  const allMonths = monthRange(txMonths[0], curM);
+  allMonths.forEach(m => { if (bookValueByMonth[m] !== undefined) lastVal = bookValueByMonth[m]; });
+  const currentValue = bookValueByMonth[curM] ?? lastVal;
+
+  const hasCash = Object.keys(netCash).length > 0;
+  if (!hasCash) return { tirNominal: null, tirReal: null, gainLoss: null, currentValue };
+
+  const nomFlows  = allMonths.map(m => netCash[m] ?? 0);
+  const realFlows = allMonths.map(m => (netCash[m] ?? 0) * ipcaCumFn(m));
+  nomFlows[nomFlows.length - 1]   += currentValue;
+  realFlows[realFlows.length - 1] += currentValue;
+  const gainLoss = Object.values(netCash).reduce((s, v) => s + v, 0) + currentValue;
+  return { tirNominal: calcIRR(nomFlows), tirReal: calcIRR(realFlows), gainLoss, currentValue };
+}
+
+// Retorno acumulado (anualizado) de um benchmark (CDI/IBOV) no MESMO
+// período de um investimento — pra comparação lado a lado com a TIR
+// nominal. benchmarkMonthly = { 'YYYY-MM': taxa_decimal_do_mes }.
+function computeBenchmarkReturn(benchmarkMonthly, fromMonth, curM) {
+  if (!benchmarkMonthly || !fromMonth) return null;
+  const months = monthRange(fromMonth, curM);
+  let cum = 1;
+  let any = false;
+  months.forEach(m => {
+    const r = benchmarkMonthly[m];
+    if (r !== undefined && r !== null) { cum *= (1 + r); any = true; }
+  });
+  if (!any) return null;
+  const nMonths = months.length;
+  return Math.pow(cum, 12 / nMonths) - 1; // anualiza
+}
+
+async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) {
+  if (!syncInvestments) {
+    if (hasChanged('patrimonio_items', ['sync_disabled'])) {
+      await sb.remove('mobile_patrimonio_items', { user_id: userId }).catch(() => {});
+      markSynced('patrimonio_items', ['sync_disabled']);
+    }
+    return;
+  }
+
+  const now = new Date();
+  const curM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+  let ipcaMonthly = {};
+  let benchmarks = {};
+  if (typeof getDbPath === 'function' && fs && typeof fs.existsSync === 'function') {
+    try {
+      const ipcaPath = getDbPath().replace('.db', '_pat_ipca_monthly.json');
+      if (fs.existsSync(ipcaPath)) ipcaMonthly = JSON.parse(fs.readFileSync(ipcaPath, 'utf8')) || {};
+    } catch (e) {}
+    try {
+      const bmPath = getDbPath().replace('.db', '_benchmarks.json');
+      if (fs.existsSync(bmPath)) benchmarks = JSON.parse(fs.readFileSync(bmPath, 'utf8')) || {};
+    } catch (e) {}
+  }
+  const ipcaCumFn = makeIpcaCumFn(ipcaMonthly, curM);
+
+  const rows = [];
+
+  // ── Bens e direitos ──
+  const patAssets = all('SELECT * FROM pat_assets WHERE hidden=0 AND sold_month IS NULL');
+  patAssets.forEach(asset => {
+    const hist = all('SELECT value FROM pat_history WHERE asset_id=? ORDER BY month DESC LIMIT 1', [asset.id]);
+    const currentValue = hist[0]?.value || 0;
+    const txs = all('SELECT tx_type, total_value, month FROM pat_transactions WHERE asset_id=?', [asset.id]);
+    const { tirNominal, tirReal, gainLoss } = computeBemReturns(txs, currentValue, ipcaCumFn, curM);
+
+    let debtBalance = null, interestRate = null;
+    if (asset.financed) {
+      const contracts = all('SELECT id, annual_rate FROM pat_financing_contracts WHERE asset_id=? AND status=\'active\'', [asset.id]);
+      if (contracts.length) {
+        interestRate = contracts[0].annual_rate; // simplificação: taxa do 1º contrato ativo (raro ter mais de um)
+        const debtRow = all(`
+          SELECT COALESCE(SUM(pf.balance_end),0) as total
+          FROM pat_financing pf
+          WHERE pf.contract_id IN (${contracts.map(() => '?').join(',')}) AND pf.paid=0 AND pf.is_projection=0
+        `, contracts.map(c => c.id));
+        debtBalance = debtRow[0]?.total || 0;
+      }
+    }
+
+    rows.push({
+      user_id: userId, desktop_id: `bem_${asset.id}`, section: 'bem',
+      name: asset.name, subtype: asset.asset_type || 'outro',
+      category: null, broker: null, maturity_month: null, liquidity: null, benchmark: null,
+      current_value: toCents(currentValue),
+      debt_balance: debtBalance !== null ? toCents(debtBalance) : null,
+      interest_rate: interestRate,
+      tir_nominal: tirNominal !== null ? tirNominal * 100 : null,
+      tir_real: tirReal !== null ? tirReal * 100 : null,
+      gain_loss: gainLoss !== null ? toCents(gainLoss) : null,
+      benchmark_return: null,
+      synced_at: new Date().toISOString(),
+    });
+  });
+
+  // ── Investimentos financeiros ──
+  const invAssets = all('SELECT * FROM inv_assets WHERE hidden=0 AND closed_month IS NULL');
+  invAssets.forEach(asset => {
+    const txs = all('SELECT tx_type, total_value, month FROM inv_transactions WHERE asset_id=?', [asset.id]);
+    const { tirNominal, tirReal, gainLoss, currentValue } = computeInvReturns(txs, ipcaCumFn, curM);
+    const firstMonth = txs.length ? [...txs].map(t => t.month.slice(0, 7)).sort()[0] : null;
+    const bmSeries = benchmarks?.[asset.benchmark || 'cdi'] || null;
+    const benchmarkReturn = computeBenchmarkReturn(bmSeries, firstMonth, curM);
+
+    rows.push({
+      user_id: userId, desktop_id: `inv_${asset.id}`, section: 'investimento',
+      name: asset.name, subtype: asset.inv_type || null,
+      category: asset.category || null, broker: asset.broker || null,
+      maturity_month: asset.maturity_month || null, liquidity: asset.liquidity || null,
+      benchmark: asset.benchmark || null,
+      current_value: toCents(currentValue || 0),
+      debt_balance: null, interest_rate: null,
+      tir_nominal: tirNominal !== null ? tirNominal * 100 : null,
+      tir_real: tirReal !== null ? tirReal * 100 : null,
+      gain_loss: gainLoss !== null ? toCents(gainLoss) : null,
+      benchmark_return: benchmarkReturn !== null ? benchmarkReturn * 100 : null,
+      synced_at: new Date().toISOString(),
+    });
+  });
+
+  // ── Cartões e dívidas ──
+  const cardAccounts = all("SELECT * FROM accounts WHERE type='credit' AND hidden=0");
+  cardAccounts.forEach(acc => {
+    const balRow = all('SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE account_id=?', [acc.id]);
+    const owed = Math.max(0, -(balRow[0]?.total || 0)); // amount negativo = devendo
+    rows.push({
+      user_id: userId, desktop_id: `cartao_${acc.id}`, section: 'cartao_divida',
+      name: acc.name, subtype: 'cartão de crédito',
+      category: null, broker: null, maturity_month: null, liquidity: null, benchmark: null,
+      current_value: toCents(owed), debt_balance: toCents(owed), interest_rate: null,
+      tir_nominal: null, tir_real: null, gain_loss: null, benchmark_return: null,
+      synced_at: new Date().toISOString(),
+    });
+  });
+  const personalDebts = all('SELECT * FROM personal_debts WHERE hidden=0');
+  personalDebts.forEach(debt => {
+    const contract = all('SELECT annual_rate FROM personal_debt_contracts WHERE debt_id=?', [debt.id]);
+    const balRow = all(`
+      SELECT COALESCE(SUM(balance_end),0) as total FROM personal_debt_installments
+      WHERE debt_id=? AND paid=0 AND is_projection=0
+    `, [debt.id]);
+    const owed = balRow[0]?.total || 0;
+    rows.push({
+      user_id: userId, desktop_id: `divida_${debt.id}`, section: 'cartao_divida',
+      name: debt.name, subtype: 'dívida pessoal',
+      category: null, broker: null, maturity_month: null, liquidity: null, benchmark: null,
+      current_value: toCents(owed), debt_balance: toCents(owed),
+      interest_rate: contract[0]?.annual_rate ?? null,
+      tir_nominal: null, tir_real: null, gain_loss: null, benchmark_return: null,
+      synced_at: new Date().toISOString(),
+    });
+  });
+
+  // ── Contas bancárias ──
+  const bankAccounts = all("SELECT * FROM accounts WHERE type IN ('bank','cash') AND hidden=0");
+  bankAccounts.forEach(acc => {
+    const balRow = all('SELECT COALESCE(SUM(amount),0) as total FROM transactions WHERE account_id=?', [acc.id]);
+    rows.push({
+      user_id: userId, desktop_id: `conta_${acc.id}`, section: 'conta',
+      name: acc.name, subtype: acc.type,
+      category: null, broker: null, maturity_month: null, liquidity: null, benchmark: null,
+      current_value: toCents(balRow[0]?.total || 0),
+      debt_balance: null, interest_rate: null,
+      tir_nominal: null, tir_real: null, gain_loss: null, benchmark_return: null,
+      synced_at: new Date().toISOString(),
+    });
+  });
+
+  const hashableRows = rows.map(r => ({ ...r, synced_at: undefined }));
+  if (!hasChanged('patrimonio_items', hashableRows)) {
+    console.log('[sync:push] patrimonio_items sem mudança — pulando');
+    return;
+  }
+  const syncedAtPI = new Date().toISOString();
+  rows.forEach(r => r.synced_at = syncedAtPI);
+  encFields(rows,
+    ['name', 'subtype', 'category', 'broker', 'maturity_month', 'liquidity', 'benchmark',
+     'current_value', 'debt_balance', 'interest_rate', 'tir_nominal', 'tir_real', 'gain_loss', 'benchmark_return'],
+    []
+  );
+  if (rows.length) await sb.upsert('mobile_patrimonio_items', rows, 'user_id,desktop_id');
+  await sb.pruneNotIn('mobile_patrimonio_items', userId, 'desktop_id', rows.map(r => r.desktop_id));
+  markSynced('patrimonio_items', hashableRows);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -854,6 +1194,7 @@ async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPa
     ['goals',        () => pushGoals(all, userId)],
     ['scheduled',    () => pushScheduled(all, userId, syncInvestments)],
     ['patrimonio',   () => pushPatrimonio(all, userId, syncInvestments)],
+    ['patrimonio_items', () => pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs)],
     ['evolution',    () => pushEvolution(all, userId, getDbPath, fs)],
     ['ml_rules',     () => pushMlRules(all, userId)],
   ];

@@ -38,6 +38,7 @@ const api = {
   aiGenerateInsights: (d) => ipcRenderer.invoke('ai:generate-insights', d),
   insightsTopTransactions: (d) => ipcRenderer.invoke('insights:top-transactions', d),
   openExternal: (url) => ipcRenderer.invoke('app:open-external', url),
+  termsRecordAcceptance: (version) => ipcRenderer.invoke('terms:record-acceptance', version),
   importSavePending:  (state) => ipcRenderer.invoke('import:save-pending', state),
   importLoadPending:  ()      => ipcRenderer.invoke('import:load-pending'),
   importClearPending: ()      => ipcRenderer.invoke('import:clear-pending'),

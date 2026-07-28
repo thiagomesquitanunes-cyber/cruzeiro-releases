@@ -12,6 +12,277 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-27 — Nova aba "Patrimônio" no mobile: sync de itens detalhados
+
+### O quê
+A pedido do usuário: o mobile vai ganhar uma aba "Patrimônio" própria
+(implementação da tela ainda pendente nos repos iOS/Android — ver tasks
+#112/#113), mostrando item a item: bens e direitos, cartões e dívidas,
+contas bancárias e investimentos financeiros, cada um com seus campos
+específicos (TIR nominal/real, ganho/perda, saldo devedor, comparação com
+benchmark etc.). Esta entrada cobre o lado Desktop: o novo sync que
+alimenta essa tela.
+
+### `src/lib/irr.js` (novo arquivo)
+Extraí `calcIRR()` (Newton-Raphson mensal, depois anualizado) de
+`renderer.js` para um módulo único (padrão UMD: `window.calcIRR` no
+renderer via `<script>`, `require('./irr')` no processo principal) — o
+usuário pediu explicitamente pra não duplicar o motor de cálculo da aba
+Patrimônio. `renderer.js` teve sua definição local removida; `index.html`
+ganhou `<script src="lib/irr.js"></script>` antes de `renderer.js`.
+
+### `src/sync/sync-push.js` — nova função `pushPatrimonioItems()`
+Registrada no `pushAll()` como passo `patrimonio_items`, logo depois de
+`patrimonio` (mesmo gate `syncInvestments`/opt-in, mesmo comportamento de
+limpar dados remotos se o usuário desativar a opção). Constrói UMA linha
+por item:
+
+- **Bens** (`pat_assets`, não ocultos/não vendidos): valor de
+  `pat_history`; TIR nominal/real e ganho/perda calculados a partir de
+  `pat_transactions` (nova função `computeBemReturns`, usa
+  `PAT_TX_CASH_SIGN` — cópia dos sinais de `PAT_TX_CASH` do renderer);
+  saldo devedor e taxa de juros de `pat_financing_contracts`/
+  `pat_financing` quando `financed=1` (simplificação: usa o primeiro
+  contrato ativo — múltiplos contratos por bem são raros e eu não achei
+  valor em fazer uma média ponderada agora).
+- **Investimentos** (`inv_assets`, não ocultos/não fechados): valor
+  "contábil" reconstruído das próprias transações (aportes/resgates +
+  resets de avaliação — `computeInvReturns`, mesma lógica de
+  `buildInvRows`/`calcAssetRealIRR` do renderer, com `INV_TX_CASH_SIGN`/
+  `INV_TX_VALUATION_TYPES` espelhando `INV_TX_EXTERNAL`/`INV_TX_INCOME`/
+  `INV_TX_VALUATION`); comparação com benchmark (`computeBenchmarkReturn`)
+  usa o cache local de CDI/IBOV (`<db>_benchmarks.json`, já buscado pela
+  função `benchmarks:fetch-all` existente) acumulado desde o primeiro
+  mês com transação do ativo até hoje, anualizado.
+- **Cartões e dívidas**: contas `type='credit'` (saldo devedor = valor
+  absoluto do saldo negativo da conta) + `personal_debts`/
+  `personal_debt_contracts`/`personal_debt_installments` (dívidas
+  pessoais/mútuos tomados — considero "ativa" toda dívida com
+  `hidden=0`, já que essa tabela não tem coluna `status`).
+- **Contas bancárias**: contas `type IN ('bank','cash')`, só saldo atual
+  (`SUM(transactions.amount)` da conta).
+
+TIR/ganho-perda aqui é **mais simples que a versão da tela** de
+propósito: só transações reais (sem parcela de financiamento projetada
+como fluxo hipotético) e sem o caso de "venda hipotética" de ativo já
+vendido (esses nem entram, já filtrados por `hidden=0`/`sold_month IS
+NULL`/`closed_month IS NULL`). Documentei essa divergência no comentário
+da função — TIR no mobile pode ficar levemente diferente da tela do
+desktop para bens financiados com parcelas futuras ainda não pagas.
+
+Todo campo sensível (nome, valores, taxas, TIR, ganho/perda etc.) passa
+por `encFields()` igual às outras tabelas — só `user_id`/`desktop_id`/
+`section`/`synced_at`/`created_at` ficam em claro (necessário pro mobile
+filtrar por seção sem decifrar linha por linha).
+
+### `supabase/patrimonio_items.sql` (novo arquivo)
+Nova tabela `mobile_patrimonio_items` (RLS por `auth.uid()=user_id`,
+mesmo padrão de `enable_rls.sql`/`terms_acceptances.sql`). **Resultado
+inesperado**: ao testar com `npm start` de verdade, o push terminou com
+`patrimonio_items: 'ok'` — ou seja, a tabela **já existe** no Supabase
+de produção (não sei por quê; não fui eu que rodei esse SQL nesta
+sessão). Recomendo rodar o arquivo mesmo assim (é idempotente,
+`create table if not exists`) só pra garantir que a política de RLS
+bate exatamente com o que descrevi — não tenho como inspecionar o
+schema real do Supabase por aqui pra confirmar 100%.
+
+### Verificação
+`node --check` em todos os arquivos tocados. Rodei o app de verdade
+(`npm start`) depois de matar instâncias antigas do Electron que
+ficaram penduradas de testes anteriores nesta sessão (o app usa
+`requestSingleInstanceLock`, então uma instância antiga escondia se o
+código novo realmente rodava) — `sync:push` completou com
+`patrimonio_items: 'ok'`, egress real registrado (`mobile_patrimonio_items
+[DELETE] 0.2 KB`), sem erro.
+
+---
+
+## 2026-07-27 — Fix: "patrimônio total" sincronizado só mandava bens e direitos
+
+### O quê
+`pushPatrimonio()` em `src/sync/sync-push.js` calculava `total_assets` (e por
+consequência `net_worth`) somando **só `pat_assets`** (bens e direitos:
+imóvel, veículo, barco, clube, societário, mútuo, outro). O mobile lê
+`net_worth` da tabela `mobile_patrimonio` pra alimentar a meta de
+aposentadoria de longo prazo (`app/(tabs)/metas.js` no iOS/Android), então
+o "patrimônio atual" mostrado lá vinha bem abaixo do patrimônio real —
+faltavam investimentos financeiros (`inv_assets`) e saldo em conta
+(`transactions`).
+
+### Correção
+`total_assets` agora soma três fontes, mesma composição que
+`computeLicenseStatus()` já usa em `main.js` pra "totalWealth" (o cálculo
+de licença/plano gratuito):
+1. **Bens e direitos** (`pat_assets` + `pat_history`) — igual já era.
+2. **Investimentos financeiros** (`inv_assets` + `inv_transactions`,
+   pegando a última linha `tx_type='atualizacao'` até o mês) — novo.
+3. **Saldo em conta** (banco, cartão, dinheiro — `SUM(transactions.amount)`
+   até o fim do mês, com `Math.max(0, ...)` igual ao cálculo de licença)
+   — novo.
+
+`breakdown` (JSON por categoria, hoje só armazenado — nada no mobile lê
+chaves específicas dele ainda) ganhou duas chaves novas: `investimentos` e
+`contas`, além das chaves de `asset_type` que já existiam.
+
+**Ajuste seguinte, a pedido do usuário**: `total_debts` deixou de ser só
+financiamento — agora é **cartão de crédito (saldo devedor da fatura,
+contas `type='credit'`) + financiamentos ativos**. E `total_assets`
+(saldo em conta) passou a excluir contas `type='credit'` explicitamente
+(`WHERE a.type != 'credit'`) — antes somava TODAS as contas sem
+distinção, o que ia contar o cartão duas vezes (uma como "saldo", outra
+implícita na dívida). Dívidas pessoais informais
+(`personal_debt_contracts`) ainda não entram no cálculo — não achei um
+jeito limpo de saber quais estão "ativas" (essa tabela não tem coluna
+`status` como `pat_financing_contracts` tem) sem investigar mais a fundo;
+fica como limitação conhecida, não uma correção que eu quis arriscar sem
+mais certeza.
+
+### Verificação
+`node --check` no arquivo tocado. Testei a lógica isoladamente com sql.js
+duas vezes (uma antes e outra depois do ajuste de cartão): schema mínimo
+replicando accounts/pat_assets/inv_assets/transactions/pat_financing —
+bem de R$500.000, investimento de R$100.000, conta banco de R$20.000,
+cartão devendo R$3.000, financiamento com saldo devedor de R$200.000 →
+`total_assets=620.000`, `total_debts=203.000`, `net_worth=417.000`,
+batendo o esperado nos dois casos. Rodei o app de verdade (`npm start`)
+depois de cada mudança — `sync:push` concluiu com `patrimonio: 'ok'` nas
+duas vezes, sem erro (o único erro no log foi um timeout transitório de
+rede em `ai_config`, sem relação com esta mudança). Não validei
+end-to-end contra o app mobile lendo o valor atualizado — isso depende
+do próximo `sync:pull` do lado mobile.
+
+---
+
+## 2026-07-27 — Comprovante de aceite dos Termos gravado no Supabase
+
+### O quê
+Complemento ao modal de consentimento (entrada abaixo, mesmo dia): o
+usuário pediu um "comprovante" de que o usuário X aceitou os termos.
+Cheguei a desenhar (e depois descartar, a pedido do usuário) uma versão
+bem mais invasiva — exigir login/cadastro obrigatório na primeira
+abertura do app, antes até dos Termos, pra sempre ter um e-mail
+associado. Levantei os riscos reais disso antes de implementar: (a)
+usuários já instalados usando 100% local ficariam bloqueados na próxima
+atualização, (b) o Supabase deste projeto exige confirmação por e-mail
+antes de liberar sessão (confirmado lendo `Signup.jsx` do site — depois
+de criar conta, `data.session` vem `null` até o clique no link do
+e-mail), então um "gate" de conta obrigatória travaria o primeiro uso
+até o usuário confirmar o e-mail, e (c) sem internet no primeiro boot o
+app ficaria inutilizável. Perguntei ao usuário como resolver essas 3
+tensões antes de mexer em algo tão sensível (autenticação/onboarding) —
+ele preferiu cancelar essa parte e pediu só o registro do aceite no
+banco, sem mudar o fluxo de login/conta.
+
+### O que foi feito
+`supabase/terms_acceptances.sql` (novo arquivo) — tabela
+`terms_acceptances` (append-only: só políticas de INSERT/SELECT pro
+próprio usuário via RLS, sem UPDATE/DELETE — nem o usuário logado
+consegue alterar/apagar um registro já gravado). Colunas: `user_id`
+(FK pra `auth.users`, cascade), `email`, `version`, `accepted_at`,
+`app_version`, `platform`. **Precisa ser rodado manualmente uma vez no
+Supabase Dashboard → SQL Editor** (mesmo processo do
+`enable_rls.sql` já existente) — não rodei automaticamente porque não
+tenho acesso direto ao painel do Supabase deste projeto.
+
+`src/main.js`: novo handler `ipcMain.handle('terms:record-acceptance', ...)`
+(perto de `sync:status`) — só grava se `sb.isLoggedIn()` E existir
+`s.supabaseEmail` (ou seja, só para quem já tem conta configurada em
+Configurações → App Mobile); best-effort, nunca lança erro pro chamador.
+`src/preload.js`: exposto como `ff.termsRecordAcceptance(version)`.
+`src/renderer.js`: chamado dentro de `acceptTermsConsent()`, logo após
+salvar `termsAcceptedVersion` localmente — fire-and-forget (`.catch(()=>{})`),
+não bloqueia o fechamento do modal nem depende do resultado.
+
+### Limitação conhecida (aceita, não é bug)
+Quem usa o Desktop sem nunca ter feito login (uso 100% local, sem
+sincronização mobile) não tem e-mail nenhum associado à instalação —
+pra esse perfil de usuário, o único registro de aceite continua sendo
+local (`settings.termsAcceptedVersion`/`termsAcceptedAt`, já gravado
+antes desta mudança). Não há como ter um "comprovante" remoto de quem
+nunca se identificou.
+
+---
+
+## 2026-07-27 — Termos de Uso completos + modal de consentimento obrigatório
+
+### O quê
+A pedido do usuário: reescrita completa dos Termos de Uso (antes 8 seções
+curtas, agora 22 seções detalhadas), com ênfase especial em isenção de
+responsabilidade sobre dados financeiros e nos riscos de sincronização em
+nuvem via Supabase — e implementação de um fluxo de aceite obrigatório no
+boot do app. **Não sou advogado**; recomendei ao usuário revisão jurídica
+profissional antes deste texto valer como termo definitivo em produção,
+mas o conteúdo foi escrito com cuidado deliberado (LGPD, CDC — em
+especial o Art. 51 que veda isenção total de responsabilidade em relação
+de consumo —, Marco Civil da Internet).
+
+### Conteúdo (fonte única, 3 destinos)
+Escrito uma vez em Python (`terms_pt.py`/`terms_en.py`, scripts de sessão,
+não versionados no repo) e propagado para:
+- `Cruzeiro Site/src/locales/pt.json` e `en.json` (`terms.sections`) —
+  consumido por `Terms.jsx` via `dangerouslySetInnerHTML`.
+- `legal/TERMOS_DE_USO.md` (versão Markdown, referência canônica do
+  Desktop).
+- `src/legal-terms-content.js` (novo arquivo) — expõe `window.TERMS_VERSION`
+  (`"2026-07-27"`), `window.TERMS_UPDATED_LABEL` e `window.TERMS_HTML`
+  (as 22 seções em HTML), carregado via `<script>` em `index.html` antes
+  de `renderer.js`.
+
+Estrutura das 22 seções: aceitação/capacidade, definições, descrição do
+serviço, cadastro/conta, planos/pagamento/cancelamento, natureza da
+ferramenta (sem aconselhamento financeiro/contábil/jurídico), precisão
+dos dados, proteção local/senha/backup, **sincronização em nuvem —
+segurança e riscos** (infraestrutura Supabase, medidas de segurança
+adotadas, reconhecimento expresso de que nenhum sistema é 100% seguro,
+o que a arquitetura sem Open Finance reduz e o que não elimina,
+notificação de incidentes conforme LGPD, boas práticas do usuário),
+recurso de IA, integrações de terceiros, propriedade intelectual, uso
+aceitável, isenção de garantias, limitação de responsabilidade (com teto
+monetário e ressalva expressa pra dolo/culpa grave e direitos
+irrenunciáveis do CDC), indenização, suspensão/encerramento,
+atualizações de software, alterações aos termos, lei aplicável/foro,
+disposições gerais, contato.
+
+### Modal de consentimento obrigatório (Desktop)
+`src/index.html`: novo `#terms-consent-backdrop`/`#terms-consent-modal`
+(z-index 99998/99999, acima de tudo no app, incluindo os modais de
+confirm/prompt que usam 21000) — **sem** `onclick` no backdrop e sem
+botão de fechar, diferente de todo outro modal do app: só sai aceitando
+(checkbox + botão "Aceitar e continuar", desabilitado até marcar).
+
+`src/renderer.js`: `checkTermsConsent()` (nova função) é a primeira
+linha dentro da IIFE de boot (`// ── INIT ──`, antes de
+`fetchFxRates()`) — compara `s.termsAcceptedVersion` (via
+`ff.settingsGet()`) contra `window.TERMS_VERSION`; se diferente, injeta
+`window.TERMS_HTML` em `#terms-consent-text`, mostra o modal e **retorna
+uma Promise que só resolve quando `acceptTermsConsent()` roda** — ou
+seja, o resto do boot do app fica bloqueado até o usuário aceitar.
+`onTermsConsentCheckChange()` habilita/desabilita o botão conforme o
+checkbox. `acceptTermsConsent()` persiste `termsAcceptedVersion` +
+`termsAcceptedAt` via `ff.settingsSave()`.
+
+`src/main.js`: `ipcMain.handle('settings:get', ...)` (linha ~6481)
+retorna um objeto **whitelisted** (não é passthrough) — precisei
+adicionar `termsAcceptedVersion: s.termsAcceptedVersion || null,`
+explicitamente pro renderer conseguir ler de volta o que foi salvo (a
+gravação em si já funcionava sem mudança nenhuma, porque
+`settings:save-data` faz `Object.assign(s, data)` com qualquer chave
+nova).
+
+Efeito prático: qualquer usuário existente (sem `termsAcceptedVersion`
+salvo) vê o modal na próxima abertura do app, antes de qualquer outra
+tela. Ao lançar uma futura revisão dos Termos, basta trocar
+`TERMS_VERSION` no gerador (`terms_pt.py`) e regenerar os 3 destinos —
+todo mundo vê o modal de novo.
+
+### Não feito nesta sessão
+Não propaguei um fluxo de consentimento equivalente para iOS/Android
+(o usuário só pediu "no instalador", entendido como o instalador
+Desktop) nem criei versionamento automatizado do texto — trocar
+`TERMS_VERSION` e regenerar os 3 arquivos continua manual.
+
+---
+
 ## 2026-07-27 — Auditoria de código: 3 bugs (sync de patrimônio, undo de transferência, data em UTC)
 
 ### O quê
