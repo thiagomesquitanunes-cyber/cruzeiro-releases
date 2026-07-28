@@ -12,6 +12,90 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-28 (2) — TIR/benchmark de investimentos: fórmula errada, não bug de transporte
+
+### O quê
+Segunda rodada do relatório de bugs da aba Patrimônio do mobile. O
+usuário esclareceu que o número de referência da rodada anterior
+(R$3.473.248,30) era de OUTRO banco de dados, ao qual não tenho acesso
+— então a investigação daquele número específico não se aplicava mais.
+Focei nos itens que continuavam errados de verdade.
+
+### Achado principal: eu estava usando a fórmula ERRADA de benchmark
+Reli o código real que a aba Patrimônio do desktop usa por ativo
+(`buildInvRows`, ~linha 25453 de `renderer.js` — não a aba "Rendimentos",
+que tem sua própria fórmula, mais simples, num lugar diferente da tela).
+A comparação com benchmark de cada investimento ali:
+- NÃO é `cumulativeReturn`/`vsCDI` (produto composto das taxas mensais)
+  como eu tinha implementado — é a MÉDIA das taxas mensais do período,
+  anualizada (`(1+média)^12 - 1`);
+- é comparada contra a **TIR NOMINAL** (`irrNominal`), não contra o
+  retorno total simples.
+Nova função `computeBenchmarkDiff()` em `sync-push.js` replica essa
+conta exatamente. Isso explica "comparação com benchmark muito
+diferente do desktop" — a fórmula antiga simplesmente não era a mesma
+conta que a tela mostra.
+
+### Achado secundário: valor contábil de investimento inflava com aportes
+Reli também de onde vem o "valor atual" de um investimento no desktop
+(mesmo trecho de `buildInvRows`, comentário explícito no código:
+*"bookValue only comes from real valuations (atualizacao) — cashDelta
+does NOT contribute to displayed asset value"*). `investmentBookValue()`
+(usada tanto por `pushPatrimonio` quanto por `pushPatrimonioItems`)
+estava somando o valor de aportes/compras diretamente no valor contábil
+(`running += cd`) — só coincidia com o desktop quando aporte e uma
+atualização de valor caem no mesmo mês (o caso mais comum, por isso os 3
+investimentos de teste não mostravam diferença visível nessa parte
+específica, mas outros dados do usuário podiam mostrar). Corrigido:
+o valor contábil agora só muda em transações de avaliação
+(`atualizacao`/`cota`/`incorporacao`/`correcao`), igual ao desktop.
+
+### TIR de bens e direitos — fix do "1 mês a menos"
+Reli `refreshPatrimonioTable` (bens) de novo: a TIR de um bem soma uma
+"venda hipotética" no mês SEGUINTE ao atual (`nextM`), não no mês atual
+— diferente de investimentos, que somam no próprio mês atual. Meu
+`computeBemReturns` usava `curM` pros dois casos. Corrigido pra usar
+`nextM` especificamente pra bens — isso pesa mais em bens com pouco
+histórico (poucos meses desde a compra), onde 1 mês a mais/menos no
+denominador da anualização muda a TIR perceptivelmente.
+
+### Verificação (sql.js contra os 3 investimentos reais do usuário)
+```
+Poupança:      TIR nominal 7.6%  | TIR real 2.7%  | CDI 12.9% a.a. | vs CDI -5.3%
+Tesouro SELIC: TIR nominal 12.6% | TIR real 7.4%  | CDI 12.9% a.a. | vs CDI -0.3%
+CDB:           TIR nominal 14.0% | TIR real 8.8%  | CDI 12.9% a.a. | vs CDI +1.1%
+```
+Números plausíveis e agora usando a MESMA fórmula do código-fonte real
+do desktop (não uma reprodução aproximada) — não tenho como comparar
+lado a lado com a tela renderizada de verdade (sem GUI automation pro
+Electron nem simulador mobile aqui), mas a fórmula está auditada
+linha a linha contra `renderer.js`.
+
+### Mobile: filtros e ordenação por categoria de investimentos
+`app/(tabs)/patrimonio.js` (iOS + Android, espelhados):
+- `INV_CATEGORY_LABEL` tinha chaves erradas (`fundo`/`fii`/`cripto`, que
+  não existem no desktop) — corrigido pras chaves reais de
+  `INV_CATEGORIES`/`INV_CAT_ORDER` em `renderer.js` (`renda_fixa`,
+  `tesouro`, `previdencia`, `fundos`, `renda_variavel`,
+  `private_equity`, `caixa`, `valor_em_caixa`).
+- Categorias de investimento agora aparecem na MESMA ordem do desktop
+  (`INV_CAT_ORDER`), com itens dentro de cada categoria ordenados por
+  nome.
+- Filtros por categoria/tipo/corretora: chips horizontais (toque
+  seleciona, toque de novo limpa) acima da lista de investimentos — só
+  aparecem as opções que existem nos dados do usuário. Os totais por
+  categoria e da seção respeitam o filtro ativo.
+
+### Verificação
+`node --check` no `sync-push.js`. Validei sintaxe do JSX mobile
+compilando com o Babel do próprio projeto nos dois repositórios,
+confirmando os arquivos compartilhados byte-idênticos. Rodei o app
+(`npm start`) — `sync:push` completou com `patrimonio_items: 'ok'` e
+`ai_config: 'ok'` desta vez (sem timeout), tudo limpo. Não pude testar
+a UI do mobile renderizada de verdade.
+
+---
+
 ## 2026-07-28 — Correções após relatório de bugs: Orçamento, Visão Geral, sync de Patrimônio
 
 ### O quê

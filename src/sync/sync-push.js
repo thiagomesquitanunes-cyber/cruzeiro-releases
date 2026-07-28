@@ -610,7 +610,15 @@ function computeBemReturns(txs, currentValue, ipcaCumFn, curM, financingRows) {
   }
   const months = Object.keys(netCash).sort();
   if (!months.length) return { tirNominal: null, tirReal: null, gainLoss: null };
-  const irrMonths = monthRange(months[0], curM);
+  // A TIR de um bem, na tela do desktop (refreshPatrimonioTable), soma uma
+  // "venda hipotética" no mês SEGUINTE ao atual (nextM), não no mês atual —
+  // por isso o array de fluxos vai até nextM, não até curM. Sem isso a TIR
+  // de bens recém-adquiridos (poucos meses de histórico) divergia
+  // perceptivelmente do desktop, já que 1 mês a menos/mais pesa proporcionalmente
+  // mais num período curto.
+  const [cy, cmo] = curM.split('-').map(Number);
+  const nextM = cmo === 12 ? `${cy + 1}-01` : `${cy}-${String(cmo + 1).padStart(2, '0')}`;
+  const irrMonths = monthRange(months[0], nextM);
   const nomFlows  = irrMonths.map(m => netCash[m] ?? 0);
   const realFlows = irrMonths.map(m => (netCash[m] ?? 0) * ipcaCumFn(m));
   nomFlows[nomFlows.length - 1]   += currentValue;
@@ -635,17 +643,23 @@ function investmentBookValue(txs, uptoMonth) {
   let running = 0;
   const bookValueByMonth = {};
   txMonths.forEach(m => {
-    let cd = 0, lastValuation = null;
+    let lastValuation = null;
     byMonth[m].forEach(t => {
       if (t.tx_type in INV_TX_CASH_SIGN) {
-        if (t.tx_type in INV_TX_EXTERNAL_SIGN && INV_TX_EXTERNAL_SIGN[t.tx_type] < 0) cd += t.total_value;
-        if (t.tx_type === 'venda' || t.tx_type === 'amortizacao') cd -= t.total_value;
         netCash[m] = (netCash[m] || 0) + INV_TX_CASH_SIGN[t.tx_type] * t.total_value;
       } else if (INV_TX_VALUATION_TYPES.has(t.tx_type)) {
         lastValuation = t.total_value;
       }
     });
-    running += cd;
+    // O valor contábil SÓ muda em transações de avaliação (atualizacao/cota/
+    // etc.) — um aporte/compra sem uma atualização de valor no mesmo mês NÃO
+    // mexe no valor exibido do ativo. É assim que o renderer trata isso
+    // (buildInvRows, comentário "bookValue only comes from real valuations
+    // (atualizacao) — cashDelta does NOT contribute to displayed asset
+    // value"): a versão anterior daqui somava o aporte direto no valor
+    // contábil, o que só coincidia com o desktop quando aporte e atualização
+    // caem no mesmo mês (como no caso mais comum de "criei o ativo já com
+    // saldo") — em qualquer outro caso, divergia.
     if (lastValuation !== null) running = lastValuation;
     bookValueByMonth[m] = running;
   });
@@ -668,14 +682,25 @@ function computeInvReturns(txs, ipcaCumFn, curM) {
   return { tirNominal: calcIRR(nomFlows), tirReal: calcIRR(realFlows), gainLoss, currentValue };
 }
 
-// Retorno acumulado (NÃO anualizado) de um benchmark (CDI/IBOV) no mesmo
-// período — mesma função cumulativeReturn() usada pela aba "Rendimentos"
-// do desktop (refreshReturns/vsCDI). benchmarkMonthly = { 'YYYY-MM': taxa
-// decimal do mês }.
-function cumulativeReturn(benchmarkMonthly, months) {
-  let cum = 1;
-  months.forEach(m => { cum *= (1 + (benchmarkMonthly?.[m] ?? 0)); });
-  return cum - 1;
+// Comparação com benchmark de UM investimento, EXATAMENTE como o renderer
+// calcula (buildInvRows, bloco "Benchmark label" ~linha 25453): não é
+// cumulativeReturn/vsCDI da aba Rendimentos (fórmula diferente, e essa nem é
+// a que aparece na aba Patrimônio) — aqui o benchmark é anualizado a partir
+// da MÉDIA das taxas mensais do período (não do produto composto), e
+// comparado contra a TIR NOMINAL (não a real).
+function computeBenchmarkDiff(irrNominal, benchmarkMonthly, firstMonth, curM) {
+  if (irrNominal === null || !benchmarkMonthly || !firstMonth) return null;
+  const rates = [];
+  let m = firstMonth;
+  while (m <= curM) {
+    if (benchmarkMonthly[m] != null) rates.push(benchmarkMonthly[m]);
+    const [y, mo] = m.split('-').map(Number);
+    m = mo === 12 ? `${y + 1}-01` : `${y}-${String(mo + 1).padStart(2, '0')}`;
+  }
+  if (!rates.length) return null;
+  const avgMonthlyRate = rates.reduce((s, r) => s + r, 0) / rates.length;
+  const benchmarkAnnualized = Math.pow(1 + avgMonthlyRate, 12) - 1;
+  return irrNominal - benchmarkAnnualized;
 }
 
 async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) {
@@ -734,26 +759,19 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
   // ── Investimentos financeiros ──
   const invAssets = all('SELECT * FROM inv_assets WHERE hidden=0 AND closed_month IS NULL');
   invAssets.forEach(asset => {
+    // Ativos de "caixa" (valor em caixa da corretora) não mostram TIR/
+    // benchmark no desktop — mesma checagem de _isCashAsset() no renderer.
+    const isCashAsset = asset.category === 'valor_em_caixa' || asset.category === 'caixa'
+      || asset.inv_type === 'Caixa' || asset.name === 'Valores em Caixa';
+
     const txs = all('SELECT tx_type, total_value, month FROM inv_transactions WHERE asset_id=? AND month<=? ORDER BY month', [asset.id, curM]);
     const { tirNominal, tirReal, gainLoss, currentValue } = computeInvReturns(txs, ipcaCumFn, curM);
-    const { netCash, firstMonth, allMonths } = investmentBookValue(txs, curM);
+    const { firstMonth } = investmentBookValue(txs, curM);
 
-    // vs benchmark: retorno TOTAL do investimento (soma simples do fluxo de
-    // caixa + valor atual, sobre o capital investido) MENOS o retorno
-    // acumulado do benchmark no MESMO período — mesma matemática de vsCDI
-    // na aba "Rendimentos" do desktop (totalRet - periodCDI), não anualizada.
-    let benchmarkReturn = null;
-    if (firstMonth && Object.keys(netCash).length) {
-      const totalInvested = Object.values(netCash).reduce((s, v) => s + (v < 0 ? -v : 0), 0);
-      if (totalInvested > 0) {
-        const totalRet = (gainLoss ?? 0) / totalInvested;
-        const bmSeries = benchmarks?.[asset.benchmark || 'cdi'] || null;
-        if (bmSeries) {
-          const periodReturn = cumulativeReturn(bmSeries, allMonths);
-          benchmarkReturn = totalRet - periodReturn;
-        }
-      }
-    }
+    const bmSeries = benchmarks?.[asset.benchmark || 'cdi'] || null;
+    const benchmarkReturn = (isCashAsset || !asset.benchmark || asset.benchmark === 'nenhum')
+      ? null
+      : computeBenchmarkDiff(tirNominal, bmSeries, firstMonth, curM);
 
     rows.push({
       user_id: userId, desktop_id: `inv_${asset.id}`, section: 'investimento',
@@ -763,9 +781,9 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
       benchmark: asset.benchmark || null,
       current_value: toCents(currentValue || 0),
       debt_balance: null, interest_rate: null,
-      tir_nominal: tirNominal !== null ? tirNominal * 100 : null,
-      tir_real: tirReal !== null ? tirReal * 100 : null,
-      gain_loss: gainLoss !== null ? toCents(gainLoss) : null,
+      tir_nominal: (!isCashAsset && tirNominal !== null) ? tirNominal * 100 : null,
+      tir_real: (!isCashAsset && tirReal !== null) ? tirReal * 100 : null,
+      gain_loss: (!isCashAsset && gainLoss !== null) ? toCents(gainLoss) : null,
       benchmark_return: benchmarkReturn !== null ? benchmarkReturn * 100 : null,
       synced_at: new Date().toISOString(),
     });
