@@ -12,6 +12,52 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-28 (4) — v4.85.3: corrige "cache" de importação (2ª fatura repetia dados da 1ª)
+
+### O quê
+Usuário reportou: ao importar um extrato/fatura e, na mesma sessão do
+app (sem reiniciar), importar outro arquivo (ex: mês seguinte), os
+valores do arquivo ANTERIOR reapareciam/se misturavam — "como se
+tivesse ficado na memória do parser". Só fechar e reabrir o app
+resolvia.
+
+### Causa raiz
+`_finishImportWithPatLinksInner()` (`src/renderer.js`), a função que
+roda ao final de uma importação bem-sucedida, nunca limpava o estado da
+importação: `_pendingImport`, `_bankParsed`, `_importEditRows`
+continuavam com os dados do arquivo já importado, e
+`clearPersistedImportState()` (que apaga o "resume" salvo em disco via
+`ff.importSavePending`) nunca era chamada.
+
+Existe um mecanismo de retomada (`restorePendingImportIfAny()`,
+chamado por `initImportPage()`) que restaura esse estado salvo quando a
+tela de importação é reaberta — pensado pra sobreviver a um fechamento
+acidental do app no meio de uma importação. Como o estado da importação
+CONCLUÍDA nunca era limpo, ele ficava "pendurado" em disco e podia ser
+restaurado de volta na tela ao reabrir a aba Importar pra uma segunda
+importação, repondo os valores do arquivo anterior por cima dos dados
+do novo arquivo — exatamente o sintoma relatado. Um branch irmão
+(`confirmDupAndImport`, caminho de "só havia substituições diretas")já
+fazia essa limpeza corretamente; o caminho principal de sucesso não.
+
+### Fix
+Adicionado ao final de `_finishImportWithPatLinksInner()` (depois de
+`showImportSummaryModal`/`runFaturaBalanceAudit`) o mesmo reset já usado
+em `cancelBankImport()`: `_bankParsed = []`, `_pendingImport = null`,
+`_importEditRows = []`, esconder `#bank-preview`, limpar
+`#bank-result`/`#bank-file-name`, `hideCardHolderAccountSelectors()` e
+`clearPersistedImportState()`.
+
+### Arquivos
+- `src/renderer.js` — `_finishImportWithPatLinksInner()`.
+- `package.json` — 4.85.2 → 4.85.3.
+
+Verificado com `node --check src/renderer.js` (sintaxe OK). Fix é
+puramente de gerenciamento de estado no processo renderer — não requer
+teste específico de conta/sync pra validar o mecanismo.
+
+---
+
 ## 2026-07-28 (3) — Verificação final do sync de patrimônio: era conta de teste, não bug
 
 ### O quê

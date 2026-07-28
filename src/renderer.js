@@ -6347,6 +6347,20 @@ async function _finishImportWithPatLinksInner(finalRows, updatedInstallments, ac
 
   showImportSummaryModal({ ...importResult, patLinkedCount, debtLinkedCount, cancelledCount });
   runFaturaBalanceAudit().catch(e => console.error('runFaturaBalanceAudit:', e));
+
+  // Importação concluída com sucesso: limpa todo o estado da importação
+  // anterior (em memória e persistido em disco). Sem isso, o estado antigo
+  // ficava "pendurado" e uma nova importação, ao reabrir a tela, podia
+  // acabar restaurando (via restorePendingImportIfAny) os valores do
+  // arquivo já importado — como se estivessem "presos na memória do parser".
+  _bankParsed = [];
+  _pendingImport = null;
+  _importEditRows = [];
+  G('bank-preview').style.display = 'none';
+  G('bank-result').innerHTML = '';
+  G('bank-file-name').textContent = '';
+  hideCardHolderAccountSelectors();
+  clearPersistedImportState();
 }
 
 // Resumo proeminente (modal, não toast) ao final de uma importação — antes
