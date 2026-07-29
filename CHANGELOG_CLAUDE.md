@@ -12,6 +12,68 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-29 (2) — v4.85.5: diagnóstico pra bug "0 ativos" na reimportação de extrato BTG (não resolvido, instrumentado)
+
+### O quê
+Usuário (testando pra outra pessoa) reportou: importar um extrato de
+corretora BTG (XLSX de posição, abas Capa/Fundos/Renda Fixa/Previdência
+Individual/Renda Variavel), depois apagar 100% dos investimentos e
+lançamentos da conta vinculada, e tentar reimportar o MESMO extrato de
+um mês já importado antes resulta em "0 ativo(s) encontrado(s)" na
+pré-visualização — mas um extrato de um mês NUNCA importado antes
+funciona normalmente. Reinício do app não resolve.
+
+### Investigação
+Li a função inteira `parseBTGBroker()` (`src/renderer.js`) e confirmei
+que ela é uma função pura do buffer do arquivo — nenhuma das 4 seções
+de posição (Fundos/Renda Fixa/Previdência/Renda Variável) tem qualquer
+dependência do banco de dados ou de arquivos persistidos
+(`_bank_parsers.json`, `_broker_mappings.json`, localStorage) para
+CRIAR os ativos; essas fontes só afetam texto de exibição (nome
+sugerido, classificação de movimentação), nunca a contagem. Testei essa
+mesma função extraída ao vivo do código atual contra 3 extratos reais
+da BTG (abril/maio/junho 2026, cedidos pelo usuário principal desta
+conversa, não relacionados ao caso do bug) simulando `_invAssetsList =
+[]` (equivalente a "tudo apagado") — os 3 encontraram os ativos
+corretamente (17, conferido com `_debug` seção-a-seção). Ou seja: não
+consegui reproduzir o bug com os arquivos que tinha em mãos, porque são
+de uma pessoa diferente da que está com o problema — não tenho acesso
+ao arquivo real que falha nem ao banco de dados onde isso acontece.
+
+Não encontrei nenhum mecanismo de "já importei este arquivo/mês antes,
+não deixa de novo" em lugar nenhum do código (nem no parser, nem no
+salvamento `broker:save-parsed` em `main.js`, que só roda depois da
+pré-visualização de qualquer forma — o "0 ativos" acontece ANTES disso,
+só de selecionar o arquivo).
+
+### Ação tomada: instrumentação de diagnóstico (sem fix ainda)
+Como não consigo reproduzir localmente, adicionei um painel de
+diagnóstico que só aparece quando a pré-visualização vem com 0 ativos:
+mostra quais abas o `XLSX.read()` encontrou de fato no arquivo
+selecionado, e pra cada uma das 4 seções (Fundos/Renda Fixa/Previdência/
+Renda Variável) se a aba foi encontrada, quantas linhas tinha, e quantos
+ativos foram extraídos dela. Isso transforma um "0 ativos" opaco em um
+relatório acionável — da próxima vez que acontecer, o usuário só precisa
+mandar print desse painel (em vez de eu precisar adivinhar às cegas).
+
+### Arquivos
+- `src/renderer.js` — `parseBTGBroker()` (novo campo `result._debug` por
+  seção), nova função `brokerZeroAssetsDebugHtml()`, chamada em
+  `renderBrokerPreview()`.
+- `package.json` — 4.85.4 → 4.85.5.
+
+Verificado com `node --check` e reexecução do teste contra os 3 extratos
+reais (ainda 17/17/? ativos corretos, sem regressão) — `_debug` populado
+corretamente (fundos:4, rendaFixa:10, previdencia:1, rendaVariavel:2 =
+17, batendo com o total).
+
+**Pendência real**: o bug em si NÃO foi corrigido — só instrumentado.
+Aguardando o usuário reproduzir de novo (mês já importado + apagado) e
+mandar o print do novo painel de diagnóstico pra eu localizar a causa
+exata.
+
+---
+
 ## 2026-07-29 — v4.85.4: corrige numeração de parcelas futuras (BTG ok, XP sem indicador, Itaú travado em 1/x)
 
 ### O quê

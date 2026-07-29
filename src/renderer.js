@@ -7922,6 +7922,14 @@ function parseBTGBroker(buffer) {
   if (!month) throw new Error('Não foi possível identificar o mês do extrato na aba Capa.');
 
   const result = { month, assets: [], caixaValue: null, broker: 'BTG', unresolvedMovements: [] };
+  // Diagnóstico exibido na tela SÓ quando 0 ativos são encontrados (ver
+  // renderBrokerPreview) — sem isso, um "0 ativos" reportado por um usuário
+  // remoto é uma caixa-preta total: não dá pra saber se as abas esperadas
+  // (Fundos/Renda Fixa/Previdência/Renda Variável) sequer existiam no
+  // arquivo, ou se existiam mas todas as linhas de posição foram
+  // descartadas por algum filtro. Cada seção abaixo preenche seu campo.
+  const _debug = { sheets: wb.SheetNames.slice(), fundos: null, rendaFixa: null, previdencia: null, rendaVariavel: null };
+  result._debug = _debug;
 
   // ── Flow-type classifier ──
   // Returns: 'external' | 'income' | 'ignore' | null
@@ -7993,10 +8001,13 @@ function parseBTGBroker(buffer) {
 
   // ── 2. Fundos ──
   const fundosWs = wb.Sheets['Fundos'];
+  _debug.fundos = { sheetFound: !!fundosWs, rows: 0, pushed: 0 };
   if (fundosWs) {
     const rows = XLSX.utils.sheet_to_json(fundosWs, { header:1, defval:null, raw:true });
+    _debug.fundos.rows = rows.length;
     // Posições section ends at "Total em fundos"
     const posEndIdx = rows.findIndex(r => norm(String(r[1]||'')).startsWith('total em fund'));
+    _debug.fundos.posEndIdx = posEndIdx;
 
     let currentName = null;
     for (let i=0; i<(posEndIdx>0?posEndIdx:rows.length); i++) {
@@ -8013,6 +8024,7 @@ function parseBTGBroker(buffer) {
         // Value row: date in colB, saldo líquido in colI
         if (!result.assets.find(a => a.name===currentName)) {
           result.assets.push({ name:currentName, category:'fundos', inv_type:'Fundo', broker:'BTG', valor:colI, movimentacoes:[] });
+          _debug.fundos.pushed++;
         }
         currentName = null;
       }
@@ -8067,8 +8079,10 @@ function parseBTGBroker(buffer) {
 
   // ── 3. Renda Fixa ──
   const rfWs = wb.Sheets['Renda Fixa'];
+  _debug.rendaFixa = { sheetFound: !!rfWs, rows: 0, pushed: 0 };
   if (rfWs) {
     const rows = XLSX.utils.sheet_to_json(rfWs, { header:1, defval:null, raw:true });
+    _debug.rendaFixa.rows = rows.length;
     // Only parse Posições section (before "Posições Detalhadas")
     const posDetIdx = rows.findIndex(r => norm(String(r[1]||'')).startsWith('posicoes detalha'));
     const posRows = posDetIdx > 0 ? rows.slice(0, posDetIdx) : rows;
@@ -8107,6 +8121,7 @@ function parseBTGBroker(buffer) {
         broker: 'BTG', maturity_month: vencISO,
         liquidity, liquidity_days: liqDays, valor: saldo, movimentacoes: [],
       });
+      _debug.rendaFixa.pushed++;
     }
 
     // Movimentações Renda Fixa
@@ -8159,8 +8174,10 @@ function parseBTGBroker(buffer) {
 
   // ── 4. Previdência ──
   const prevWs = wb.Sheets['Previdência Individual'];
+  _debug.previdencia = { sheetFound: !!prevWs, rows: 0, pushed: 0 };
   if (prevWs) {
     const rows = XLSX.utils.sheet_to_json(prevWs, { header:1, defval:null, raw:true });
+    _debug.previdencia.rows = rows.length;
     const SKIP_P = ['total','n° cert','n cert','fundo','produto','plano','posicao','rentabilidade',
       'posicoes abertas','aliquota','regime','data de inicio','None'];
     let inPosicao = false;
@@ -8180,6 +8197,7 @@ function parseBTGBroker(buffer) {
         inv_type: 'PGBL', broker: 'BTG', valor: colG, movimentacoes: [],
         notes: cnpj ? `CNPJ: ${cnpj}` : undefined,
       });
+      _debug.previdencia.pushed++;
     }
 
     // Movimentações Previdência
@@ -8210,8 +8228,10 @@ function parseBTGBroker(buffer) {
 
   // ── 5. Renda Variável ──
   const rvWs = wb.Sheets['Renda Variavel'];
+  _debug.rendaVariavel = { sheetFound: !!rvWs, rows: 0, pushed: 0 };
   if (rvWs) {
     const rows = XLSX.utils.sheet_to_json(rvWs, { header:1, defval:null, raw:true });
+    _debug.rendaVariavel.rows = rows.length;
     let currentSubType = 'ETF';
     const SKIP_RV = ['total','codigo','posicao','movimenta','tipo','data','None'];
     const movStartRV = rows.findIndex(r => norm(String(r[1]||'')).startsWith('movimenta'));
@@ -8250,6 +8270,7 @@ function parseBTGBroker(buffer) {
         name, code, category: 'renda_variavel', inv_type: currentSubType,
         broker: 'BTG', valor: saldo, movimentacoes: [],
       });
+      _debug.rendaVariavel.pushed++;
     }
 
     // Movimentações RV
@@ -9633,6 +9654,30 @@ async function loadInvAssetsList() {
   });
 }
 
+// Painel de diagnóstico exibido só quando a pré-visualização vem com 0
+// ativos — sem isso, "0 ativos encontrados" é uma caixa-preta pra um
+// usuário remoto reportar (não dá pra saber se as abas esperadas do
+// extrato nem existiam, ou se existiam com posições que foram todas
+// descartadas por algum filtro). Hoje só a BTG (parseBTGBroker) preenche
+// `parsed._debug`; pra qualquer outro parser, essa função não mostra nada.
+function brokerZeroAssetsDebugHtml(totalAtivos, parsed) {
+  if (totalAtivos > 0 || !parsed?._debug) return '';
+  const d = parsed._debug;
+  const secLabel = { fundos: 'Fundos', rendaFixa: 'Renda Fixa', previdencia: 'Previdência Individual', rendaVariavel: 'Renda Variavel' };
+  const secRows = Object.entries(secLabel).map(([key, label]) => {
+    const s = d[key];
+    if (!s) return `<div>• ${esc(label)}: <span style="color:var(--text3)">não verificada</span></div>`;
+    if (!s.sheetFound) return `<div>• ${esc(label)}: <strong style="color:var(--red)">aba não encontrada no arquivo</strong></div>`;
+    return `<div>• ${esc(label)}: aba encontrada (${s.rows} linha(s)) — ${s.pushed} ativo(s) extraído(s) dessa aba</div>`;
+  }).join('');
+  return `<div class="warn-box" style="margin-bottom:10px;font-size:12px;line-height:1.7">
+    ⚠️ <strong>Diagnóstico — 0 ativos encontrados</strong><br>
+    Abas encontradas no arquivo: <code>${esc((d.sheets||[]).join(', ') || '(nenhuma)')}</code><br>
+    ${secRows}
+    <div style="margin-top:6px;color:var(--text3)">Se alguma aba esperada não foi encontrada, ou foi encontrada com 0 ativos extraídos apesar de ter linhas, envie este texto pro suporte — ajuda a identificar exatamente onde o parser está falhando.</div>
+  </div>`;
+}
+
 function renderBrokerPreview(parsed) {
   const { month, assets, caixaValue, broker } = parsed;
   const preview = G('broker-preview');
@@ -10098,6 +10143,7 @@ function renderBrokerPreview(parsed) {
           <span style="color:var(--green)">💰 Rend = Rendimento/Custo</span>
         </span>
       </div>
+      ${brokerZeroAssetsDebugHtml(totalAtivos, parsed)}
       ${warnHtml}
       <div class="tbl-outer" style="max-height:420px;overflow-x:auto">
         <table class="ledger" style="min-width:720px">
