@@ -5545,12 +5545,34 @@ function cssEscape(s) {
 }
 
 // ── Import helpers ──
+// Detecta o padrão de parcela (ex: "1/10", "01/06", "Parcela 1 de 6") no
+// memo cru vindo do parser de cada banco. Guarda o texto exato do trecho
+// casado (fullMatch) e do número da parcela (parcelText, sem normalizar —
+// preserva zero à esquerda tipo "01") pra permitir substituição cirúrgica
+// depois, via withParcelNumber(), sem precisar adivinhar de novo o formato.
 function detectParcela(memo) {
   if (!memo) return null;
   const m = memo.match(/parcela\s+(\d+)\s*[\/de]+\s*(\d+)/i)
          || memo.match(/(\d+)\s*\/\s*(\d+)/);
-  if (m) { const p=parseInt(m[1]),t=parseInt(m[2]); if(p>0&&t>1&&p<=t) return {parcel:p,total:t}; }
-  return null;
+  if (!m) return null;
+  const p = parseInt(m[1]), t = parseInt(m[2]);
+  if (!(p > 0 && t > 1 && p <= t)) return null;
+  return { parcel: p, total: t, fullMatch: m[0], parcelText: m[1] };
+}
+// Troca só o número da parcela dentro do trecho já detectado por
+// detectParcela(), preservando o resto do texto (separador "/" ou "de",
+// zero à esquerda, etc) — cada banco formata esse trecho de um jeito
+// (BTG: "1/10", Itaú: "01/06" zero-padded, XP: "Parcela 1 de 6"), e essa
+// função evita repetir a lógica de substituição pra cada formato.
+function withParcelNumber(memo, detected, newParcel) {
+  if (!detected) return memo;
+  // Preserva a largura original (ex: Itaú usa "01"/"02" com zero à
+  // esquerda) — padStart só ACRESCENTA dígitos, nunca corta, então isso é
+  // seguro mesmo quando o novo número já é mais largo que o original
+  // (ex: parcela 10 num total que começou em "01").
+  const newParcelText = String(newParcel).padStart(detected.parcelText.length, '0');
+  const newFrag = detected.fullMatch.replace(detected.parcelText, newParcelText);
+  return memo.replace(detected.fullMatch, newFrag);
 }
 // Faturas de cartão registram o cancelamento de uma compra parcelada como
 // uma linha de crédito POR PARCELA restante revertida (ex: uma compra em 5x
@@ -5656,7 +5678,7 @@ async function confirmBankImport() {
           parcelInstallments.push({
             date: shiftMonths(isoOrig, p-1),
             amount: r.amount,
-            memo: memo.replace(/parcela\s+\d+/i,`Parcela ${p}`).replace(/\b1\s*[\/de]+\s*\d+/,`${p}/${parcela.total}`),
+            memo: withParcelNumber(memo, parcela, p),
             category: r.category||'',
             accountId: rowAccountId,
           });
@@ -6129,23 +6151,26 @@ async function doImportFromTable() {
     const match = finalRows.find(r => {
       if (Math.abs(r.amount - inst.amount) > 0.01) return false;
       // Both should share the same base text (before the parcel number)
-      const stripParcel = s => (s||'').replace(/\s*\d+\s*\/\s*\d+/g,'').replace(/\s*parcela\s*\d+/gi,'').trim().toLowerCase();
+      const stripParcel = s => (s||'').replace(/\s*\d+\s*\/\s*\d+/g,'').replace(/\s*parcela\s*\d+(?:\s*[\/de]+\s*\d+)?/gi,'').trim().toLowerCase();
       return stripParcel(r.memo) === stripParcel(inst.memo) ||
              stripParcel(r.desc||r.memo) === stripParcel(inst.memo);
     });
     if (!match) return inst; // no match found, keep original
 
-    // Build installment memo: take user memo, replace parcel fraction
+    // Build installment memo: take user memo, replace parcel fraction.
+    // inst.memo já tem a numeração certa desta parcela (gerada em
+    // confirmBankImport via withParcelNumber) — reaproveita o trecho "N/M"
+    // (ou "Parcela N de M") dali, no lugar de tentar re-detectar um padrão
+    // só de barra: bancos como a XP usam "N de M", e isso não tinha
+    // fração nenhuma reaproveitada, apagando o indicador por completo.
     const userMemo = match.memo || inst.memo;
-    const fracMatch = inst.memo.match(/(\d+)\s*\/\s*(\d+)/);
+    const instDetected = detectParcela(inst.memo);
     let newMemo = userMemo;
-    if (fracMatch) {
-      // Replace "1/N" in user memo with "p/N"
-      newMemo = userMemo.replace(/\d+\s*\/\s*\d+/, fracMatch[0]);
-      // If user memo doesn't have a fraction, append it
-      if (!newMemo.includes(fracMatch[0])) {
-        newMemo = userMemo.replace(/\s+$/, '') + ' ' + fracMatch[0];
-      }
+    if (instDetected) {
+      const userDetected = detectParcela(userMemo);
+      newMemo = userDetected
+        ? userMemo.replace(userDetected.fullMatch, instDetected.fullMatch)
+        : userMemo.replace(/\s+$/, '') + ' ' + instDetected.fullMatch;
     }
     return {
       ...inst,

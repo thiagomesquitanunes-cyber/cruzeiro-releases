@@ -12,6 +12,82 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-29 — v4.85.4: corrige numeração de parcelas futuras (BTG ok, XP sem indicador, Itaú travado em 1/x)
+
+### O quê
+Usuário reportou comportamento diferente por banco na criação automática
+de parcelas futuras de compra parcelada: BTG funciona perfeitamente
+(memorando preservado + indicador progride 1/x, 2/x, 3/x...); XP não
+mostra indicador nenhum nas parcelas seguintes (só repete o mesmo
+memorando); Itaú (PDF) preserva o memorando mas o indicador fica travado
+em "1/x" pra sempre, sem progredir.
+
+### Causa raiz — investigada com arquivos reais de fatura do usuário
+Inspecionei os parsers de cada banco (`src/renderer.js`) e faturas reais
+baixadas pelo usuário (BTG XLSX/PDF, XP CSV, ambos em
+`~/Downloads`) pra confirmar o formato exato que cada um usa pra indicar
+parcela no texto cru extraído do arquivo:
+- **BTG**: `"AMAZON 1/10"` — barra, sem zero à esquerda.
+- **Itaú (PDF)**: `"AMAZON BR 01/06"` — barra, **com** zero à esquerda
+  (a extração usa `\d{2}\/\d{2}` de largura fixa).
+- **XP (CSV, coluna "Parcela")**: `"SPA*C BLINDADOS S.A. Parcela 1 de 6"`
+  — confirmado em fatura real (`Fatura2026-07-10.csv`), formato por
+  extenso ("N de M"), não barra.
+
+Havia DUAS lógicas de substituição de número de parcela, cada uma com um
+bug diferente que só a BTG (por coincidência de formato) escapava:
+
+1. **`confirmBankImport()`** (geração inicial das parcelas futuras):
+   usava `.replace(/\b1\s*[\/de]+\s*\d+/, ...)` — a âncora `\b1` exige
+   fronteira de palavra ANTES do "1", que não existe em "01" (o "0"
+   anterior é caractere de palavra). Resultado: pra Itaú, essa
+   substituição nunca batia, e o memorando de TODAS as parcelas futuras
+   ficava travado no texto original "01/06" — exatamente o bug
+   reportado.
+2. **`doImportFromTable()`** (reconstrução final usando o memorando que
+   o usuário editou na tela de importação): extraía a fração só com
+   `/(\d+)\s*\/\s*(\d+)/` — regex exige barra. Pra XP, cujo formato é
+   "N de M" (sem barra), essa extração nunca batia, então o indicador
+   nunca era reanexado ao memorando final — some por completo.
+
+### Fix
+Reescrevi as duas funções pra usar uma lógica única e robusta,
+independente do formato de cada banco:
+- `detectParcela()` agora retorna também `fullMatch` (o trecho exato
+  casado, ex: `"01/06"` ou `"Parcela 1 de 6"`) e `parcelText` (o texto
+  exato do número, preservando zero à esquerda).
+- Nova função `withParcelNumber(memo, detected, novaParcela)` troca
+  cirurgicamente só o número dentro do trecho já detectado — usa
+  `padStart` pra preservar a largura original (zero à esquerda tipo
+  "01"→"02"...→"10"), sem depender de regex frágil por formato de banco.
+- As duas chamadas (geração inicial e reconstrução com memorando editado)
+  passaram a usar essa mesma função. `stripParcel()` (usado só pra achar
+  qual linha da tabela corresponde a qual parcela futura) também foi
+  ajustado pra remover o padrão "Parcela N de M" por inteiro, não só o
+  "Parcela N" deixando " de M" sobrando.
+
+Validei a lógica isoladamente (fora do Electron, só as duas funções) com
+casos exatos dos 3 bancos — BTG, Itaú (zero-padded) e XP ("de") — antes e
+depois do fix, incluindo o caso de memorando customizado pelo usuário sem
+nenhuma fração original, e o caso de virada de dígito (09→10/12).
+Resultado: os 3 bancos agora progridem corretamente (1/N, 2/N, 3/N...)
+preservando o memorando escolhido pelo usuário, igual ao comportamento
+que já era correto na BTG.
+
+### Arquivos
+- `src/renderer.js` — `detectParcela()`, nova `withParcelNumber()`,
+  `confirmBankImport()`, `doImportFromTable()` (`stripParcel` e rebuild
+  de `updatedInstallments`).
+- `package.json` — 4.85.3 → 4.85.4.
+
+Verificado com `node --check` e um script standalone reproduzindo os 3
+formatos reais de banco (incluindo o caso "09→10" de virada de dígito).
+Fatura real de XP (`Fatura2026-07-10.csv`, baixada pelo usuário) foi
+usada pra confirmar o formato exato "N de M" antes de escrever o fix —
+não foi um chute.
+
+---
+
 ## 2026-07-28 (4) — v4.85.3: corrige "cache" de importação (2ª fatura repetia dados da 1ª)
 
 ### O quê
