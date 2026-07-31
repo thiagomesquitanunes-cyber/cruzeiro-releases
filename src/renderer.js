@@ -8262,23 +8262,44 @@ function parseBTGBroker(buffer) {
     _debug.rendaVariavel.rows = rows.length;
     const off = detectColOffset(rows), sc = n => n - 1 + off;
     let currentSubType = 'ETF';
-    const SKIP_RV = ['total','codigo','posicao','movimenta','tipo','data','None'];
+    const SKIP_RV = ['total','codigo','tipo','data','None'];
+    // A aba Renda Variável INTERCALA seção de Posição e Movimentação por tipo
+    // de ativo (Posição > Ações, Movimentação > Ações, Posição > BDR's,
+    // Posição > Fundos Listados, Movimentação > Fundos Listados...) — não é
+    // "todas as posições primeiro, depois todas as movimentações". Um corte
+    // fixo no primeiro "Movimentação" (como o código fazia antes) parava de
+    // escanear posições logo após a primeira seção (Ações), descartando
+    // silenciosamente tudo que vem depois (BDR's, Fundos Listados etc — foi
+    // exatamente o que um usuário reportou). Em vez disso, rastreia o modo
+    // atual (posição/movimentação) pelos próprios cabeçalhos de seção — a
+    // ordem/intercalação deixa de importar.
+    let inMovimentacao = false;
     const movStartRV = rows.findIndex(r => norm(String(r[sc(1)]||'')).startsWith('movimenta'));
 
     let saldoBrutoCol = sc(6); // default for ETF
-    for (let i=0; i<(movStartRV>0?movStartRV:rows.length); i++) {
+    for (let i=0; i<rows.length; i++) {
       const row = rows[i];
       const colB=row[sc(1)], colC=row[sc(2)], colD=row[sc(3)];
       const nb = norm(String(colB||''));
 
-      // Section header
-      if (nb.startsWith('posicao') && String(colB).includes('>')) {
-        const sec = norm(String(colB).split('>').pop());
-        if (sec.includes('etf')) currentSubType = 'ETF';
-        else if (sec.includes('listado') || sec.includes('fii')) currentSubType = 'FII';
-        else if (sec.includes('acoes') || sec.includes('acao')) currentSubType = 'Ações';
+      // Subseção "Posição > X" / "Movimentação > X"
+      if (String(colB||'').includes('>')) {
+        inMovimentacao = nb.startsWith('movimenta');
+        if (!inMovimentacao) {
+          const sec = norm(String(colB).split('>').pop());
+          if (sec.includes('etf')) currentSubType = 'ETF';
+          else if (sec.includes('bdr')) currentSubType = 'BDR';
+          else if (sec.includes('fundos listados')) currentSubType = 'Fundo Listado';
+          else if (sec.includes('fii') || sec.includes('imobiliari')) currentSubType = 'FII';
+          else if (sec.includes('acoes') || sec.includes('acao')) currentSubType = 'Ações';
+        }
         continue;
       }
+      // Marcador de nível 1 (sem ">"): "Posição" ou "Movimentações"
+      if (nb === 'posicao') { inMovimentacao = false; continue; }
+      if (nb.startsWith('movimenta')) { inMovimentacao = true; continue; }
+
+      if (inMovimentacao) continue; // linhas de movimentação são lidas pelo loop separado abaixo
 
       // Header row: find "Saldo Bruto" column dynamically
       if (nb === 'codigo') {
@@ -8392,7 +8413,14 @@ function parseBTGBroker(buffer) {
     const off = detectColOffset(rows), sc = n => n - 1 + off;
     for (const row of rows) {
       if (norm(String(row[sc(1)]||''))==='total' && typeof row[sc(5)]==='number') {
-        result.totalLiquido = row[sc(5)]; break;
+        result.totalLiquido = row[sc(5)];
+        // Valor declarado PELO PRÓPRIO EXTRATO — não recalculado a partir
+        // do que o parser conseguiu extrair. Usado por
+        // renderBrokerPreview() pra comparar contra a soma dos ativos
+        // importados e avisar o usuário se algo ficou de fora (ex: uma
+        // seção/subseção que o parser não reconheceu ainda).
+        result.declaredTotal = row[sc(5)];
+        break;
       }
     }
   }
@@ -8504,6 +8532,26 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
         return isNaN(n) ? null : n;
       })();
       if (parsed != null) caixaValue = parsed;
+      break;
+    }
+  }
+
+  // Total patrimônio DECLARADO pela própria XP — linha-resumo no topo
+  // ("<Nome>, este é o seu patrimônio", valor logo abaixo, na mesma coluna).
+  // Independente do que o parser conseguiu extrair — usado por
+  // renderBrokerPreview() pra comparar contra a soma dos ativos importados
+  // e avisar o usuário se alguma seção não foi reconhecida.
+  let declaredTotal = null;
+  for (let ri = 0; ri < Math.min(posRows.length, 10); ri++) {
+    const row = posRows[ri] || [];
+    const colIdx = row.findIndex(c => /este\s+[eé]\s+o\s+seu\s+patrim[oô]nio/i.test(String(c||'')));
+    if (colIdx >= 0) {
+      const v = (posRows[ri+1] || [])[colIdx];
+      if (v != null && v !== '') {
+        const s = String(v).replace(/R\$\s*/,'').replace(/\./g,'').replace(',','.').trim();
+        const n = parseFloat(s);
+        if (!isNaN(n)) declaredTotal = n;
+      }
       break;
     }
   }
@@ -8867,7 +8915,7 @@ function parseXPBroker(posicaoBuffer, extratoBuffer) {
   }
 
   const totalLiquido = assets.reduce((s,a) => s + (a.valor||0), 0) + (caixaValue||0);
-  return { month, assets, caixaValue, broker: 'XP', unresolvedMovements, nonAssetMovements, totalLiquido };
+  return { month, assets, caixaValue, broker: 'XP', unresolvedMovements, nonAssetMovements, totalLiquido, declaredTotal };
 }
 
 // ── Motor do importador genérico de corretoras ──
@@ -9709,6 +9757,31 @@ function brokerZeroAssetsDebugHtml(totalAtivos, parsed) {
   </div>`;
 }
 
+// Compara a soma dos ativos importados (+ caixa) contra o total que o
+// PRÓPRIO EXTRATO declara (BTG: aba Sumário; XP: "este é o seu
+// patrimônio") — sem isso, uma seção/subseção que o parser não reconhece
+// falha silenciosamente: o app simplesmente não mostra aquele ativo, sem
+// nunca avisar que algo ficou de fora (foi exatamente o caso real que
+// motivou isso: a BTG intercala Posição/Movimentação por tipo de ativo na
+// aba Renda Variável, e um corte de seção mal calibrado descartava BDR's
+// e Fundos Listados sem nenhum aviso). Só roda quando o parser sabe extrair
+// o total declarado desse formato (`parsed.declaredTotal` presente) — hoje
+// BTG e XP; para os demais, essa função não mostra nada.
+function brokerCompletenessCheckHtml(parsed) {
+  const declared = parsed.declaredTotal;
+  if (declared == null) return '';
+  const computed = (parsed.assets||[]).reduce((s,a) => s + (a._removed ? 0 : (a.valor||0)), 0) + (parsed.caixaValue||0);
+  const delta = computed - declared;
+  if (Math.abs(delta) <= 0.05) return '';
+  const sign = delta > 0 ? '+' : '';
+  return `<div class="warn-box" style="margin-bottom:10px;font-size:12px;line-height:1.7">
+    ⚠️ <strong>Total importado não bate com o total do extrato</strong><br>
+    O extrato declara <strong>${fmtBRL(declared)}</strong>, mas os ativos importados somam <strong>${fmtBRL(computed)}</strong>
+    (diferença: <strong style="color:var(--red)">${sign}${fmtBRL(delta)}</strong>) — provavelmente falta algum ativo que o app não reconheceu automaticamente.
+    <br>Use <strong>"+ Inserir dados manualmente"</strong> (abaixo da tabela) pra lançar o que estiver faltando, ou confira se alguma seção do arquivo não apareceu na lista acima.
+  </div>`;
+}
+
 function renderBrokerPreview(parsed) {
   const { month, assets, caixaValue, broker } = parsed;
   const preview = G('broker-preview');
@@ -10175,6 +10248,7 @@ function renderBrokerPreview(parsed) {
         </span>
       </div>
       ${brokerZeroAssetsDebugHtml(totalAtivos, parsed)}
+      ${brokerCompletenessCheckHtml(parsed)}
       ${warnHtml}
       <div class="tbl-outer" style="max-height:420px;overflow-x:auto">
         <table class="ledger" style="min-width:720px">

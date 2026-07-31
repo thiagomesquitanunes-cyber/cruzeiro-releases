@@ -12,6 +12,74 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-31 — v4.85.7: corrige seção Renda Variável (BDR/Fundos Listados sumindo) + checagem de completude (total declarado vs. importado)
+
+### O quê
+Usuário testou o mesmo arquivo BTG (`BTG_RIC_JAN_26.xlsx`, já corrigido
+na v4.85.6) e reportou que a aba "Renda Variável" só trouxe as Ações —
+BDR's e Fundos Listados, que também estão nessa mesma aba, não vieram, e
+o app não avisou nada (falha silenciosa). Ele também pediu, com razão,
+que o app pare de falhar silenciosamente: comparar o total que CADA
+extrato já declara (BTG: aba Sumário; XP: "este é o seu patrimônio") com
+a soma do que foi de fato importado, e avisar quando não bater.
+
+### Causa raiz (Renda Variável)
+A aba Renda Variável da BTG intercala posição e movimentação POR TIPO de
+ativo — não é "todas as posições primeiro, todas as movimentações
+depois": a ordem real é Posição>Ações, Movimentação>Ações, Posição>BDR's,
+Posição>Fundos Listados, Movimentação>Fundos Listados. O código cortava
+o loop de posições no primeiro marcador "Movimentação" encontrado (que
+aparece logo depois de Ações) — tudo que vem depois (BDR's, Fundos
+Listados) nunca era escaneado.
+
+### Fix (Renda Variável)
+Reescrevi o loop pra rastrear o modo atual (posição/movimentação) pelos
+próprios cabeçalhos de seção em vez de um corte fixo — a intercalação
+deixa de importar. Também adicionei reconhecimento explícito de "BDR" e
+"Fundos Listados" como subtipos (antes caíam ambos genericamente como
+"FII"). Testado contra o arquivo real: Renda Variável foi de 10 pra 14
+ativos (2 BDR's + 2 Fundos Listados a mais), sem regressão no extrato de
+abril que já funcionava (continua 2/2).
+
+### Checagem de completude (novo)
+Adicionado `declaredTotal` aos parsers da BTG (extraído da aba Sumário,
+coluna "Saldo Líquido" do mês corrente) e da XP (extraído da célula
+"<nome>, este é o seu patrimônio" + valor na linha de baixo). Nova
+`brokerCompletenessCheckHtml()` compara esse valor contra a soma dos
+ativos + caixa efetivamente importados e mostra um aviso destacado
+(com o valor da diferença) quando não bate, apontando o usuário pro
+botão "+ Inserir dados manualmente" já existente. Verificado contra os
+3 arquivos reais disponíveis:
+- BTG abril (extrato "completo"): declarado R$ 934.437,30 = importado
+  R$ 934.437,30 — diferença zero, sem aviso falso-positivo.
+- BTG janeiro (mesmo arquivo do bug): mesmo após o fix de Renda
+  Variável, ainda falta R$ 18.726,70 — bate EXATAMENTE com a linha
+  "Valores em Trânsito" do Sumário, uma categoria que a BTG expõe numa
+  aba própria (`Valores em Trânsito`) que o parser ainda não lê. Antes
+  dessa mudança, isso simplesmente desaparecia sem aviso; agora o app
+  avisa a diferença exata.
+- XP (extrato de posição próprio): declarado R$ 395.347,95 vs. importado
+  R$ 388.196,06 (diferença ~R$ 7.151,89, causa ainda não investigada).
+
+### Pendências conhecidas (não resolvidas nesta versão)
+- BTG: aba "Valores em Trânsito" ainda não tem parser dedicado — hoje
+  vira aviso de diferença, não importação automática.
+- XP: causa da diferença de ~R$7.151 ainda não investigada.
+- A parte de "ensinar o app onde achar a célula" (auto-aprendizado por
+  coordenada, pedida pelo usuário) NÃO foi implementada — coordenadas de
+  célula são frágeis (já vimos a BTG variar o layout entre exportações
+  do mesmo relatório), então antes de construir isso vale alinhar um
+  design mais robusto com o usuário em vez de implementar às cegas.
+
+### Arquivos
+- `src/renderer.js` — `parseBTGBroker()`: loop de Renda Variável
+  reescrito, `declaredTotal` na extração do Sumário. `parseXPBroker()`:
+  nova extração de `declaredTotal`. Novo
+  `brokerCompletenessCheckHtml()`, chamado em `renderBrokerPreview()`.
+- `package.json` — 4.85.6 → 4.85.7.
+
+---
+
 ## 2026-07-30 — v4.85.6: corrige bug real "0 ativos" na importação BTG — variação de layout de coluna no extrato
 
 ### O quê
