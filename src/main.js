@@ -34,6 +34,10 @@ const cryptoUtils = require('./sync/crypto-utils');
 
 // Estado do sync (em memória)
 let _syncRunning = false;
+// Promise do sync em andamento — permite que outro ponto do código (o
+// handler de fechamento do app) ESPERE um sync já em curso terminar em vez
+// de só checar a flag e desistir. Ver uso em 'before-quit'.
+let _syncPromise = null;
 
 // ── Multi-usuário (mesmo desktop) ──
 // Cada usuário cadastrado tem seu próprio conjunto de arquivos (banco,
@@ -2918,13 +2922,28 @@ app.whenReady().then(async () => {
 // visível, só terminando se o processo fosse morto manualmente. Com a
 // flag, a segunda (e demais) chamada de 'before-quit' cai direto no early
 // return e deixa o quit seguir de verdade.
+//
+// Antes, se já houvesse um sync em andamento no momento do fechamento (ex:
+// o de 'startup', que roda toda vez que o app abre), este handler apenas
+// desistia (`_syncRunning` true → early return, sem preventDefault) e o
+// processo terminava imediatamente — matando a requisição em andamento no
+// meio E sem rodar nenhum sync próprio depois. Resultado real reportado:
+// abrir o app, editar algo rapidamente e fechar em seguida (antes do sync
+// de abertura terminar) fazia a edição nunca chegar ao Supabase — só
+// aparecia no mobile depois de reabrir o Desktop. Agora, em vez de
+// desistir, esperamos o sync já em andamento terminar e SÓ ENTÃO rodamos
+// o sync final de 'quit' (que revalida os hashes e reenvia qualquer coisa
+// editada durante ou depois daquele sync em andamento).
 let _quitFinalizing = false;
 app.on('before-quit', async (e) => {
   if (_quitFinalizing) return;
-  if (!sb.isLoggedIn() || _syncRunning) return;
+  if (!sb.isLoggedIn()) return;
   _quitFinalizing = true;
   e.preventDefault();
-  try { await runMobileSync('quit'); } catch (err) { console.error('[sync] before-quit:', err); }
+  try {
+    if (_syncRunning && _syncPromise) await _syncPromise.catch(() => {});
+    await runMobileSync('quit');
+  } catch (err) { console.error('[sync] before-quit:', err); }
   app.quit();
 });
 app.on('window-all-closed', () => { console.log('[window-all-closed] platform=', process.platform, '_loggingIn=', _loggingIn); if (process.platform!=='darwin' && !_loggingIn) app.quit(); });
@@ -8080,6 +8099,7 @@ async function runMobileSync(trigger = 'manual') {
 
   _syncRunning = true;
   console.log(`[sync] iniciando (trigger: ${trigger})`);
+  _syncPromise = (async () => {
 
   try {
     const userId = sb.getUserId();
@@ -8099,8 +8119,15 @@ async function runMobileSync(trigger = 'manual') {
   } catch (e) {
     console.error('[sync] erro geral:', e.message);
     return { ok: false, error: e.message };
+  }
+
+  })();
+
+  try {
+    return await _syncPromise;
   } finally {
     _syncRunning = false;
+    _syncPromise = null;
   }
 }
 

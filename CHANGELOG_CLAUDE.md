@@ -12,6 +12,63 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-31 (4) — v4.85.10: fix — edição feita logo após abrir o app podia não chegar ao Supabase ao fechar
+
+### Relato do usuário
+"Está faltando um sync com o Supabase ao final da sessão (antes de fechar o
+app). hoje atualizei alguns dados, fechei o app, e, ao abrir o mobile, as
+mudanças não estavam lá. Só apareceram quando abri novamente o desktop."
+
+### Investigação
+O sync final ao fechar (`app.on('before-quit', ...)`) já existia desde a
+correção do loop infinito em 2026-07-20 (ver entrada abaixo) e continuava
+funcionando no caso comum — validado ao vivo nesta sessão fechando a janela
+normalmente (`CloseMainWindow`) e conferindo o log: exatamente 1 ciclo de
+sync com `trigger: 'quit'`, processo terminou sozinho, sem regressão.
+
+O bug real estava numa condição de corrida diferente: o handler tinha
+`if (!sb.isLoggedIn() || _syncRunning) return;` — ou seja, se JÁ houvesse
+outro sync em andamento no momento exato de fechar (o único outro gatilho
+automático é o de `'startup'`, disparado toda vez que o app abre e que leva
+alguns segundos pra completar pull+push de ~10 tabelas), o handler
+simplesmente desistia: nem esperava aquele sync terminar, nem rodava um
+sync próprio depois — só deixava o `app.quit()` seguir, o que MATA
+imediatamente qualquer requisição de rede ainda em andamento.
+
+Cenário real: abrir o app, editar algo rapidamente (ex: corrigir um saldo)
+e fechar em seguida, antes do sync de abertura terminar. A edição nunca
+chegava ao Supabase (nem pelo sync de startup, interrompido no meio, nem
+por nenhum sync depois) — só aparecia no mobile na próxima vez que o
+Desktop fosse aberto (quando o sync de `'startup'` seguinte, dessa vez sem
+concorrência, rodava até o fim).
+
+### Correção
+`runMobileSync()` agora guarda a Promise da execução em andamento em
+`_syncPromise` (variável em memória, ao lado de `_syncRunning`). O handler
+de `before-quit` deixou de desistir quando `_syncRunning` é `true`: agora
+sempre faz `preventDefault()` (se logado), espera a Promise do sync em
+andamento terminar (`await _syncPromise`, com fallback silencioso se ela
+falhar) e SÓ ENTÃO roda seu próprio `runMobileSync('quit')` — que revalida
+os hashes por tabela e reenvia qualquer coisa editada durante ou depois
+daquele sync que já estava rodando. A flag `_quitFinalizing` (do fix de
+2026-07-20) continua intacta, evitando qualquer risco de reintroduzir o
+loop infinito.
+
+### Validado ao vivo
+`npm start`, deixei o sync de `'startup'` completar normalmente e fechei a
+janela via `CloseMainWindow()` (equivalente a clicar no X) — log mostrou
+`window-all-closed` → `[sync] iniciando (trigger: quit)` → conclusão com
+sucesso → processo `electron.exe` encerrado sozinho, sem sobra. Não foi
+possível forçar deliberadamente a janela exata da corrida (sync de startup
+ainda em andamento) neste teste, mas a correção em si é uma sequenciação
+direta de Promise, sem lógica condicional nova — a mudança de
+comportamento é: "esperar" no lugar de "desistir".
+
+**Arquivo tocado**: `src/main.js` (`runMobileSync()`, handler
+`app.on('before-quit', ...)`).
+
+---
+
 ## 2026-07-31 (3) — v4.85.9: nome de corretora customizado por conta na importação (ex: "BTG 1"/"BTG 2")
 
 ### O quê
