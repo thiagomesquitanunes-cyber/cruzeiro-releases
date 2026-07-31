@@ -4055,6 +4055,22 @@ ipcMain.handle('broker:account-pref-set', (_, { broker, accountId }) => {
   saveSettings(s);
   return { ok: true };
 });
+// Rótulo de "corretora" (livre, ex: "BTG 1"/"BTG 2") que o usuário quer
+// atribuir aos ativos NOVOS criados a partir desta importação — guardado
+// por conta de investimentos (não por corretora nativa), já que é a
+// conta quem distingue duas contas diferentes na mesma corretora.
+ipcMain.handle('broker:label-pref-get', (_, { accountId }) => {
+  const s = loadSettings();
+  return (s.brokerLabelPrefs || {})[accountId] || null;
+});
+ipcMain.handle('broker:label-pref-set', (_, { accountId, label }) => {
+  if (!accountId) return { ok: true }; // sem conta selecionada, não há chave estável pra guardar
+  const s = loadSettings();
+  if (!s.brokerLabelPrefs) s.brokerLabelPrefs = {};
+  s.brokerLabelPrefs[accountId] = label;
+  saveSettings(s);
+  return { ok: true };
+});
 ipcMain.handle('broker:mapping-learn', (_, { broker, original, mapped }) => {
   const m = loadBrokerMappings();
   if (!m[broker]) m[broker] = {};

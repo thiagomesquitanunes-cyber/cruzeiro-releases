@@ -1451,12 +1451,16 @@ select.inp option{background:var(--bg2);}
     <div class="import-section" id="broker-section" style="display:none">
       <h3>Importar extrato de corretora</h3>
       <div id="broker-selected-label" style="font-size:13px;color:var(--text2);margin-bottom:10px;min-height:20px"></div>
-      <div class="field-row" style="max-width:480px;margin-bottom:12px">
-        <div class="field" style="margin:0">
+      <div class="field-row" style="max-width:700px;margin-bottom:12px;display:flex;gap:12px;flex-wrap:wrap">
+        <div class="field" style="margin:0;flex:1;min-width:220px">
           <label class="lbl">Conta de investimentos (ajuste de saldo)</label>
-          <select class="inp" id="broker-account">
+          <select class="inp" id="broker-account" onchange="onBrokerAccountChanged()">
             <option value="">— Não criar ajuste —</option>
           </select>
+        </div>
+        <div class="field" style="margin:0;flex:1;min-width:220px">
+          <label class="lbl" title="Usado no campo &quot;Corretora&quot; de qualquer ativo NOVO criado por esta importação — não altera ativos já existentes. Útil pra distinguir duas contas na mesma corretora (ex: &quot;BTG 1&quot; e &quot;BTG 2&quot;).">Nome da corretora (ativos novos) ⓘ</label>
+          <input class="inp" id="broker-label" placeholder="Ex: BTG 1, BTG 2..." autocomplete="off">
         </div>
       </div>
       <div id="broker-file-trigger" class="file-dropzone" style="display:none"

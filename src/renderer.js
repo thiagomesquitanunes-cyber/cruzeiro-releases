@@ -7741,6 +7741,27 @@ document.addEventListener('click', e => {
 
 let _brokerBuffer = null;
 let _selectedBroker = null;
+let _brokerDefaultLabel = ''; // nome de exibição padrão da corretora selecionada (ex: "BTG Pactual")
+                               // — usado como valor-padrão do campo "Nome da corretora" quando não
+                               // há rótulo customizado salvo pra conta selecionada.
+
+// Roda quando o usuário troca a "Conta de investimentos" na tela de
+// importação de corretora — repopula o campo "Nome da corretora (ativos
+// novos)" com o rótulo já salvo pra ESSA conta (se houver), ou o nome
+// padrão da corretora nativa selecionada. O rótulo é salvo por CONTA
+// (não por corretora nativa), porque é a conta quem distingue duas
+// contas diferentes na mesma corretora — o caso de uso pedido pelo
+// usuário ("BTG 1" x "BTG 2").
+async function onBrokerAccountChanged() {
+  const labelInp = G('broker-label');
+  if (!labelInp) return;
+  const accountId = parseInt(G('broker-account')?.value) || null;
+  let pref = null;
+  if (accountId) {
+    try { pref = await ff.brokerLabelPrefGet({ accountId }); } catch(e) {}
+  }
+  labelInp.value = pref || _brokerDefaultLabel || '';
+}
 
 async function pickBroker(brokerId) {
   try {
@@ -7809,11 +7830,13 @@ async function pickBroker(brokerId) {
     await loadInvAssetsList();
 
     // Restore preferred account for this broker
+    _brokerDefaultLabel = name; // usado por onBrokerAccountChanged() como valor-padrão
     try {
       const pref = await ff.brokerAccountPrefGet({ broker: brokerId });
       const sel = G('broker-account');
       if (sel && pref) sel.value = String(pref);
     } catch(e) {}
+    await onBrokerAccountChanged(); // já popula o campo "Nome da corretora" pra conta restaurada acima
 
     // XP hint
     if (brokerId === 'xp_broker' && G('broker-result')) {
@@ -10766,6 +10789,24 @@ async function confirmBrokerImport() {
   // Persist account preference for this broker
   if (brokerAccountId && parsed.broker) {
     ff.brokerAccountPrefSet({ broker: _selectedBroker, accountId: brokerAccountId }).catch(() => {});
+  }
+
+  // Rótulo customizado de "corretora" (ex: "BTG 1"/"BTG 2") — só se aplica
+  // a ativos NOVOS (nome ainda não existe em nenhum ativo cadastrado, sob
+  // NENHUM broker). Ativos já conhecidos mantêm o broker original: mudar
+  // isso quebraria o casamento por nome+corretora que brokerSaveParsed()
+  // (main.js) usa pra decidir "é o mesmo ativo de antes" vs "é novo" — se
+  // sobrescrevesse o broker de um ativo já existente, a próxima
+  // importação criaria um ativo DUPLICADO em vez de atualizar o mesmo.
+  const brokerLabel = (G('broker-label')?.value || '').trim();
+  if (brokerLabel) {
+    const knownNames = new Set(_invAssetsList.map(a => norm(a.name)));
+    parsed.assets.forEach(a => {
+      if (!knownNames.has(norm(a.name))) a.broker = brokerLabel;
+    });
+  }
+  if (brokerAccountId && brokerLabel) {
+    ff.brokerLabelPrefSet({ accountId: brokerAccountId, label: brokerLabel }).catch(() => {});
   }
 
   try {

@@ -12,6 +12,65 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-31 (3) — v4.85.9: nome de corretora customizado por conta na importação (ex: "BTG 1"/"BTG 2")
+
+### O quê
+Pedido do usuário: na tela de importação de extrato de corretora, além
+do campo "Conta de investimentos (ajuste de saldo)" que já existia,
+adicionar um campo pra digitar o nome que ele quer atribuir ao campo
+"Corretora" dos ativos NOVOS criados por aquela importação. Caso de uso:
+duas contas diferentes na mesma corretora (ex: "BTG 1" e "BTG 2") — hoje
+o parser sempre gravava o nome fixo da corretora nativa ("BTG"/"XP") em
+todo ativo novo, sem jeito de diferenciar de qual conta ele veio.
+
+### Como funciona
+Novo campo "Nome da corretora (ativos novos)" ao lado do seletor de
+conta. Ao confirmar a importação, esse rótulo só é aplicado a ativos
+CUJO NOME AINDA NÃO EXISTE em nenhum ativo cadastrado (sob nenhum
+broker) — ativos já conhecidos mantêm o broker original. Isso é
+proposital: `broker:save-parsed` (main.js) casa "é o mesmo ativo de
+antes" por nome+corretora — se o rótulo sobrescrevesse o broker de um
+ativo já existente, a importação seguinte criaria um ativo DUPLICADO em
+vez de atualizar o mesmo (uma migração retroativa pra ativos antigos, se
+o usuário quiser, continua sendo manual — editar o campo "Corretora" na
+tela do ativo).
+
+O rótulo é lembrado por CONTA de investimentos (não pela corretora
+nativa) — é a conta quem distingue "BTG 1" de "BTG 2"; ao trocar a conta
+selecionada, o campo já pré-preenche com o rótulo salvo daquela conta
+(ou o nome padrão da corretora nativa, se nunca foi customizado).
+
+### Ressalva conhecida (documentada, não resolvida)
+Ativos "agregados tipo caixa" (Valores em Caixa da Conta Corrente,
+Valores em Trânsito) são casados por nome+broker EXATOS (cada corretora
+tem seu próprio saldo — ver comentário em `broker:save-parsed`). Se o
+usuário usar duas contas do MESMO broker nativo e uma delas já tinha
+gerado esse tipo de ativo ANTES desta feature existir (com broker
+padrão "BTG", sem rótulo), o rótulo customizado da segunda conta só se
+aplica corretamente se o nome ainda não existir sob nenhum broker — em
+cenários combinando "conta antiga sem rótulo" + "conta nova com rótulo"
+pro mesmo tipo de ativo agregado, pode exigir ajuste manual pontual.
+Não é o caso de uso principal (ativos com nome/ticker próprio, que é
+onde o pedido do usuário se aplica), mas fica registrado pra não
+reabrir a investigação à toa numa sessão futura.
+
+### Arquivos
+- `src/index.html` — novo input `#broker-label` ao lado de
+  `#broker-account`, com `onchange="onBrokerAccountChanged()"` no
+  seletor de conta.
+- `src/renderer.js` — `_brokerDefaultLabel`, nova
+  `onBrokerAccountChanged()`, `pickBroker()` chama ela ao restaurar a
+  conta preferida, `confirmBrokerImport()` aplica o rótulo a ativos
+  novos e persiste a preferência por conta.
+- `src/main.js` — `broker:label-pref-get`/`broker:label-pref-set`
+  (guardados em `settings.brokerLabelPrefs`, por accountId).
+- `src/preload.js` — `brokerLabelPrefGet`/`brokerLabelPrefSet`.
+- `package.json` — 4.85.8 → 4.85.9.
+
+Verificado com `node --check` nos 3 arquivos.
+
+---
+
 ## 2026-07-31 (2) — v4.85.8: aba "Valores em Trânsito" da BTG + fluxo de aprendizado por texto-âncora
 
 ### O quê
