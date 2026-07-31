@@ -4063,6 +4063,44 @@ ipcMain.handle('broker:mapping-learn', (_, { broker, original, mapped }) => {
   return { ok: true };
 });
 
+// ── Broker "learned items" — valores que o parser embutido não sabe
+// localizar sozinho (ex: uma aba/categoria nova que a corretora passou a
+// expor), ensinados pelo usuário por TEXTO-ÂNCORA (não coordenada de
+// célula) — o texto é reencontrado por busca a cada importação futura,
+// então sobrevive a variações de layout entre exportações do mesmo
+// relatório (já vimos a BTG mudar isso mais de uma vez). Arquivo separado
+// de _broker_mappings.json de propósito — formato diferente, evita
+// qualquer risco de migração no arquivo já em uso.
+function getBrokerLearnedItemsPath() {
+  const settings = loadSettings();
+  const base = settings.dataDir
+    ? settings.dataDir
+    : (app.isPackaged ? app.getPath('userData') : path.join(__dirname, '..'));
+  if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true });
+  return path.join(base, '_broker_learned_items.json');
+}
+function loadBrokerLearnedItems() {
+  try { return JSON.parse(fs.readFileSync(getBrokerLearnedItemsPath(), 'utf8')); } catch(e) { return {}; }
+}
+function saveBrokerLearnedItems(m) {
+  fs.writeFileSync(getBrokerLearnedItemsPath(), JSON.stringify(m, null, 2));
+}
+ipcMain.handle('broker:learned-items-get', () => loadBrokerLearnedItems());
+ipcMain.handle('broker:learned-item-save', (_, { broker, item }) => {
+  const m = loadBrokerLearnedItems();
+  if (!m[broker]) m[broker] = [];
+  const idx = m[broker].findIndex(it => it.id === item.id);
+  if (idx >= 0) m[broker][idx] = item; else m[broker].push(item);
+  saveBrokerLearnedItems(m);
+  return { ok: true };
+});
+ipcMain.handle('broker:learned-item-delete', (_, { broker, id }) => {
+  const m = loadBrokerLearnedItems();
+  if (m[broker]) m[broker] = m[broker].filter(it => it.id !== id);
+  saveBrokerLearnedItems(m);
+  return { ok: true };
+});
+
 // ── Custom bank parsers config ──
 function getBankParsersPath() {
   const settings = loadSettings();

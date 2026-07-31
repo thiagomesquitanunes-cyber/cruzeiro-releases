@@ -12,6 +12,85 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-31 (2) — v4.85.8: aba "Valores em Trânsito" da BTG + fluxo de aprendizado por texto-âncora
+
+### O quê
+Duas frentes pedidas pelo usuário depois da v4.85.7:
+1. Implementar de verdade a aba "Valores em Trânsito" da BTG (até aqui só
+   virava aviso de diferença, sem importar automaticamente).
+2. Construir o fluxo de "ensinar onde encontrar" um valor que falta, "da
+   forma mais robusta" — não por coordenada de célula (já vimos a BTG
+   variar isso 2x nesta mesma investigação), e sim por busca de conteúdo.
+
+### 1. Aba "Valores em Trânsito" (BTG)
+São proventos (dividendos/JCP) já declarados pela empresa mas ainda não
+creditados na conta — uma tabela de lançamentos individuais com um total
+no fim. Não são posições negociáveis próprias (os nomes na descrição são
+do papel que gerou o provento, já listado em Renda Variável) — por isso
+entra como UM ativo agregado, categoria `valor_em_caixa` (mesmo padrão do
+`caixaValue`/Conta Corrente): é dinheiro a caminho, não uma posição.
+Resultado: o extrato de janeiro que motivou toda essa investigação agora
+bate EXATO — declarado R$ 7.441.763,67 = importado R$ 7.441.763,67,
+diferença zero (antes: -R$ 18.726,70).
+
+### 2. Fluxo de aprendizado por texto-âncora
+Novo botão "🔧 Ensinar onde encontrar" no aviso de diferença
+(`brokerCompletenessCheckHtml`). Fluxo:
+- Usuário digita um texto que reconhece perto do valor faltante (um
+  rótulo, nome de seção, ou só "Total").
+- `findValueByAnchor()` procura esse texto em TODAS as abas do arquivo
+  (ou só na sugerida) e retorna candidatos: todo número encontrado à
+  direita (mesma linha) e abaixo (mesma coluna) da célula que bate — não
+  só o primeiro. Isso importa de verdade: tabelas comparativas tipo
+  "Sumário" têm vários meses lado a lado na mesma linha, e testar contra
+  o arquivo real mostrou que pegar só "o primeiro número" pegava o mês
+  ERRADO (dezembro em vez de janeiro) — corrigido pra listar TODAS as
+  colunas como candidatos separados, com o usuário escolhendo qual é a
+  certa.
+- Usuário escolhe o valor certo, classifica (categoria/tipo), salva.
+- `applyLearnedBrokerItems()` reaplica automaticamente em importações
+  futuras — refazendo a MESMA busca por texto (não por coordenada), então
+  sobrevive a mudanças de layout entre exportações do mesmo relatório.
+  Aplicado imediatamente na importação atual também (não precisa
+  reimportar pra ver o resultado).
+
+Persistido num arquivo novo (`_broker_learned_items.json`, separado de
+`_broker_mappings.json` — sem risco de migração no que já existe).
+
+### Investigação da diferença na XP (não era bug)
+A checagem de completude também apontou uma diferença de ~R$ 7.151 na
+XP. Investigando com o `findValueByAnchor()` recém-criado (testado contra
+`Posicao XP.xlsx` + `Extrato XP.xlsx` reais, mesmo `Data da consulta`):
+o parser da XP já prioriza de propósito a coluna "Valor líquido" sobre
+"Posição" quando ambas existem (lógica pré-existente, comentário no
+código já explicava a intenção) — FIPs/fundos alternativos frequentemente
+têm custo de resgate antecipado, e "Valor líquido" reflete isso, "Posição"
+não. A diferença bate com essa distinção bruto vs. líquido, não com um
+bug de parsing. Deixei registrado aqui pra não reabrir essa investigação
+à toa numa sessão futura.
+
+### Arquivos
+- `src/renderer.js` — `parseBTGBroker()`: nova seção "Valores em
+  Trânsito". Novo `findValueByAnchor()`, `applyLearnedBrokerItems()`,
+  `openBrokerLearnModal()` + funções de UI (`renderBrokerLearnStep1/2`,
+  `_blSearch`, `_blRenderResults`, `_blPick`, `_blCatChanged`, `_blSave`).
+  `_brokerLearnedItems` (cache, carregado em `loadInvAssetsList()`).
+  `brokerCompletenessCheckHtml()`: botão "Ensinar onde encontrar".
+  `processBrokerFile()`/`showXPBrokerWizard()`: chamam
+  `applyLearnedBrokerItems()` e anexam `parsed._teachBuffer`.
+- `src/main.js` — `getBrokerLearnedItemsPath()`,
+  `loadBrokerLearnedItems()`, `saveBrokerLearnedItems()`, handlers
+  `broker:learned-items-get/-save/-delete`.
+- `src/preload.js` — `brokerLearnedItemsGet/Save/Delete`.
+- `package.json` — 4.85.7 → 4.85.8.
+
+Verificado com `node --check` nos 3 arquivos e testes isolados
+(`findValueByAnchor` contra os arquivos reais da BTG e da XP — validado
+que agora retorna as 4 colunas do Sumário como candidatos separados, não
+só a primeira).
+
+---
+
 ## 2026-07-31 — v4.85.7: corrige seção Renda Variável (BDR/Fundos Listados sumindo) + checagem de completude (total declarado vs. importado)
 
 ### O quê

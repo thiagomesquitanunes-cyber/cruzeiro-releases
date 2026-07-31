@@ -7872,6 +7872,8 @@ async function processBrokerFile(file) {
     if (_selectedBroker === 'btg_broker') {
       G('broker-result').innerHTML = '<div class="info-box">⏳ Lendo extrato…</div>';
       parsed = parseBTGBroker(_brokerBuffer);
+      applyLearnedBrokerItems(_brokerBuffer, 'BTG', parsed);
+      parsed._teachBuffer = _brokerBuffer; // usado por openBrokerLearnModal() pra reler o arquivo original
     } else if (_selectedBroker === 'xp_broker') {
       // XP needs two files — showXPBrokerWizard handles display and parsing
       G('broker-result').innerHTML = '';
@@ -8364,6 +8366,38 @@ function parseBTGBroker(buffer) {
     }
   }
 
+  // ── 5.5 Valores em Trânsito ──
+  // Proventos (dividendos/JCP) já declarados pela empresa mas ainda não
+  // creditados na conta — a BTG lista como uma tabela de lançamentos
+  // individuais numa aba própria, com um total no fim. Não são posições
+  // negociáveis com nome/quantidade próprios (os nomes na descrição são só
+  // do papel que gerou o provento, já listado em Renda Variável) — por
+  // isso entra como UM único ativo agregado, tipo "caixa" (mesmo padrão de
+  // `caixaValue`/Conta Corrente): é dinheiro a caminho, não uma posição.
+  const vtWs = wb.Sheets['Valores em Trânsito'];
+  if (vtWs) {
+    const rows = XLSX.utils.sheet_to_json(vtWs, { header:1, defval:null, raw:true });
+    const off = detectColOffset(rows), sc = n => n - 1 + off;
+    let total = null;
+    for (const row of rows) {
+      if (norm(String(row[sc(1)]||'')) === 'total') {
+        // Valor fica na primeira coluna numérica à direita do rótulo
+        // "Total" — não assume índice fixo (varia conforme a seção: aqui é
+        // só 1 coluna à frente do rótulo, mas não custa ser tolerante).
+        for (let ci = sc(1)+1; ci < row.length; ci++) {
+          if (typeof row[ci] === 'number') { total = row[ci]; break; }
+        }
+        break;
+      }
+    }
+    if (total != null && total !== 0) {
+      result.assets.push({
+        name: 'Valores em Trânsito', category: 'valor_em_caixa', inv_type: 'Valores em Trânsito',
+        broker: 'BTG', valor: total, movimentacoes: [],
+      });
+    }
+  }
+
   // ── 6. Conta Corrente ──
   result.nonAssetMovements = [];
   const ccWs = wb.Sheets['Conta Corrente'];
@@ -8476,6 +8510,8 @@ function showXPBrokerWizard(buffer, fileName) {
     setTimeout(() => {
       try {
         const parsed = parseXPBroker(_xpBuffers.posicao.buf, _xpBuffers.extrato.buf);
+        applyLearnedBrokerItems(_xpBuffers.posicao.buf, 'XP', parsed);
+        parsed._teachBuffer = _xpBuffers.posicao.buf; // usado por openBrokerLearnModal() pra reler o arquivo original
         _xpBuffers = {};
         G('broker-result').innerHTML = '';
         renderBrokerPreview(parsed);
@@ -9721,9 +9757,12 @@ let _invAssetsList = [];
 let _brokerMappings = {};      // {broker: {originalName: mappedName}} — exato, como salvo em disco
 let _brokerMappingsNorm = {};  // {broker: {norm(originalName): mappedName}} — tolerante a
                                 // diferença de acentuação/maiúsculas/espaços entre extratos
+let _brokerLearnedItems = {};  // {broker: [{id, anchorText, sheet, direction, assetName, category, invType}]}
+                                // — ver findValueByAnchor()/applyLearnedBrokerItems() mais abaixo.
 async function loadInvAssetsList() {
   try { _invAssetsList = await ff.invAssetsList() || []; } catch(e) { _invAssetsList = []; }
   try { _brokerMappings = await ff.brokerMappingsGet() || {}; } catch(e) { _brokerMappings = {}; }
+  try { _brokerLearnedItems = await ff.brokerLearnedItemsGet() || {}; } catch(e) { _brokerLearnedItems = {}; }
   _brokerMappingsNorm = {};
   Object.entries(_brokerMappings).forEach(([broker, map]) => {
     _brokerMappingsNorm[broker] = {};
@@ -9732,6 +9771,249 @@ async function loadInvAssetsList() {
     });
   });
 }
+
+// Procura, em TODAS as abas de uma pasta de trabalho já lida pelo XLSX (ou
+// só na aba sugerida primeiro, se houver), qualquer célula cujo texto
+// contenha `anchorText` (comparação tolerante a acento/maiúsculas) — e, pra
+// cada ocorrência, o primeiro valor NUMÉRICO à direita (mesma linha) e
+// abaixo (mesma coluna), pulando células vazias. Retorna uma lista de
+// candidatos (pode ter mais de um, se o texto aparecer em mais de um
+// lugar) — quem decide qual é o certo é o usuário, vendo aba+valor de
+// cada um. Busca por CONTEÚDO, não coordenada — sobrevive a mudanças de
+// layout entre exportações do mesmo relatório (a BTG já mudou isso mais
+// de uma vez nesta mesma investigação).
+function findValueByAnchor(wb, anchorText, sheetHint) {
+  const target = norm(anchorText || '');
+  if (!target) return [];
+  const order = (sheetHint && wb.Sheets[sheetHint])
+    ? [sheetHint, ...wb.SheetNames.filter(s => s !== sheetHint)]
+    : wb.SheetNames;
+  const candidates = [];
+  for (const sheetName of order) {
+    const ws = wb.Sheets[sheetName];
+    if (!ws) continue;
+    const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:null, raw:true });
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r] || [];
+      for (let c = 0; c < row.length; c++) {
+        const cell = row[c];
+        if (cell == null || typeof cell === 'number') continue;
+        if (!norm(String(cell)).includes(target)) continue;
+        const matchedText = String(cell).trim();
+        // À direita (mesma linha): coleta TODOS os números até a próxima
+        // célula de texto, não só o primeiro — tabelas comparativas (ex:
+        // "Sumário" com vários meses lado a lado) têm mais de um valor na
+        // mesma linha, e quem decide qual coluna é a certa é o usuário.
+        // `valueIndex` (0, 1, 2...) marca a posição entre os números
+        // encontrados — usado depois pra reencontrar o MESMO valor numa
+        // reimportação futura, mesmo que a célula em si mude de lugar.
+        let vi = 0;
+        for (let cc = c+1; cc < row.length; cc++) {
+          if (typeof row[cc] === 'number') {
+            candidates.push({ sheet: sheetName, matchedText, direction: 'right', value: row[cc], valueIndex: vi });
+            vi++;
+          } else if (row[cc] != null && row[cc] !== '') break;
+        }
+        // Abaixo (mesma coluna): idem, algumas linhas seguintes.
+        vi = 0;
+        for (let rr = r+1; rr < Math.min(rows.length, r+8); rr++) {
+          const v = (rows[rr]||[])[c];
+          if (typeof v === 'number') {
+            candidates.push({ sheet: sheetName, matchedText, direction: 'below', value: v, valueIndex: vi });
+            vi++;
+          } else if (v != null && v !== '') break;
+        }
+      }
+    }
+    if (candidates.length && sheetHint === sheetName) break; // achou na aba sugerida — não precisa nas outras
+  }
+  return candidates;
+}
+
+// Aplica os itens já ensinados (persistidos) a um `parsed` recém-gerado —
+// chamado logo após parseBTGBroker()/parseXPBroker() em processBrokerFile()/
+// showXPBrokerWizard(). Não depende do `wb` interno do parser (que não é
+// exposto) — relê o buffer aqui mesmo, custo desprezível pra um XLSX desse
+// tamanho.
+function applyLearnedBrokerItems(buffer, broker, parsed) {
+  const items = (_brokerLearnedItems && _brokerLearnedItems[broker]) || [];
+  if (!items.length || !parsed?.assets) return;
+  let wb;
+  try { wb = XLSX.read(buffer, { type:'array', cellDates:true }); } catch(e) { return; }
+  for (const item of items) {
+    if (parsed.assets.some(a => a._learnedId === item.id)) continue;
+    const candidates = findValueByAnchor(wb, item.anchorText, item.sheet);
+    const match = candidates.find(c => c.sheet === item.sheet && c.direction === item.direction && c.valueIndex === item.valueIndex)
+      || candidates.find(c => c.sheet === item.sheet && c.direction === item.direction)
+      || candidates[0];
+    if (!match) continue;
+    parsed.assets.push({
+      name: item.assetName, category: item.category, inv_type: item.invType,
+      broker, valor: match.value, movimentacoes: [], _learnedId: item.id,
+    });
+  }
+}
+
+// ── "Ensinar onde encontrar" — fluxo de aprendizado pra quando a
+// checagem de completude (ver brokerCompletenessCheckHtml) acusa uma
+// diferença. O usuário digita um texto que reconhece perto do valor
+// faltante, o app procura em todas as abas (findValueByAnchor), o usuário
+// escolhe o resultado certo entre os candidatos encontrados, classifica
+// (categoria/tipo) e salva — aplicado imediatamente nesta importação e
+// lembrado (por texto, não coordenada) pras próximas. Reusa o modal
+// genérico "custom-parser" (mesmo usado no assistente de corretora
+// personalizada), só trocando título/corpo/rodapé.
+let _brokerLearnUI = null;
+
+function openBrokerLearnModal(parsed) {
+  if (!parsed?._teachBuffer) { toast('Não foi possível abrir o ensino — reimporte o arquivo e tente de novo.'); return; }
+  let wb;
+  try { wb = XLSX.read(parsed._teachBuffer, { type:'array', cellDates:true }); }
+  catch(e) { toast('Erro ao reler o arquivo: ' + e.message); return; }
+  const declared = parsed.declaredTotal;
+  const computed = (parsed.assets||[]).reduce((s,a) => s + (a._removed ? 0 : (a.valor||0)), 0) + (parsed.caixaValue||0);
+  _brokerLearnUI = { parsed, wb, broker: parsed.broker, delta: computed - declared, candidates: [], selected: null, anchorText: '', sheetHint: '' };
+  renderBrokerLearnStep1();
+  openModal('modal-custom-parser');
+}
+
+function renderBrokerLearnStep1() {
+  const ui = _brokerLearnUI;
+  const sheetOptions = ui.wb.SheetNames.map(s => `<option value="${esc(s)}" ${s===ui.sheetHint?'selected':''}>${esc(s)}</option>`).join('');
+  G('custom-parser-title').textContent = '🔧 Ensinar onde encontrar o valor faltante';
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px">
+      Faltam <strong style="color:var(--red)">${fmtBRL(Math.abs(ui.delta))}</strong> pra bater com o total que o extrato declara.
+      Digite um texto que aparece perto desse valor no arquivo original (um rótulo, nome de categoria, ou até só "Total") — o app procura em todas as abas e mostra os valores encontrados perto dele.
+    </div>
+    <div class="field">
+      <label class="lbl">Aba (opcional — só ajuda a achar mais rápido)</label>
+      <select class="inp" id="bl-sheet"><option value="">— procurar em todas —</option>${sheetOptions}</select>
+    </div>
+    <div class="field">
+      <label class="lbl">Texto pra procurar</label>
+      <input class="inp" id="bl-anchor" value="${esc(ui.anchorText)}" placeholder="Ex: Valores em Trânsito, Total, Provisão..." autocomplete="off">
+    </div>
+    <div id="bl-results" style="margin-top:10px"></div>
+  `;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="closeModal('modal-custom-parser')">Cancelar</button>
+    <button class="btn primary" onclick="window._blSearch()">🔍 Buscar</button>
+  `;
+  setTimeout(() => {
+    const inp = G('bl-anchor');
+    if (inp) { inp.focus(); inp.onkeydown = e => { if (e.key === 'Enter') window._blSearch(); }; }
+    if (ui.candidates.length) window._blRenderResults();
+  }, 30);
+}
+
+window._blSearch = function() {
+  const ui = _brokerLearnUI;
+  if (!ui) return;
+  const anchor = (G('bl-anchor')?.value || '').trim();
+  const sheetHint = G('bl-sheet')?.value || '';
+  if (!anchor) { toast('Digite um texto pra procurar'); return; }
+  ui.anchorText = anchor;
+  ui.sheetHint = sheetHint;
+  ui.candidates = findValueByAnchor(ui.wb, anchor, sheetHint || null);
+  window._blRenderResults();
+};
+
+window._blRenderResults = function() {
+  const ui = _brokerLearnUI;
+  const box = G('bl-results');
+  if (!ui || !box) return;
+  if (!ui.candidates.length) {
+    box.innerHTML = `<div class="warn-box" style="font-size:12px">Nenhum valor numérico encontrado perto desse texto. Tente outro texto (ex: só "Total"), ou use <strong>"+ Inserir dados manualmente"</strong> na tela de importação pra lançar à mão.</div>`;
+    return;
+  }
+  box.innerHTML = `
+    <div style="font-size:12px;color:var(--text3);margin-bottom:6px">${ui.candidates.length} resultado(s) — clique no valor certo:</div>
+    <div style="display:flex;flex-direction:column;gap:6px;max-height:220px;overflow-y:auto">
+      ${ui.candidates.map((c,i) => `
+        <button type="button" class="btn" style="text-align:left;display:flex;justify-content:flex-start" onclick="window._blPick(${i})">
+          <div style="display:flex;flex-direction:column;gap:2px">
+            <span style="font-weight:600;font-family:'DM Mono',monospace">${fmtBRL(c.value)}</span>
+            <span style="font-size:11px;color:var(--text3)">aba "${esc(c.sheet)}" · perto de "${esc(c.matchedText)}" · ${c.valueIndex+1}ª coluna ${c.direction === 'right' ? 'à direita' : 'abaixo'}</span>
+          </div>
+        </button>`).join('')}
+    </div>`;
+};
+
+window._blPick = function(idx) {
+  const ui = _brokerLearnUI;
+  if (!ui || !ui.candidates[idx]) return;
+  ui.selected = ui.candidates[idx];
+  renderBrokerLearnStep2();
+};
+
+function renderBrokerLearnStep2() {
+  const ui = _brokerLearnUI;
+  const c = ui.selected;
+  const CAT_OPTIONS = Object.entries(INV_CATEGORIES)
+    .filter(([k]) => k !== 'caixa') // 'caixa' e 'valor_em_caixa' são sinônimos — evita duplicar no dropdown
+    .map(([k,v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
+  G('custom-parser-title').textContent = '🔧 Como classificar esse valor?';
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px">
+      Valor encontrado: <strong style="font-family:'DM Mono',monospace">${fmtBRL(c.value)}</strong> (aba "${esc(c.sheet)}", perto de "${esc(c.matchedText)}")
+    </div>
+    <div class="field">
+      <label class="lbl">Nome do ativo</label>
+      <input class="inp" id="bl-name" value="${esc(c.matchedText)}">
+    </div>
+    <div class="field">
+      <label class="lbl">Categoria</label>
+      <select class="inp" id="bl-cat" onchange="window._blCatChanged()">${CAT_OPTIONS}</select>
+    </div>
+    <div class="field">
+      <label class="lbl">Tipo</label>
+      <select class="inp" id="bl-type"></select>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-top:8px">
+      A partir de agora, toda importação da ${esc(ui.broker)} vai procurar automaticamente por "${esc(ui.anchorText)}" e usar o mesmo critério — mesmo que o layout do arquivo mude de novo (busca por texto, não por posição da célula).
+    </div>
+  `;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="renderBrokerLearnStep1()">← Voltar</button>
+    <button class="btn primary" onclick="window._blSave()">✓ Salvar e aplicar</button>
+  `;
+  window._blCatChanged();
+}
+
+window._blCatChanged = function() {
+  const catSel = G('bl-cat'), typeSel = G('bl-type');
+  if (!catSel || !typeSel) return;
+  const types = INV_CATEGORIES[catSel.value]?.types || [];
+  typeSel.innerHTML = types.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+};
+
+window._blSave = async function() {
+  const ui = _brokerLearnUI;
+  if (!ui || !ui.selected) return;
+  const name = (G('bl-name')?.value || ui.selected.matchedText).trim();
+  const category = G('bl-cat')?.value || 'renda_fixa';
+  const invType = G('bl-type')?.value || '';
+  const item = {
+    id: 'learned-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    anchorText: ui.anchorText, sheet: ui.selected.sheet, direction: ui.selected.direction, valueIndex: ui.selected.valueIndex,
+    assetName: name, category, invType,
+  };
+  try {
+    await ff.brokerLearnedItemSave({ broker: ui.broker, item });
+    if (!_brokerLearnedItems[ui.broker]) _brokerLearnedItems[ui.broker] = [];
+    _brokerLearnedItems[ui.broker].push(item);
+  } catch(e) { toast('Erro ao salvar: ' + e.message); return; }
+
+  // Aplica já nesta importação — não precisa reimportar pra ver o resultado.
+  ui.parsed.assets.push({
+    name, category, inv_type: invType, broker: ui.broker,
+    valor: ui.selected.value, movimentacoes: [], _learnedId: item.id,
+  });
+  closeModal('modal-custom-parser');
+  toast('✓ Ensinado! Aplicado nesta importação e nas próximas.');
+  renderBrokerPreview(ui.parsed);
+};
 
 // Painel de diagnóstico exibido só quando a pré-visualização vem com 0
 // ativos — sem isso, "0 ativos encontrados" é uma caixa-preta pra um
@@ -9778,7 +10060,10 @@ function brokerCompletenessCheckHtml(parsed) {
     ⚠️ <strong>Total importado não bate com o total do extrato</strong><br>
     O extrato declara <strong>${fmtBRL(declared)}</strong>, mas os ativos importados somam <strong>${fmtBRL(computed)}</strong>
     (diferença: <strong style="color:var(--red)">${sign}${fmtBRL(delta)}</strong>) — provavelmente falta algum ativo que o app não reconheceu automaticamente.
-    <br>Use <strong>"+ Inserir dados manualmente"</strong> (abaixo da tabela) pra lançar o que estiver faltando, ou confira se alguma seção do arquivo não apareceu na lista acima.
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+      <button type="button" class="btn xs" onclick="openBrokerLearnModal(G('broker-preview')._parsed)">🔧 Ensinar onde encontrar</button>
+      <span style="font-size:11px;color:var(--text3);align-self:center">ou use "+ Inserir dados manualmente" (abaixo da tabela)</span>
+    </div>
   </div>`;
 }
 
