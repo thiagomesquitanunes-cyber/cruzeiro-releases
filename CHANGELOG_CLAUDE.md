@@ -12,6 +12,73 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-31 (5) — v4.85.11: importação de corretora — corretora obrigatória com dropdown, revisão de ativos novos, e melhorias nas movimentações não identificadas
+
+Três pedidos do usuário sobre o fluxo de importação de corretora, todos na mesma tela (`renderBrokerPreview`/`confirmBrokerImport` em `renderer.js`).
+
+### 1. Campo "Nome da corretora" virou dropdown obrigatório, sem valor pré-preenchido
+Era um `<input>` de texto livre, pré-preenchido automaticamente com o
+rótulo salvo pra conta (ou o nome padrão da corretora) — risco real de o
+usuário confirmar sem prestar atenção e atribuir o nome errado de
+corretora a ativos novos (pedido explícito do usuário: "não arriscar um
+preenchimento errado de corretora por falta de atenção").
+
+- `index.html`: `#broker-label` virou `<input list="broker-label-datalist">` + `<datalist id="broker-label-datalist">` — continua aceitando texto livre (nome de corretora novo), mas agora sugere as já usadas.
+- `renderer.js`: nova `populateBrokerLabelDatalist()` (lê `ff.invBrokersList()`, já existia como IPC mas não era usado na UI) — chamada em `pickBroker()`. `onBrokerAccountChanged()` não pré-preenche mais o valor — só o `placeholder` (dica visual, nunca vai junto do formulário sem o usuário confirmar). `confirmBrokerImport()` agora **bloqueia a importação** com um toast se o campo estiver vazio.
+
+### 2. Revisão de ativos "novos" antes de salvar — evita o ativo "fantasma"
+Relato do usuário: ao importar um novo mês, se o nome de um ativo mudasse
+sutilmente entre um extrato e outro (acento, abreviação, espaçamento), o
+app criava um ativo NOVO em vez de reconhecer que era o mesmo — o antigo
+ficava "fantasma" (nunca mais atualizado, repetindo o último valor pra
+sempre) e um novo nascia do zero. Causa raiz: `broker:save-parsed`
+(main.js) casa ativos por **nome exato** (case-insensitive); qualquer
+variação de texto vira um INSERT em vez de um UPDATE.
+
+Pedido: antes de criar, mostrar uma janela com os ativos que seriam
+criados como novos; se algum for parecido (nome + valor) com um já
+cadastrado, sugerir a confirmação de que é o mesmo — "sopesando valor e
+descrição... 99% das vezes".
+
+- `renderer.js`, novo bloco antes de `confirmBrokerImport()`:
+  - `scoreAssetSimilarity(name, value, existing, existingValue)` — generaliza `fuzzyMatchXPAsset` (que só existia dentro do parser da XP, comparando só nome) pra nome (sobreposição de tokens, 65% do peso) + valor (proximidade relativa, 35% do peso), usável fora do parsing.
+  - `reviewNewAssetsBeforeImport(parsed)` — roda dentro de `confirmBrokerImport()`, depois de todas as edições da tela já aplicadas e antes de `ff.brokerSaveParsed()`. Filtra os ativos sem correspondência exata em `_invAssetsList`; pra cada um, busca o último valor conhecido de cada ativo já cadastrado via `ff.invTxAll()` (mesma lógica de `_invAssetCurrentValue`, usada na aba Patrimônio) e calcula a melhor sugestão. Só abre a janela se houver pelo menos 1 candidato.
+  - `renderNewAssetReviewModal()` + `window._narConfirmMatch/_narConfirmNew/_narPickFromSelect/_narCancel/_narConfirmAll` — reaproveita o modal genérico `#modal-custom-parser` (mesmo shell já usado por `openBrokerLearnModal`/custom parser wizard). Cada linha: se há sugestão (score ≥ 0.55), botões "✓ É o mesmo" / "Não, é novo"; sempre disponível um `<select>` com TODOS os ativos cadastrados pra vincular manualmente, e "🆕 Confirmar novo". Ativos sem decisão explícita são criados como novos — comportamento idêntico ao de antes desta feature, nunca pior.
+  - Ao confirmar um "é o mesmo": renomeia `parsed.assets[i].name` pro nome do ativo existente (assim `broker:save-parsed` casa por nome exato = UPDATE, não INSERT) e chama `ff.brokerMappingLearn()` — mesmo mecanismo já usado quando o usuário renomeia manualmente na tabela — então a PRÓXIMA importação já reconhece sozinha, sem passar pela revisão de novo.
+  - `confirmBrokerImport()`: `const brokerLabel` movido pro topo da função (validação do item 1); a aplicação do rótulo customizado nos ativos novos (`a.broker = brokerLabel`) roda DEPOIS da revisão, então um ativo que acabou de ser vinculado a um existente (nome já bate) corretamente NÃO recebe o rótulo customizado — preserva o broker original, como o comentário já existente no código exigia.
+
+### 3. Movimentações não identificadas: dedup contra a conta + vínculo a qualquer ativo já cadastrado
+Dois problemas apontados pelo usuário nas "movimentações não atribuídas a
+nenhum ativo" (feature já existente, task #86 de uma sessão anterior):
+
+**(i) Detectar se já está registrada na conta.** Antes, cada movimentação
+não identificada sempre pedia uma decisão do usuário, mesmo se ele já
+tivesse lançado manualmente aquela mesma transação na conta de
+investimentos (que também pode ser usada como conta corrente).
+- `main.js`: novo `ipcMain.handle('broker:check-unresolved-dups', ...)` — mesmo espírito de `bank:check-memo-dups` (usado no importador de extrato bancário), mas mais simples: casa por conta+valor (±R$0,02) e data (±5 dias se a movimentação tem data completa YYYY-MM-DD; mesmo mês via `substr` se só tem YYYY-MM, já que alguns pontos do parser só sabem o mês). Só SURFACE candidatos, nunca pula sozinho.
+- `preload.js`: `brokerCheckUnresolvedDups`.
+- `renderer.js`: `checkUnresolvedAgainstAccount(p, accountId)` — roda uma vez por conta selecionada (fire-and-forget dentro de `renderBrokerPreview`), marca `mv._existingMatch` e re-renderiza. `buildUnresolvedHtml()` mostra um banner verde "☑️ Já parece estar registrada nesta conta: DD/MM · R$X · memo — provavelmente pode 🚫 Ignorar" quando há match.
+
+**(ii) Vincular a QUALQUER ativo cadastrado, não só aos desta importação.**
+O `<select>` de "atribuir a um ativo" só listava `parsed.assets` (os
+ativos que o PARSER encontrou neste extrato específico) — se a
+movimentação fosse de um ativo que não teve variação de posição no mês
+(por isso não apareceu no parse), não tinha como escolhê-lo.
+- `renderer.js`: `buildUnresolvedHtml()` — `assetOptions()` agora combina `parsed.assets` (prefixo `"p:N"`) com `_invAssetsList` menos os já presentes na importação e não fechados (prefixo `"db:ID"`, num `<optgroup>` "Já cadastrados"). Nova `_resolveUnresolvedAssetTarget(val, p)` decodifica o prefixo — pra `"db:ID"`, cria (ou reaproveita) uma entrada em `parsed.assets` com `valor:0` (não mexe na posição do ativo, só a movimentação entra) e `liquidacaoTotal:false`. `_unresolvedAssignSingle`, `_unresolvedSplitSetAsset`, `_unresolvedSplitConfirm` atualizados pra usar o resolver em vez de indexar `p.assets` diretamente.
+
+### Verificação
+`node --check` nos 3 arquivos JS tocados (`main.js`, `renderer.js`,
+`preload.js`) — sem erro de sintaxe. `npm start`: app abre, sync de
+startup roda normal, sem erro no console do processo principal. Não foi
+possível testar o fluxo fim-a-fim (revisão de ativo novo, dedup de
+movimentação) com um arquivo de extrato real nesta sessão — recomenda-se
+o usuário testar na próxima importação de corretora e reportar qualquer
+comportamento inesperado.
+
+**Arquivos tocados**: `src/index.html`, `src/main.js`, `src/preload.js`, `src/renderer.js`.
+
+---
+
 ## 2026-07-31 (4) — v4.85.10: fix — edição feita logo após abrir o app podia não chegar ao Supabase ao fechar
 
 ### Relato do usuário

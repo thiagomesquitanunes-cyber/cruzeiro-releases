@@ -1459,8 +1459,9 @@ select.inp option{background:var(--bg2);}
           </select>
         </div>
         <div class="field" style="margin:0;flex:1;min-width:220px">
-          <label class="lbl" title="Usado no campo &quot;Corretora&quot; de qualquer ativo NOVO criado por esta importação — não altera ativos já existentes. Útil pra distinguir duas contas na mesma corretora (ex: &quot;BTG 1&quot; e &quot;BTG 2&quot;).">Nome da corretora (ativos novos) ⓘ</label>
-          <input class="inp" id="broker-label" placeholder="Ex: BTG 1, BTG 2..." autocomplete="off">
+          <label class="lbl" title="Usado no campo &quot;Corretora&quot; de qualquer ativo NOVO criado por esta importação — não altera ativos já existentes. Útil pra distinguir duas contas na mesma corretora (ex: &quot;BTG 1&quot; e &quot;BTG 2&quot;). Obrigatório — escolha uma já cadastrada ou digite um nome novo.">Nome da corretora (ativos novos) ⓘ</label>
+          <input class="inp" id="broker-label" list="broker-label-datalist" placeholder="Selecione ou digite um nome novo…" autocomplete="off" required>
+          <datalist id="broker-label-datalist"></datalist>
         </div>
       </div>
       <div id="broker-file-trigger" class="file-dropzone" style="display:none"

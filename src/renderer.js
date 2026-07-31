@@ -7742,16 +7742,20 @@ document.addEventListener('click', e => {
 let _brokerBuffer = null;
 let _selectedBroker = null;
 let _brokerDefaultLabel = ''; // nome de exibição padrão da corretora selecionada (ex: "BTG Pactual")
-                               // — usado como valor-padrão do campo "Nome da corretora" quando não
-                               // há rótulo customizado salvo pra conta selecionada.
+                               // — usado só como PLACEHOLDER (dica) do campo "Nome da corretora"
+                               // quando não há rótulo customizado salvo pra conta selecionada; o
+                               // campo em si começa sempre vazio (ver onBrokerAccountChanged).
 
 // Roda quando o usuário troca a "Conta de investimentos" na tela de
-// importação de corretora — repopula o campo "Nome da corretora (ativos
-// novos)" com o rótulo já salvo pra ESSA conta (se houver), ou o nome
-// padrão da corretora nativa selecionada. O rótulo é salvo por CONTA
-// (não por corretora nativa), porque é a conta quem distingue duas
-// contas diferentes na mesma corretora — o caso de uso pedido pelo
-// usuário ("BTG 1" x "BTG 2").
+// importação de corretora. NÃO pré-preenche mais o campo "Nome da
+// corretora (ativos novos)" — fica sempre em branco por decisão explícita
+// (pedido do usuário): um valor pré-preenchido corre o risco de passar
+// despercebido e ser confirmado sem atenção, atribuindo o nome errado de
+// corretora a ativos novos. O rótulo já salvo pra essa conta (se houver) —
+// ou o nome padrão da corretora nativa — aparece só como placeholder
+// (dica visual, nunca vai junto do formulário sem o usuário digitar/
+// selecionar de novo). confirmBrokerImport() bloqueia a importação se
+// este campo estiver vazio.
 async function onBrokerAccountChanged() {
   const labelInp = G('broker-label');
   if (!labelInp) return;
@@ -7760,7 +7764,23 @@ async function onBrokerAccountChanged() {
   if (accountId) {
     try { pref = await ff.brokerLabelPrefGet({ accountId }); } catch(e) {}
   }
-  labelInp.value = pref || _brokerDefaultLabel || '';
+  labelInp.value = '';
+  labelInp.placeholder = pref || _brokerDefaultLabel
+    ? `Ex: ${pref || _brokerDefaultLabel}`
+    : 'Selecione ou digite um nome novo…';
+}
+
+// Popula o <datalist> do campo "Nome da corretora" com as corretoras já
+// usadas em algum ativo cadastrado — dropdown de sugestões, mas sempre
+// permitindo digitar um nome novo (datalist não restringe o valor, só
+// sugere), pedido explícito do usuário pra não perder a flexibilidade de
+// cadastrar uma corretora nova na hora.
+async function populateBrokerLabelDatalist() {
+  const dl = G('broker-label-datalist');
+  if (!dl) return;
+  let brokers = [];
+  try { brokers = await ff.invBrokersList() || []; } catch(e) {}
+  dl.innerHTML = brokers.map(b => `<option value="${esc(b)}"></option>`).join('');
 }
 
 async function pickBroker(brokerId) {
@@ -7828,6 +7848,7 @@ async function pickBroker(brokerId) {
 
     // Load existing inv_assets for name mapping
     await loadInvAssetsList();
+    populateBrokerLabelDatalist();
 
     // Restore preferred account for this broker
     _brokerDefaultLabel = name; // usado por onBrokerAccountChanged() como valor-padrão
@@ -10090,6 +10111,59 @@ function brokerCompletenessCheckHtml(parsed) {
   </div>`;
 }
 
+// Resolve o "ativo alvo" de uma movimentação não atribuída a partir do
+// valor do <select> — que agora pode vir de dois universos diferentes:
+// "p:N" (índice dentro de parsed.assets, um ativo já presente NESTA
+// importação) ou "db:ID" (um ativo já cadastrado no app, mas que não tem
+// nenhuma linha nesta importação específica — ex: não teve variação de
+// posição no mês, só uma movimentação de caixa). No caso "db:", cria (ou
+// reaproveita, se outra movimentação já vinculou o mesmo ativo antes) uma
+// entrada em parsed.assets com valor 0 — como valor 0 não é "> 0", o save
+// (main.js) não mexe na posição do ativo, só registra a movimentação.
+function _resolveUnresolvedAssetTarget(val, p) {
+  if (val == null || val === '') return null;
+  const s = String(val);
+  if (s.startsWith('p:')) return p.assets[parseInt(s.slice(2))] || null;
+  if (s.startsWith('db:')) {
+    const id = parseInt(s.slice(3));
+    const existing = (_invAssetsList || []).find(a => a.id === id);
+    if (!existing) return null;
+    let target = p.assets.find(a => norm(a.name) === norm(existing.name));
+    if (!target) {
+      target = {
+        name: existing.name, category: existing.category, inv_type: existing.inv_type,
+        broker: existing.broker || null, valor: 0, movimentacoes: [], liquidacaoTotal: false,
+      };
+      p.assets.push(target);
+    }
+    return target;
+  }
+  return null;
+}
+
+// Checa (uma vez por conta selecionada) se alguma movimentação não
+// atribuída já não está registrada na conta de investimentos vinculada —
+// mesmo espírito da detecção de duplicatas do importador de extratos
+// bancários (bank:check-memo-dups), só que sem exigir categoria (essas
+// movimentações ainda não têm uma). Nunca pula/ignora sozinho: só marca
+// _existingMatch pra buildUnresolvedHtml() mostrar o aviso, e o usuário
+// decide (normalmente "🚫 Ignorar", já que já está lançada).
+async function checkUnresolvedAgainstAccount(p, accountId) {
+  if (!accountId || !(p.unresolvedMovements || []).length) return;
+  if (p._dupCheckedForAccount === accountId) return;
+  p._dupCheckedForAccount = accountId;
+  try {
+    const rows = p.unresolvedMovements.map(m => ({ date: m.date, amount: m.amount }));
+    const res = await ff.brokerCheckUnresolvedDups({ accountId, rows });
+    let found = false;
+    (res?.matches || []).forEach(mt => {
+      const mv = p.unresolvedMovements[mt.rowIndex];
+      if (mv) { mv._existingMatch = mt.existing[0]; found = true; }
+    });
+    if (found) renderBrokerPreview(p);
+  } catch(e) {}
+}
+
 function renderBrokerPreview(parsed) {
   const { month, assets, caixaValue, broker } = parsed;
   const preview = G('broker-preview');
@@ -10097,6 +10171,10 @@ function renderBrokerPreview(parsed) {
   // Preserve scroll position of the page before re-rendering
   const pageEl = document.querySelector('.page.active, #page-import');
   const savedScroll = pageEl ? pageEl.scrollTop : window.scrollY;
+
+  // Dispara (em paralelo, sem bloquear) a checagem de duplicatas das
+  // movimentações não atribuídas contra a conta de investimentos vinculada.
+  checkUnresolvedAgainstAccount(parsed, parseInt(G('broker-account')?.value) || null);
 
   const totalAtivos = assets.length;
   const totalMovs = assets.reduce((s,a) => s + (a.movimentacoes||[]).length, 0);
@@ -10327,7 +10405,7 @@ function renderBrokerPreview(parsed) {
     const p = G('broker-preview')._parsed;
     const m = p.unresolvedMovements[i];
     if (!val) return;
-    const asset = p.assets[parseInt(val)];
+    const asset = _resolveUnresolvedAssetTarget(val, p);
     if (!asset) return;
     asset.movimentacoes = asset.movimentacoes || [];
     asset.movimentacoes.push({ amount: m.amount, type: m.desc, flow_type: m.suggestedFlowType || null });
@@ -10367,7 +10445,10 @@ function renderBrokerPreview(parsed) {
   };
   window._unresolvedSplitSetAsset = (i, ji, val) => {
     const p = G('broker-preview')._parsed;
-    p.unresolvedMovements[i]._split[ji].assetIdx = val ? parseInt(val) : null;
+    // Guarda o valor "cru" do <select> ("p:N" ou "db:ID") — não mais um
+    // índice puro, já que agora também pode apontar pra um ativo só
+    // cadastrado no app (sem linha nesta importação). Ver _resolveUnresolvedAssetTarget.
+    p.unresolvedMovements[i]._split[ji].assetIdx = val || null;
     renderBrokerPreview(p);
   };
   window._unresolvedSplitSetAmount = (i, ji, val) => {
@@ -10382,7 +10463,7 @@ function renderBrokerPreview(parsed) {
     const sum = allocs.reduce((s,al) => s + al.amount, 0);
     if (!allocs.length || Math.abs(Math.abs(sum) - Math.abs(m.amount)) > 0.01) return; // botão fica desabilitado nesse caso, mas reforça aqui
     allocs.forEach(al => {
-      const asset = p.assets[al.assetIdx];
+      const asset = _resolveUnresolvedAssetTarget(al.assetIdx, p);
       if (!asset) return;
       asset.movimentacoes = asset.movimentacoes || [];
       asset.movimentacoes.push({ amount: al.amount, type: m.desc + ' (dividido)', flow_type: m.suggestedFlowType || null });
@@ -10441,8 +10522,19 @@ function renderBrokerPreview(parsed) {
   function buildUnresolvedHtml() {
     const unresolved = parsed.unresolvedMovements || [];
     if (!unresolved.length) return '';
-    const assetOptions = selectedIdx => assets.map((a, ai) =>
-      `<option value="${ai}" ${ai===selectedIdx?'selected':''}>${esc(a.name)}</option>`).join('');
+    // Opções do seletor de ativo: os desta importação ("p:N") + os já
+    // cadastrados no app que não aparecem nela ("db:ID") — pedido do
+    // usuário pra poder vincular uma movimentação a QUALQUER ativo já
+    // existente, não só aos que o parser encontrou neste extrato específico.
+    const inImportNames = new Set(assets.map(a => norm(a.name)));
+    const dbOnlyAssets = (_invAssetsList || []).filter(a => !inImportNames.has(norm(a.name)) && !a.closed_month);
+    const assetOptions = selectedVal => {
+      const inImportOpts = assets.map((a, ai) =>
+        `<option value="p:${ai}" ${`p:${ai}`===selectedVal?'selected':''}>${esc(a.name)}</option>`).join('');
+      const dbOpts = dbOnlyAssets.map(a =>
+        `<option value="db:${a.id}" ${`db:${a.id}`===selectedVal?'selected':''}>${esc(a.name)}${a.broker?` (${esc(a.broker)})`:''} — já cadastrado</option>`).join('');
+      return inImportOpts + (dbOnlyAssets.length ? `<optgroup label="Já cadastrados (sem posição neste mês)">${dbOpts}</optgroup>` : '');
+    };
 
     const rowsHtml = unresolved.map((m, i) => {
       const splitMode = !!m._split;
@@ -10472,6 +10564,11 @@ function renderBrokerPreview(parsed) {
             </div>
           </div>`;
       }
+      const dupDateFmt = d => /^\d{4}-\d{2}-\d{2}$/.test(d||'') ? d.split('-').reverse().join('/') : fmtMonth(d);
+      const dupBanner = m._existingMatch ? `
+        <div style="background:#dcfce7;border:1px solid #86efac;border-radius:6px;padding:6px 8px;margin-top:6px;font-size:11px;color:#166534">
+          ☑️ Já parece estar registrada nesta conta: ${dupDateFmt(m._existingMatch.date)} · ${fmtBRL(m._existingMatch.amount)}${m._existingMatch.memo?` · "${esc(m._existingMatch.memo)}"`:''} — provavelmente pode <strong>🚫 Ignorar</strong> em vez de vincular a um ativo.
+        </div>` : '';
       return `
         <div style="padding:8px 10px;border:1px solid #fde68a;background:var(--warn-bg);border-radius:6px;margin-bottom:6px">
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -10479,6 +10576,7 @@ function renderBrokerPreview(parsed) {
             <span style="font-size:12px;flex:1;min-width:200px" title="${esc(m.desc)}">${esc(m.desc.slice(0,80))}</span>
             <span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:600">${fmtBRL(m.amount)}</span>
           </div>
+          ${dupBanner}
           ${!splitMode ? `
           <div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap">
             <select class="inp" style="font-size:11px;padding:2px 4px;flex:1;min-width:160px" onchange="window._unresolvedAssignSingle(${i},this.value)">
@@ -10695,6 +10793,199 @@ async function resolveBrokerNonAsset(action) {
   if (_brokerNonAssetResolve) { _brokerNonAssetResolve({ imported }); _brokerNonAssetResolve = null; }
 }
 
+// ── Revisão de "ativos novos" antes de salvar ───────────────────────────
+// Compara nome (sobreposição de tokens) e valor (proximidade relativa)
+// entre um ativo candidato e um ativo já cadastrado — mesma lógica de
+// fuzzyMatchXPAsset (usada dentro do parser da XP), generalizada aqui pra
+// qualquer corretora e exposta fora do parser, já que a revisão roda na
+// tela de confirmação (depois de todas as edições do usuário), não dentro
+// do parsing.
+function scoreAssetSimilarity(name, value, existing, existingValue) {
+  const nA = norm(name), nB = norm(existing.name);
+  if (!nA || !nB) return 0;
+  let nameScore;
+  if (nA === nB) nameScore = 1;
+  else if (nA.includes(nB) || nB.includes(nA)) nameScore = 0.9;
+  else {
+    const tokA = nA.split(' ').filter(t => t.length >= 3);
+    const tokB = nB.split(' ').filter(t => t.length >= 3);
+    if (!tokA.length || !tokB.length) nameScore = 0;
+    else {
+      const overlap = tokA.filter(t => tokB.some(bt => bt === t || bt.startsWith(t) || t.startsWith(bt))).length;
+      nameScore = overlap / Math.max(tokA.length, tokB.length);
+    }
+  }
+  let valueScore = 0.5; // neutro quando não há valor de um dos lados pra comparar
+  if (value != null && existingValue != null && (value || existingValue)) {
+    const diff = Math.abs(value - existingValue);
+    const rel = diff / Math.max(Math.abs(value), Math.abs(existingValue), 0.01);
+    valueScore = Math.max(0, 1 - rel);
+  }
+  return nameScore * 0.65 + valueScore * 0.35;
+}
+
+let _newAssetReview = null; // { candidates, parsed, resolve }
+
+// Roda logo antes de salvar a importação: identifica quais ativos NÃO têm
+// correspondência exata (por nome) em _invAssetsList — esses seriam
+// criados como registros NOVOS por broker:save-parsed (main.js), que casa
+// por nome exato (case-insensitive). Se o nome do ativo mudou sutilmente
+// entre um extrato e outro (acento, abreviação, espaçamento), isso criava
+// um ativo "fantasma": o antigo ficava parado (repetindo o último valor
+// pra sempre) e um novo nascia do zero. Aqui, cada candidato é comparado
+// (nome + último valor conhecido) contra TODOS os ativos já cadastrados;
+// se a sugestão for boa, o usuário confirma com um clique — e o app
+// aprende o mapeamento (mesmo mecanismo de "renomear na tabela"), então a
+// próxima importação já reconhece sozinha, sem passar por aqui de novo.
+// Retorna true pra seguir com o salvamento, false se o usuário cancelou.
+async function reviewNewAssetsBeforeImport(parsed) {
+  const knownExact = new Set(_invAssetsList.map(a => norm(a.name)));
+  const candidates = parsed.assets
+    .map((asset, idx) => ({ idx, asset }))
+    .filter(({ asset }) => asset.name && !knownExact.has(norm(asset.name)));
+  if (!candidates.length) return true; // nada seria criado como novo — segue direto
+
+  // Último valor conhecido de cada ativo já cadastrado até o mês desta
+  // importação — mesma lógica de _invAssetCurrentValue (aba Patrimônio),
+  // usada aqui só pra comparação de similaridade.
+  let txByAsset = {};
+  try {
+    const allTx = await ff.invTxAll();
+    allTx.forEach(t => {
+      (txByAsset[t.asset_id] ||= {});
+      (txByAsset[t.asset_id][t.month] ||= []).push(t);
+    });
+  } catch(e) {}
+  const lastValueOf = assetId => {
+    const txs = txByAsset[assetId] || {};
+    const months = Object.keys(txs).filter(m => m <= parsed.month).sort();
+    let v = null;
+    months.forEach(m => (txs[m] || []).forEach(t => { if (t.tx_type in INV_TX_VALUATION) v = t.total_value; }));
+    return v;
+  };
+
+  candidates.forEach(c => {
+    let best = null, bestScore = 0;
+    for (const ex of _invAssetsList) {
+      const s = scoreAssetSimilarity(c.asset.name, c.asset.valor, ex, lastValueOf(ex.id));
+      if (s > bestScore) { bestScore = s; best = ex; }
+    }
+    c.suggestion = bestScore >= 0.55 ? best : null;
+    c.suggestionValue = c.suggestion ? lastValueOf(c.suggestion.id) : null;
+    c.decision = null; // null (ainda não decidido — vira "novo" por padrão) | 'new' | <id do ativo existente>
+  });
+
+  return new Promise(resolve => {
+    _newAssetReview = { candidates, parsed, resolve };
+    renderNewAssetReviewModal();
+    openModal('modal-custom-parser');
+  });
+}
+
+function renderNewAssetReviewModal() {
+  const { candidates } = _newAssetReview;
+  G('custom-parser-title').textContent = `🆕 Revisar ${candidates.length} ativo(s) que seriam criados como novos`;
+
+  const rows = candidates.map((c, i) => {
+    const a = c.asset;
+    const decided = c.decision;
+    const decidedLabel = decided === 'new'
+      ? '🆕 Confirmado como novo'
+      : decided
+        ? `🔗 Será vinculado a "${esc(_invAssetsList.find(x => x.id === decided)?.name || '')}" (não cria ativo novo)`
+        : '';
+    const sugBox = (c.suggestion && decided == null) ? `
+      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-top:6px;font-size:12px">
+        Parece ser o mesmo ativo que: <strong>${esc(c.suggestion.name)}</strong>${c.suggestion.broker ? ` (${esc(c.suggestion.broker)})` : ''}
+        ${c.suggestionValue != null ? ` — última posição conhecida: ${fmtBRL(c.suggestionValue)}` : ''}
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+          <button type="button" class="btn xs primary" onclick="window._narConfirmMatch(${i})">✓ É o mesmo ativo (renomear)</button>
+          <button type="button" class="btn xs" onclick="window._narConfirmNew(${i})">Não, é novo mesmo</button>
+        </div>
+      </div>` : '';
+    const otherOptions = _invAssetsList.slice()
+      .sort((x, y) => x.name.localeCompare(y.name, 'pt-BR'))
+      .map(x => `<option value="${x.id}">${esc(x.name)}${x.broker ? ` (${esc(x.broker)})` : ''}</option>`).join('');
+    return `
+      <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;${decided ? 'opacity:.65' : ''}">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div><strong>${esc(a.name)}</strong> <span style="color:var(--text3);font-size:11px">(${esc(a.category || '')})</span></div>
+          <div style="font-family:'DM Mono',monospace;font-size:12px">${a.valor != null ? fmtBRL(a.valor) : ''}</div>
+        </div>
+        ${sugBox}
+        <div style="display:flex;gap:6px;margin-top:8px;align-items:center;flex-wrap:wrap">
+          <select class="inp" id="nar-sel-${i}" style="font-size:11px;padding:2px 4px;flex:1;min-width:160px">
+            <option value="">— ou selecione um ativo já cadastrado —</option>
+            ${otherOptions}
+          </select>
+          <button type="button" class="btn xs" onclick="window._narPickFromSelect(${i})">Vincular</button>
+          ${!c.suggestion ? `<button type="button" class="btn xs primary" onclick="window._narConfirmNew(${i})">🆕 Confirmar novo</button>` : ''}
+        </div>
+        ${decidedLabel ? `<div style="margin-top:6px;font-size:11px;color:var(--accent)">${decidedLabel}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  G('custom-parser-body').innerHTML = `
+    <p style="font-size:12px;color:var(--text3);margin:0 0 10px">
+      Estes ativos não bateram exatamente com nenhum já cadastrado — o app criaria registros NOVOS pra eles.
+      Se algum for só o mesmo ativo com o nome levemente diferente (ex: acento, abreviação), vincule ao já
+      existente pra não duplicar. Os que ficarem sem decisão são criados como novos (comportamento de sempre).
+    </p>
+    ${rows}`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="window._narCancel()">Cancelar importação</button>
+    <button class="btn primary" onclick="window._narConfirmAll()">✓ Confirmar e continuar</button>
+  `;
+}
+
+window._narConfirmMatch = (i) => {
+  const c = _newAssetReview.candidates[i];
+  c.decision = c.suggestion.id;
+  renderNewAssetReviewModal();
+};
+window._narConfirmNew = (i) => {
+  const c = _newAssetReview.candidates[i];
+  c.decision = 'new';
+  renderNewAssetReviewModal();
+};
+window._narPickFromSelect = (i) => {
+  const sel = G(`nar-sel-${i}`);
+  const id = parseInt(sel?.value);
+  if (!id) { toast('Selecione um ativo na lista'); return; }
+  _newAssetReview.candidates[i].decision = id;
+  renderNewAssetReviewModal();
+};
+window._narCancel = () => {
+  closeModal('modal-custom-parser');
+  const resolve = _newAssetReview?.resolve;
+  _newAssetReview = null;
+  if (resolve) resolve(false);
+};
+window._narConfirmAll = () => {
+  const { candidates, parsed, resolve } = _newAssetReview;
+  candidates.forEach(c => {
+    if (c.decision && c.decision !== 'new') {
+      const matched = _invAssetsList.find(x => x.id === c.decision);
+      if (matched) {
+        const origName = parsed.assets[c.idx].name;
+        parsed.assets[c.idx].name = matched.name;
+        // Aprende o mapeamento (mesmo mecanismo do rename manual na
+        // tabela) — a próxima importação já reconhece sozinha.
+        ff.brokerMappingLearn({ broker: parsed.broker, original: origName, mapped: matched.name }).catch(() => {});
+        if (!_brokerMappings[parsed.broker]) _brokerMappings[parsed.broker] = {};
+        _brokerMappings[parsed.broker][origName] = matched.name;
+        if (!_brokerMappingsNorm[parsed.broker]) _brokerMappingsNorm[parsed.broker] = {};
+        _brokerMappingsNorm[parsed.broker][norm(origName)] = matched.name;
+      }
+    }
+    // decision === 'new' ou sem decisão → mantém como está (cria novo),
+    // exatamente o comportamento de antes desta revisão existir.
+  });
+  closeModal('modal-custom-parser');
+  _newAssetReview = null;
+  if (resolve) resolve(true);
+};
+
 async function confirmBrokerImport() {
   if (_licStatus?.status === 'payment_required') {
     openLicenseModal();
@@ -10703,6 +10994,16 @@ async function confirmBrokerImport() {
   const preview = G('broker-preview');
   const parsed = preview?._parsed;
   if (!parsed) return;
+
+  // Nome da corretora (ativos novos) é OBRIGATÓRIO — o campo começa em
+  // branco de propósito (ver onBrokerAccountChanged) pra nunca deixar
+  // passar despercebido um preenchimento herdado de outra conta/corretora.
+  const brokerLabel = (G('broker-label')?.value || '').trim();
+  if (!brokerLabel) {
+    toast('⚠️ Preencha o nome da corretora (campo "Nome da corretora") antes de importar');
+    G('broker-label')?.focus();
+    return;
+  }
 
   const pendingUnresolved = (parsed.unresolvedMovements || []).length;
   if (pendingUnresolved > 0) {
@@ -10782,6 +11083,14 @@ async function confirmBrokerImport() {
   // desatualizado em relação ao que o usuário de fato editou na tela.
   parsed.totalLiquido = parsed.assets.reduce((s,a) => s + (a.valor||0), 0) + (parsed.caixaValue||0);
 
+  // Antes de salvar: revisa qualquer ativo que seria criado como NOVO (nome
+  // sem correspondência exata em _invAssetsList) — evita o "ativo fantasma"
+  // que acontecia quando o nome do ativo mudava sutilmente de um extrato
+  // pro outro (ex: acento, abreviação) e o app criava uma linha nova em vez
+  // de reconhecer que era o mesmo ativo de sempre. Ver reviewNewAssetsBeforeImport.
+  const proceedAfterReview = await reviewNewAssetsBeforeImport(parsed);
+  if (!proceedAfterReview) return;
+
   const btn = preview.querySelector('.btn.primary');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Importando…'; }
 
@@ -10793,13 +11102,14 @@ async function confirmBrokerImport() {
 
   // Rótulo customizado de "corretora" (ex: "BTG 1"/"BTG 2") — só se aplica
   // a ativos NOVOS (nome ainda não existe em nenhum ativo cadastrado, sob
-  // NENHUM broker). Ativos já conhecidos mantêm o broker original: mudar
-  // isso quebraria o casamento por nome+corretora que brokerSaveParsed()
-  // (main.js) usa pra decidir "é o mesmo ativo de antes" vs "é novo" — se
-  // sobrescrevesse o broker de um ativo já existente, a próxima
-  // importação criaria um ativo DUPLICADO em vez de atualizar o mesmo.
-  const brokerLabel = (G('broker-label')?.value || '').trim();
-  if (brokerLabel) {
+  // NENHUM broker — incluindo os que acabaram de ser vinculados a um ativo
+  // já existente na revisão acima, cujo nome já bate agora). Ativos já
+  // conhecidos mantêm o broker original: mudar isso quebraria o casamento
+  // por nome+corretora que brokerSaveParsed() (main.js) usa pra decidir "é
+  // o mesmo ativo de antes" vs "é novo" — se sobrescrevesse o broker de um
+  // ativo já existente, a próxima importação criaria um ativo DUPLICADO em
+  // vez de atualizar o mesmo.
+  {
     const knownNames = new Set(_invAssetsList.map(a => norm(a.name)));
     parsed.assets.forEach(a => {
       if (!knownNames.has(norm(a.name))) a.broker = brokerLabel;

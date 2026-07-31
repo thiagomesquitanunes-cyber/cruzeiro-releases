@@ -3103,6 +3103,37 @@ ipcMain.handle('bank:check-memo-dups', (_, { accountId, rows }) => {
   return { matches };
 });
 
+// ── Movimentações de corretora não atribuídas a nenhum ativo: checa se já
+// não estão registradas na conta de investimentos (mesmo espírito do
+// check acima, só que mais simples — sem categoria/ML, já que essas
+// movimentações não têm categoria própria ainda). Datas podem chegar como
+// YYYY-MM-DD (quando o extrato tem a data exata) ou só YYYY-MM (quando o
+// parser só sabe o mês) — nesse caso, casa por mês em vez de janela de
+// dias. Só SURFACE os candidatos pro usuário decidir — nunca pula sozinho.
+ipcMain.handle('broker:check-unresolved-dups', (_, { accountId, rows }) => {
+  const matches = [];
+  for (let i = 0; i < (rows || []).length; i++) {
+    const r = rows[i];
+    if (!r || r.amount == null || !r.date) continue;
+    try {
+      const isFullDate = /^\d{4}-\d{2}-\d{2}$/.test(r.date);
+      const existing = isFullDate
+        ? all(
+            `SELECT id, date, amount, memo FROM transactions
+             WHERE account_id=? AND ABS(julianday(date) - julianday(?)) <= 5 AND ABS(amount-?) <= 0.02
+             LIMIT 3`,
+            [accountId, r.date, r.amount])
+        : all(
+            `SELECT id, date, amount, memo FROM transactions
+             WHERE account_id=? AND substr(date,1,7)=? AND ABS(amount-?) <= 0.02
+             LIMIT 3`,
+            [accountId, r.date.slice(0,7), r.amount]);
+      if (existing.length) matches.push({ rowIndex: i, existing });
+    } catch(e) { /* skip row on error */ }
+  }
+  return { matches };
+});
+
 ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, dryRun, replaceIds }) => {
   // dryRun: only check for dups, don't insert anything
   // skipIds = array of row indices the user chose to skip (confirmed duplicates)

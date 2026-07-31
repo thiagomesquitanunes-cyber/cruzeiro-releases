@@ -175,6 +175,7 @@ const api = {
   brokerLearnedItemDelete:(d) => ipcRenderer.invoke('broker:learned-item-delete', d),
   brokerSaveParsed:    (d)   => ipcRenderer.invoke('broker:save-parsed', d),
   brokerCreateAdjustment:(d) => ipcRenderer.invoke('broker:create-adjustment', d),
+  brokerCheckUnresolvedDups:(d) => ipcRenderer.invoke('broker:check-unresolved-dups', d),
   bankParsersList:     ()    => ipcRenderer.invoke('bank:parsers-list'),
   bankParserSave:      (d)   => ipcRenderer.invoke('bank:parser-save', d),
   bankParserDelete:    (d)   => ipcRenderer.invoke('bank:parser-delete', d),
