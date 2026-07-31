@@ -12,6 +12,64 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-07-30 — v4.85.6: corrige bug real "0 ativos" na importação BTG — variação de layout de coluna no extrato
+
+### O quê
+Causa raiz do bug "0 ativos" (v4.85.5 só tinha instrumentado
+diagnóstico, não corrigido) — usuário mandou o print do novo painel de
+diagnóstico E o arquivo real que reproduzia o problema
+(`BTG_RIC_JAN_26.xlsx`). Com o arquivo em mãos, reproduzi
+instantaneamente: `assets found: 0`, com `fundos: {rows:65, pushed:0}`,
+`rendaFixa: {rows:288, pushed:0}`, `rendaVariavel: {rows:51, pushed:0}`
+— ou seja, as abas existiam e tinham conteúdo, mas nenhuma linha batia
+com o padrão que o parser esperava.
+
+### Causa raiz confirmada
+Comparando byte-a-byte o arquivo que falha com um extrato real que
+funciona (mesmas abas Fundos/Renda Fixa/Renda Variável): o extrato que
+funciona tem uma **coluna A vazia** antes dos dados de verdade (ex: nome
+do ativo na coluna B, saldo líquido na coluna I) — provavelmente uma
+coluna de espaçamento/ícone que o Excel preserva ao exportar. O extrato
+que falha **não tem essa coluna A vazia** — os mesmos dados começam
+direto na coluna A (nome do ativo na coluna A, saldo líquido na coluna
+H). `parseBTGBroker()` (`src/renderer.js`) tinha os índices de coluna
+TODOS hardcoded assumindo sempre a coluna A vazia (`colB=row[1]`,
+`colI=row[8]` etc, repetido nas 4 seções de posição + conta corrente +
+sumário) — no arquivo sem essa coluna, cada leitura vinha 1 coluna
+adiantada, nunca batendo com o conteúdo esperado, e a seção inteira
+ficava silenciosamente vazia. Confirmado que são dois formatos de
+exportação DIFERENTES e legítimos da própria BTG (não corrupção nem
+erro do usuário) — a hipótese inicial de "só acontece com mês já
+importado antes" era coincidência: a pessoa por acaso só tinha testado
+reimportação com arquivos desse formato "sem coluna A".
+
+### Fix
+Adicionei `detectColOffset(rows)`: olha as primeiras ~40 linhas não
+vazias da planilha e decide se a coluna A costuma estar vazia (padrão
+"com espaçadora") ou não (padrão "sem espaçadora"). A partir disso,
+`sc(n)` converte qualquer índice de coluna escrito assumindo o padrão
+"com espaçadora" pro índice real da planilha atual — aplicado em TODAS
+as leituras de coluna hardcoded nas seções Fundos, Renda Fixa,
+Previdência, Renda Variável, Conta Corrente e Sumário (posições E
+movimentações, mais os marcadores de seção tipo "Total em fundos"/
+"Movimentação >").
+
+### Verificação
+Testei a função real (extraída do código atual) contra os DOIS
+arquivos: o extrato de abril que já funcionava (sem regressão — 17
+ativos, mesma composição por seção: fundos 4, renda fixa 10, previdência
+1, renda variável 2) e o extrato de janeiro que falhava (agora encontra
+46 ativos: fundos 1, renda fixa 35, renda variável 10 — bateu com a
+contagem manual das seções CDB/CRA/CRI/Debênture do arquivo). `node
+--check` ok.
+
+### Arquivos
+- `src/renderer.js` — `parseBTGBroker()`: nova `detectColOffset()`,
+  `sc()` aplicado em todas as 6 subseções.
+- `package.json` — 4.85.5 → 4.85.6.
+
+---
+
 ## 2026-07-29 (2) — v4.85.5: diagnóstico pra bug "0 ativos" na reimportação de extrato BTG (não resolvido, instrumentado)
 
 ### O quê

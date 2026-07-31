@@ -7999,20 +7999,46 @@ function parseBTGBroker(buffer) {
   };
   const toNum = v => { if (typeof v==='number') return v; const n=parseFloat(String(v||'').replace(/[^\d.,-]/g,'').replace(',','.')); return isNaN(n)?null:n; };
 
+  // Extratos da BTG variam: algumas exportações têm uma coluna A vazia
+  // "espaçadora" antes dos dados de verdade (padrão mais comum, pra que
+  // as seções abaixo foram originalmente escritas — índices fixos como
+  // colB=1/colI=8), outras não têm essa coluna e os dados já começam na
+  // própria coluna A. Confirmado com um extrato real que reproduzia "0
+  // ativos encontrados": mesma estrutura de Fundos/Renda Fixa/Renda
+  // Variável, só que sem a coluna A vazia — cada índice hardcoded ficava
+  // um a mais do que deveria, então nenhuma linha batia com o padrão
+  // esperado e a seção inteira era descartada silenciosamente.
+  // detectColOffset() olha as primeiras linhas não-vazias da planilha e
+  // decide: se a coluna A está vazia na maioria delas, offset=1 (mantém
+  // os índices como já estavam escritos); senão, offset=0 (desloca tudo
+  // uma coluna pra a esquerda). sc(n) converte um índice escrito pro
+  // padrão "com coluna A vazia" pro índice real da planilha atual.
+  function detectColOffset(rows) {
+    let checked = 0, emptyA = 0;
+    for (const row of rows) {
+      if (!row || row.every(c => c == null || c === '')) continue;
+      checked++;
+      if (row[0] == null || row[0] === '') emptyA++;
+      if (checked >= 40) break;
+    }
+    return (checked > 0 && emptyA / checked > 0.8) ? 1 : 0;
+  }
+
   // ── 2. Fundos ──
   const fundosWs = wb.Sheets['Fundos'];
   _debug.fundos = { sheetFound: !!fundosWs, rows: 0, pushed: 0 };
   if (fundosWs) {
     const rows = XLSX.utils.sheet_to_json(fundosWs, { header:1, defval:null, raw:true });
     _debug.fundos.rows = rows.length;
+    const off = detectColOffset(rows), sc = n => n - 1 + off;
     // Posições section ends at "Total em fundos"
-    const posEndIdx = rows.findIndex(r => norm(String(r[1]||'')).startsWith('total em fund'));
+    const posEndIdx = rows.findIndex(r => norm(String(r[sc(1)]||'')).startsWith('total em fund'));
     _debug.fundos.posEndIdx = posEndIdx;
 
     let currentName = null;
     for (let i=0; i<(posEndIdx>0?posEndIdx:rows.length); i++) {
-      const colB = rows[i][1];
-      const colI = rows[i][8]; // Saldo Líquido col I = index 8
+      const colB = rows[i][sc(1)];
+      const colI = rows[i][sc(8)]; // Saldo Líquido
       if (!colB) continue;
       const nb = norm(String(colB));
       if (nb.startsWith('total') || nb.startsWith('data ref') || nb.startsWith('fundo') ||
@@ -8031,11 +8057,11 @@ function parseBTGBroker(buffer) {
     }
 
     // Movimentações — only non-come-cotas
-    const movStartIdx = rows.findIndex(r => norm(String(r[1]||'')).startsWith('movimenta'));
+    const movStartIdx = rows.findIndex(r => norm(String(r[sc(1)]||'')).startsWith('movimenta'));
     if (movStartIdx >= 0) {
       let mvAsset = null;
       for (let i=movStartIdx+1; i<rows.length; i++) {
-        const colB = rows[i][1], colC = rows[i][2], colI = rows[i][8];
+        const colB = rows[i][sc(1)], colC = rows[i][sc(2)], colI = rows[i][sc(8)];
         const nb = norm(String(colB||''));
         if (nb.startsWith('movimenta') && String(colB).includes('>')) {
           // Extract asset name after "Movimentação > "
@@ -8083,20 +8109,21 @@ function parseBTGBroker(buffer) {
   if (rfWs) {
     const rows = XLSX.utils.sheet_to_json(rfWs, { header:1, defval:null, raw:true });
     _debug.rendaFixa.rows = rows.length;
+    const off = detectColOffset(rows), sc = n => n - 1 + off;
     // Only parse Posições section (before "Posições Detalhadas")
-    const posDetIdx = rows.findIndex(r => norm(String(r[1]||'')).startsWith('posicoes detalha'));
+    const posDetIdx = rows.findIndex(r => norm(String(r[sc(1)]||'')).startsWith('posicoes detalha'));
     const posRows = posDetIdx > 0 ? rows.slice(0, posDetIdx) : rows;
 
     let currentType = '';
     const SKIP_RF = ['total','emissor','ativo','posicoes','detalhamento','movimenta','rentabilidade'];
     for (const row of posRows) {
-      const colB = row[1]; // Emissor
-      const colC = row[2]; // Ativo (código)
-      const colD = row[3]; // Emissão date
-      const colE = row[4]; // Vencimento date
-      const colF = row[5]; // Liquidez (Sim/Não)
-      const colG = row[6]; // Dias carência
-      const colO = row[14]; // Saldo Líquido
+      const colB = row[sc(1)]; // Emissor
+      const colC = row[sc(2)]; // Ativo (código)
+      const colD = row[sc(3)]; // Emissão date
+      const colE = row[sc(4)]; // Vencimento date
+      const colF = row[sc(5)]; // Liquidez (Sim/Não)
+      const colG = row[sc(6)]; // Dias carência
+      const colO = row[sc(14)]; // Saldo Líquido
 
       const nb = norm(String(colB||''));
       // Section header "Posição > CDB" etc
@@ -8127,11 +8154,11 @@ function parseBTGBroker(buffer) {
     // Movimentações Renda Fixa
     // Section at end of file (after Posições Detalhadas)
     // Cols: B=date(1), C="Emissor / Ativo"(2) e.g. "EDIFICATTO / CRI-25E0002401", D=tipo(3), J=valor líquido(9)
-    const movRfIdx = rows.findIndex((r,i) => i > 50 && norm(String(r[1]||'')).startsWith('movimenta'));
+    const movRfIdx = rows.findIndex((r,i) => i > 50 && norm(String(r[sc(1)]||'')).startsWith('movimenta'));
     if (movRfIdx >= 0) {
       for (let i=movRfIdx+1; i<rows.length; i++) {
         const row = rows[i];
-        const colB=row[1], colC=row[2], colD=row[3], colJ=row[9];
+        const colB=row[sc(1)], colC=row[sc(2)], colD=row[sc(3)], colJ=row[sc(9)];
         if (!isDate(colB)) continue;
         const descN = norm(String(colD||''));
         if (descN.includes('come') || descN.startsWith('total')) continue;
@@ -8178,13 +8205,14 @@ function parseBTGBroker(buffer) {
   if (prevWs) {
     const rows = XLSX.utils.sheet_to_json(prevWs, { header:1, defval:null, raw:true });
     _debug.previdencia.rows = rows.length;
+    const off = detectColOffset(rows), sc = n => n - 1 + off;
     const SKIP_P = ['total','n° cert','n cert','fundo','produto','plano','posicao','rentabilidade',
       'posicoes abertas','aliquota','regime','data de inicio','None'];
     let inPosicao = false;
     for (const row of rows) {
-      const colB = row[1]; // Fundo name
-      const colC = row[2]; // CNPJ
-      const colG = row[6]; // Saldo Bruto
+      const colB = row[sc(1)]; // Fundo name
+      const colC = row[sc(2)]; // CNPJ
+      const colG = row[sc(6)]; // Saldo Bruto
       const nb = norm(String(colB||''));
       if (nb.startsWith('posicao')) { inPosicao = true; continue; }
       if (nb.startsWith('rentabilidade') || nb.startsWith('posicoes abertas')) { inPosicao = false; continue; }
@@ -8202,12 +8230,12 @@ function parseBTGBroker(buffer) {
 
     // Movimentações Previdência
     // Header: Data(B), Transação(C), Qtde(D), Valor Cota(E), Valor Bruto(F), IR(G), Valor Líquido(H)
-    const movPrevIdx = rows.findIndex(r => norm(String(r[1]||'')).startsWith('movimenta'));
+    const movPrevIdx = rows.findIndex(r => norm(String(r[sc(1)]||'')).startsWith('movimenta'));
     if (movPrevIdx >= 0) {
       let mvPlan = null;
       for (let i=movPrevIdx+1; i<rows.length; i++) {
         const row = rows[i];
-        const colB=row[1], colC=row[2], colH=row[7];
+        const colB=row[sc(1)], colC=row[sc(2)], colH=row[sc(7)];
         const nb = norm(String(colB||''));
         // Sub-section header e.g. "Movimentação > 342074/ACS..."
         if (nb.startsWith('movimenta') && String(colB).includes('>')) { mvPlan = String(colB); continue; }
@@ -8232,14 +8260,15 @@ function parseBTGBroker(buffer) {
   if (rvWs) {
     const rows = XLSX.utils.sheet_to_json(rvWs, { header:1, defval:null, raw:true });
     _debug.rendaVariavel.rows = rows.length;
+    const off = detectColOffset(rows), sc = n => n - 1 + off;
     let currentSubType = 'ETF';
     const SKIP_RV = ['total','codigo','posicao','movimenta','tipo','data','None'];
-    const movStartRV = rows.findIndex(r => norm(String(r[1]||'')).startsWith('movimenta'));
+    const movStartRV = rows.findIndex(r => norm(String(r[sc(1)]||'')).startsWith('movimenta'));
 
-    let saldoBrutoCol = 6; // default for ETF
+    let saldoBrutoCol = sc(6); // default for ETF
     for (let i=0; i<(movStartRV>0?movStartRV:rows.length); i++) {
       const row = rows[i];
-      const colB=row[1], colC=row[2], colD=row[3];
+      const colB=row[sc(1)], colC=row[sc(2)], colD=row[sc(3)];
       const nb = norm(String(colB||''));
 
       // Section header
@@ -8253,8 +8282,8 @@ function parseBTGBroker(buffer) {
 
       // Header row: find "Saldo Bruto" column dynamically
       if (nb === 'codigo') {
-        saldoBrutoCol = row.findIndex((v,idx) => idx>0 && norm(String(v||'')).startsWith('saldo bruto'));
-        if (saldoBrutoCol < 0) saldoBrutoCol = 6;
+        saldoBrutoCol = row.findIndex((v,idx) => idx>=sc(1) && norm(String(v||'')).startsWith('saldo bruto'));
+        if (saldoBrutoCol < 0) saldoBrutoCol = sc(6);
         continue;
       }
 
@@ -8277,7 +8306,7 @@ function parseBTGBroker(buffer) {
     if (movStartRV >= 0) {
       for (let i=movStartRV+1; i<rows.length; i++) {
         const row=rows[i];
-        const colB=row[1], colC=row[2], colD=row[3], colJ=row[9];
+        const colB=row[sc(1)], colC=row[sc(2)], colD=row[sc(3)], colJ=row[sc(9)];
         if (!isDate(colB)) continue;
         if (!colD || typeof colJ!=='number' || colJ===0) continue;
         const descN = norm(String(colC||''));
@@ -8319,11 +8348,12 @@ function parseBTGBroker(buffer) {
   const ccWs = wb.Sheets['Conta Corrente'];
   if (ccWs) {
     const rows = XLSX.utils.sheet_to_json(ccWs, { header:1, defval:null, raw:true });
+    const off = detectColOffset(rows), sc = n => n - 1 + off;
     for (const row of rows.slice(0, 15)) {
       // Sem ">0" — caixa zerado (R$0,00 na conta corrente da corretora
       // naquele mês) é um valor real, não "ausência de dado".
-      if (isDate(row[1]) && typeof row[2]==='number' && !isNaN(row[2])) {
-        result.caixaValue = row[2]; break;
+      if (isDate(row[sc(1)]) && typeof row[sc(2)]==='number' && !isNaN(row[sc(2)])) {
+        result.caixaValue = row[sc(2)]; break;
       }
     }
 
@@ -8332,7 +8362,7 @@ function parseBTGBroker(buffer) {
     // Linhas que não sejam consequência de um evento de ativo já refletido
     // em outra seção do extrato (Fundos/Renda Fixa/Previdência/Renda
     // Variável) viram candidatas a lançamento individual (task #86).
-    const ccHeaderIdx = rows.findIndex(r => norm(String(r[1]||''))==='data' && norm(String(r[2]||'')).includes('descri'));
+    const ccHeaderIdx = rows.findIndex(r => norm(String(r[sc(1)]||''))==='data' && norm(String(r[sc(2)]||'')).includes('descri'));
     if (ccHeaderIdx >= 0) {
       const CC_ASSET_TERMS = ['cupom','rendimento','dividend','provent','jcp','juros',
         'resgate','aplicacao','aporte','compra','contribuicao','venda','amortizacao',
@@ -8340,7 +8370,7 @@ function parseBTGBroker(buffer) {
       const isCCAssetFlow = desc => CC_ASSET_TERMS.some(t => norm(String(desc||'')).includes(t));
       for (let i = ccHeaderIdx + 1; i < rows.length; i++) {
         const row = rows[i];
-        const dateVal = row[1], descVal = row[2], amtVal = row[3];
+        const dateVal = row[sc(1)], descVal = row[sc(2)], amtVal = row[sc(3)];
         if (!isDate(dateVal)) continue;
         const desc = String(descVal||'').trim();
         if (!desc || norm(desc)==='saldo anterior') continue;
@@ -8359,9 +8389,10 @@ function parseBTGBroker(buffer) {
   const sumWs = wb.Sheets['Sumario'];
   if (sumWs) {
     const rows = XLSX.utils.sheet_to_json(sumWs, { header:1, defval:null, raw:true });
+    const off = detectColOffset(rows), sc = n => n - 1 + off;
     for (const row of rows) {
-      if (norm(String(row[1]||''))==='total' && typeof row[5]==='number') {
-        result.totalLiquido = row[5]; break;
+      if (norm(String(row[sc(1)]||''))==='total' && typeof row[sc(5)]==='number') {
+        result.totalLiquido = row[sc(5)]; break;
       }
     }
   }
