@@ -2960,7 +2960,27 @@ function renderLedgerBody(txs, startingBalance = 0) {
   const future = txs.filter(t => t.date >  today).sort(sameDateSort);
 
   let ordered;
-  if (sortOrder === 'future') {
+  if (sortBy !== 'date') {
+    // Ordenar por qualquer coluna que não seja data: antes, esta função
+    // SEMPRE reordenava tudo cronologicamente aqui embaixo, não importa o
+    // que toggleSort()/sortBy tivessem definido — clicar em "Categoria",
+    // "Despesa" etc. destacava a coluna (seta, header ativo) mas a ordem
+    // das linhas nunca mudava de fato. Passadas e futuras ficam juntas na
+    // mesma lista (a divisória "Lançamentos futuros" só faz sentido numa
+    // ordenação cronológica); cada linha continua marcada visualmente como
+    // futura via `futCls` mais abaixo.
+    const dir = sortOrder === 'desc' ? -1 : 1;
+    const collator = (a, b) => String(a || '').localeCompare(String(b || ''), 'pt-BR');
+    const cmp = {
+      category: (a, b) => collator(a.category, b.category) || sameDateSort(a, b),
+      memo:     (a, b) => collator(a.memo, b.memo) || sameDateSort(a, b),
+      amount:   (a, b) => (a.amount - b.amount) || sameDateSort(a, b),
+      expense:  (a, b) => (a.amount - b.amount) || sameDateSort(a, b),
+      income:   (a, b) => (a.amount - b.amount) || sameDateSort(a, b),
+      balance:  (a, b) => ((balMap[a.id] ?? 0) - (balMap[b.id] ?? 0)) || sameDateSort(a, b),
+    }[sortBy] || (() => 0);
+    ordered = [...txs].sort((a, b) => dir * cmp(a, b));
+  } else if (sortOrder === 'future') {
     // Futuras primeiro (asc), depois passadas mais recentes primeiro (desc)
     ordered = [...future, ...[...past].reverse()];
   } else if (sortOrder === 'asc') {
@@ -2972,8 +2992,8 @@ function renderLedgerBody(txs, startingBalance = 0) {
   }
 
   let html = '';
-  let futureDividerShown = false;
-  let pastDividerShown   = false;
+  let futureDividerShown = sortBy !== 'date'; // sem divisória fora da ordenação por data
+  let pastDividerShown   = sortBy !== 'date';
 
   ordered.forEach((t, i) => {
     const isFuture = t.date > today;
@@ -3305,14 +3325,29 @@ function setSortBy(val) {
   else if (val === 'amount')      { sortBy = 'amount'; sortOrder = 'desc'; }
   refreshAccount();
 }
+// Clicar numa coluna ordena a tabela por ela; clicar de novo na MESMA
+// coluna inverte a direção (como qualquer planilha) — antes, um segundo
+// clique na mesma coluna não fazia nada (sempre resetava pra 'asc').
+// "Despesa"/"Receita" nasce numa direção que mostra o valor mais relevante
+// primeiro (maior despesa / maior receita), não uma ordem "asc" genérica
+// que faria pouco sentido pra quem clicou na coluna.
 function toggleSort(col) {
   if (col === 'date') {
     if (sortBy === 'date' && sortOrder === 'desc') { sortOrder = 'asc'; G('sort-select').value = 'date-asc'; }
     else if (sortBy === 'date' && sortOrder === 'asc') { sortOrder = 'future'; G('sort-select').value = 'date-future'; }
     else { sortOrder = 'desc'; G('sort-select').value = 'date-desc'; }
     sortBy = 'date';
+  } else if (sortBy === col) {
+    sortOrder = sortOrder === 'asc' ? 'desc' : 'asc';
   } else {
-    sortBy = col; sortOrder = 'asc';
+    sortBy = col;
+    sortOrder = col === 'expense' ? 'asc' : col === 'income' ? 'desc' : 'asc';
+  }
+  if (G('sort-select') && col !== 'date') {
+    // O dropdown só tem opções pra date/category/amount — sincroniza quando dá,
+    // senão deixa como está (a seta no cabeçalho já é a fonte confiável de estado).
+    if (col === 'category') G('sort-select').value = 'category';
+    else if (['amount','expense','income'].includes(col)) G('sort-select').value = 'amount';
   }
   buildLedgerHeader();
   refreshAccount();

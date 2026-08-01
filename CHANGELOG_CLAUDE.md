@@ -12,6 +12,68 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-01 — v4.85.12: fix — clicar no cabeçalho da coluna (aba Contas) não reordenava a tabela de fato
+
+### Relato do usuário
+"queria poder, na visualização de contas, poder ordenar as colunas por
+outro critério (não só pelo padrão por datas), clicando na coluna"
+
+### Investigação
+A funcionalidade parecia já existir: `buildLedgerHeader()` (`renderer.js`)
+já marcava as colunas Data/Categoria/Memorando/Despesa/Receita/Saldo como
+`sortable`, com `onclick="toggleSort(col.id)"`, seta visual (↑/↓) e classe
+`sorted` no cabeçalho ativo. `toggleSort()` atualizava `sortBy`/`sortOrder`
+corretamente.
+
+O bug real estava em `renderLedgerBody()`: a função que decide a ORDEM
+FINAL das linhas na tela **ignorava `sortBy` por completo** — sempre
+recalculava a ordem separando passado/futuro e ordenando cronologicamente
+(`sameDateSort`), não importa qual coluna estivesse marcada como ativa no
+cabeçalho. Resultado: clicar em "Categoria", "Despesa", "Receita" etc.
+destacava visualmente a coluna (seta, borda) mas a ordem das linhas na
+tabela nunca mudava — sempre continuava cronológica. Isso valia até para
+"Valor" (via o dropdown antigo `#sort-select`, que já tinha uma opção
+"Por valor"), então o bug não era exclusivo de colunas novas — era
+qualquer ordenação que não fosse por data.
+
+Bug secundário: `toggleSort()` nunca invertia a direção num segundo clique
+na mesma coluna que não fosse Data — sempre resetava pra `'asc'`,
+diferente do padrão de qualquer planilha (clicar de novo inverte).
+
+### Correção
+- `toggleSort(col)`: clicar de novo na MESMA coluna agora inverte
+  `sortOrder` (asc↔desc), igual ao comportamento já existente pra Data
+  (que mantém seu próprio ciclo desc→asc→futuras). Colunas "Despesa"/
+  "Receita" nascem numa direção que mostra o valor mais relevante primeiro
+  (maior despesa / maior receita) em vez de um "asc" genérico sem sentido
+  pra quem acabou de clicar nelas.
+- `renderLedgerBody(txs, startingBalance)`: novo ramo pra `sortBy !==
+  'date'` — ordena TODAS as transações (passadas e futuras juntas, sem a
+  divisória "Lançamentos futuros", que só faz sentido em ordem
+  cronológica) por Categoria/Memorando (localeCompare pt-BR)/Despesa/
+  Receita/Valor (todos por `amount`) ou Saldo (pelo saldo corrente já
+  calculado em `balMap`, mesmo valor exibido na coluna). Cada comparador
+  usa `sameDateSort` como critério de desempate. Ordenação por data
+  (branch original, intocado) continua com o mesmo comportamento de
+  sempre — passado/futuro separados, ciclo desc/asc/futuras-primeiro.
+
+### Verificado
+`node --check` no arquivo tocado — sem erro de sintaxe. Extraí a lógica
+dos comparadores pra um script Node isolado com 5 transações fake
+(datas/categorias/valores variados) e conferi manualmente cada resultado
+— ordenação por categoria (asc/desc, com empate resolvido por data),
+despesa (maior primeiro), receita (maior primeiro) e saldo corrente (usando
+o mesmo `balMap` calculado em ordem cronológica) — todos bateram com o
+esperado. `npm start`: app abre normal, sync de startup sem erro. Não foi
+possível clicar de fato no cabeçalho da tabela nesta sessão (sem
+automação de UI pro Electron disponível) — recomenda-se o usuário testar
+na aba Contas e reportar qualquer coluna que não se comporte como
+esperado.
+
+**Arquivo tocado**: `src/renderer.js` (`toggleSort()`, `renderLedgerBody()`).
+
+---
+
 ## 2026-07-31 (5) — v4.85.11: importação de corretora — corretora obrigatória com dropdown, revisão de ativos novos, e melhorias nas movimentações não identificadas
 
 Três pedidos do usuário sobre o fluxo de importação de corretora, todos na mesma tela (`renderBrokerPreview`/`confirmBrokerImport` em `renderer.js`).
