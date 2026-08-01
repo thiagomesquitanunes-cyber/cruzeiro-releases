@@ -12,6 +12,79 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-01 (2) — v4.85.13: fix — "Valores em Trânsito" (BTG) continuava duplicando/criando ativo fantasma
+
+### Relato do usuário
+"Ainda estamos com um pequenos problema ao importar extrato de
+corretoras. O campo 'valores em trânsito' ainda está 'duplicando' e
+mantendo valores fantasma. Mesmo problema que tinha acontecido com ativos
+que tinham mudado ligeiramente de nome" — ou seja, mesmo depois do fix de
+v4.85.11 (revisão de "ativos novos" antes de salvar).
+
+### Causa raiz
+"Valores em Trânsito" é um ativo agregado (categoria `valor_em_caixa`)
+que o parser da BTG sempre cria com `broker: 'BTG'` **fixo** (linha do
+parser, nunca muda). Só que `broker:save-parsed` (main.js) casa ativos de
+caixa por **nome + corretora EXATOS**, sem o fallback broker-agnóstico que
+ativos normais têm:
+```
+isCashAsset ? WHERE lower(name)=? AND lower(broker)=?   ← exige os dois
+            : WHERE lower(name)=? AND (broker IS NULL OR lower(broker)=?)
+                 OR WHERE lower(name)=?                  ← ativo normal cai aqui se broker não bater
+```
+`confirmBrokerImport()` (renderer.js) aplica o rótulo customizado de
+corretora (ex.: "BTG 1") em qualquer ativo cujo NOME ainda não fosse
+conhecido — na 1ª importação de "Valores em Trânsito", o nome era novo,
+então esse ativo (que deveria SEMPRE usar o broker nativo 'BTG', igual a
+"Valores em Caixa"/`caixaValue`) acabava sendo criado com `broker='BTG 1'`
+em vez de `'BTG'`. Nas importações seguintes, o parser volta a emitir
+`broker:'BTG'` (nunca 'BTG 1') — como o nome já era "conhecido", o rótulo
+customizado não era mais aplicado (comportamento correto pra ativos
+normais), mas o valor gravado (`'BTG'`) nunca batia com a linha já criada
+(`'BTG 1'`) — toda importação seguinte criava OUTRA linha nova sob
+`broker='BTG'`, e a antiga (`'BTG 1'`) virava fantasma, congelada.
+
+A revisão de "ativos novos" de v4.85.11 não pegava isso porque checava só
+o NOME pra decidir "já existe" (replicando a regra de ativos normais) —
+mas ativos de caixa também precisam bater a corretora, então um ativo já
+"conhecido pelo nome" ainda podia virar duplicata silenciosamente, sem
+passar pela revisão.
+
+### Correção (`renderer.js`)
+- `confirmBrokerImport()`: o bloco que aplica o rótulo customizado agora
+  **pula ativos com `category === 'valor_em_caixa'` incondicionalmente**
+  (mesmo na 1ª criação) — eles sempre usam o broker nativo do parser,
+  igual a "Valores em Caixa".
+- `reviewNewAssetsBeforeImport()`: a checagem de "já existe" agora exige
+  corretora exata também pra ativos de caixa (`willCreateNew()`), não só
+  nome — cobre qualquer drift futuro (ex.: se o usuário tivesse trocado o
+  rótulo antes deste fix) como candidato revisável, em vez de passar
+  batido.
+- `_narConfirmAll()`: ao confirmar "é o mesmo ativo", agora também copia
+  `broker` do ativo existente (antes só renomeava) — sem isso, confirmar
+  o match de um ativo de caixa não seria suficiente pra fazer a próxima
+  gravação bater (corretora ainda divergente).
+
+### Dado já existente
+Este fix impede NOVAS duplicatas, mas não apaga a linha fantasma que já
+foi criada antes dele (ex.: uma "Valores em Trânsito" sob "BTG 1" parada
+há alguns meses, e outra sob "BTG" sendo atualizada). Recomendo ao usuário
+localizar as duas linhas na aba Patrimônio (filtrando por "Valores em
+Trânsito"), conferir qual está desatualizada, e excluir a fantasma
+manualmente — não mexi nos dados de produção nesta sessão.
+
+### Verificado
+`node --check` — sem erro de sintaxe. `npm start` — janela abre
+normalmente, sem crash. Não foi possível reproduzir com um extrato BTG
+real nesta sessão (exigiria dados de produção); a correção foi validada
+por leitura de código cruzando a lógica de matching de main.js com o
+fluxo de renderer.js ponto a ponto.
+
+**Arquivo tocado**: `src/renderer.js` (`confirmBrokerImport()`,
+`reviewNewAssetsBeforeImport()`, `_narConfirmAll()`).
+
+---
+
 ## 2026-08-01 — v4.85.12: fix — clicar no cabeçalho da coluna (aba Contas) não reordenava a tabela de fato
 
 ### Relato do usuário

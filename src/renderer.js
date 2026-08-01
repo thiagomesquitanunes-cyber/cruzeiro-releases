@@ -10874,10 +10874,25 @@ let _newAssetReview = null; // { candidates, parsed, resolve }
 // próxima importação já reconhece sozinha, sem passar por aqui de novo.
 // Retorna true pra seguir com o salvamento, false se o usuário cancelou.
 async function reviewNewAssetsBeforeImport(parsed) {
-  const knownExact = new Set(_invAssetsList.map(a => norm(a.name)));
+  // Ativos "de caixa" agregados (categoria 'valor_em_caixa', ex.: "Valores
+  // em Trânsito") casam em main.js por nome+corretora EXATOS, sem o
+  // fallback broker-agnóstico que ativos normais têm — nome batendo
+  // sozinho não basta pra saber que NÃO vai criar um registro novo. Sem
+  // essa checagem extra, um ativo de caixa cujo broker divergisse (ex.:
+  // ficou gravado como "BTG 1" numa importação anterior e o parser sempre
+  // reemite o nativo "BTG") passava batido por esta revisão (nome já
+  // "conhecido") e ainda assim criava uma linha nova em main.js — bug real
+  // reportado pelo usuário.
+  const willCreateNew = asset => {
+    const nName = norm(asset.name);
+    if (asset.category === 'valor_em_caixa') {
+      return !_invAssetsList.some(a => norm(a.name) === nName && norm(a.broker || '') === norm(asset.broker || ''));
+    }
+    return !_invAssetsList.some(a => norm(a.name) === nName);
+  };
   const candidates = parsed.assets
     .map((asset, idx) => ({ idx, asset }))
-    .filter(({ asset }) => asset.name && !knownExact.has(norm(asset.name)));
+    .filter(({ asset }) => asset.name && willCreateNew(asset));
   if (!candidates.length) return true; // nada seria criado como novo — segue direto
 
   // Último valor conhecido de cada ativo já cadastrado até o mês desta
@@ -11004,6 +11019,14 @@ window._narConfirmAll = () => {
       if (matched) {
         const origName = parsed.assets[c.idx].name;
         parsed.assets[c.idx].name = matched.name;
+        // Herda a corretora do ativo já existente — essencial pra ativos
+        // de caixa (categoria 'valor_em_caixa'), que main.js casa por
+        // nome+corretora EXATOS (sem fallback broker-agnóstico): só
+        // renomear não bastaria, a próxima gravação ainda criaria uma
+        // linha nova se o broker continuasse divergente. Pra ativos
+        // normais é inofensivo (o UPDATE em main.js já sobrescreveria o
+        // broker mesmo sem isso).
+        parsed.assets[c.idx].broker = matched.broker;
         // Aprende o mapeamento (mesmo mecanismo do rename manual na
         // tabela) — a próxima importação já reconhece sozinha.
         ff.brokerMappingLearn({ broker: parsed.broker, original: origName, mapped: matched.name }).catch(() => {});
@@ -11144,9 +11167,23 @@ async function confirmBrokerImport() {
   // o mesmo ativo de antes" vs "é novo" — se sobrescrevesse o broker de um
   // ativo já existente, a próxima importação criaria um ativo DUPLICADO em
   // vez de atualizar o mesmo.
+  //
+  // EXCEÇÃO: ativos de caixa agregados (categoria 'valor_em_caixa', ex.:
+  // "Valores em Trânsito" da BTG) NUNCA recebem o rótulo customizado, nem
+  // na primeira criação. Eles já vêm do parser com um broker nativo fixo
+  // (ex.: 'BTG', igual ao que "Valores em Caixa"/caixaValue usa sempre) —
+  // e main.js casa ativos de caixa por nome+corretora EXATOS, sem
+  // fallback broker-agnóstico (ao contrário de ativos normais). Se a
+  // primeira importação desse item aplicasse o rótulo customizado
+  // (ex.: "BTG 1") mas o parser sempre reemitir o broker nativo
+  // ('BTG') nas importações seguintes, a 2ª importação em diante nunca
+  // mais bateria com a linha criada na 1ª — ela virava "fantasma" (parada,
+  // repetindo o último valor pra sempre) e uma linha nova nascia toda vez.
+  // Bug real reportado pelo usuário após a introdução do rótulo customizado.
   {
     const knownNames = new Set(_invAssetsList.map(a => norm(a.name)));
     parsed.assets.forEach(a => {
+      if (a.category === 'valor_em_caixa') return;
       if (!knownNames.has(norm(a.name))) a.broker = brokerLabel;
     });
   }
