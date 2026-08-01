@@ -3840,12 +3840,33 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
       // saldo em caixa de outra em vez de cada uma ficar com sua própria
       // linha (que depois são somadas normalmente em qualquer totalização).
       const isCashAsset = a.category === 'valor_em_caixa' || (a.name||'').toLowerCase().trim() === 'valores em caixa';
-      let existing = isCashAsset
-        ? first('SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND lower(COALESCE(broker,\'\'))=lower(?)', [a.name, a.broker || ''])
-        : (first(
+      let existing;
+      if (isCashAsset) {
+        existing = first('SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND lower(COALESCE(broker,\'\'))=lower(?)', [a.name, a.broker || '']);
+      } else {
+        // Código (ticker) primeiro, se o ativo tiver um — é uma identidade
+        // muito mais estável que o nome completo pra renda variável. A BTG,
+        // por exemplo, insere uma "flag" transitória no meio do nome (ex.:
+        // "PETROBRAS PN N2" num mês, "PETROBRAS PN ATZ N2" no seguinte,
+        // "PETROBRAS PN ERJ N2" no outro — mesmo código PETR4 o tempo
+        // todo). Casando só por nome, cada mudança de flag criava um ativo
+        // NOVO e deixava o anterior parado pra sempre (fantasma) — bug real
+        // reportado pelo usuário com prints mostrando várias linhas
+        // "PETROBRAS PN ..." / "BRASIL ON ..." / "PETRORIO/PRIO ON ..." etc,
+        // uma por variação de flag observada mês a mês. Broker exato
+        // primeiro (mesmo motivo do nome — duas contas na mesma corretora
+        // podem ter o mesmo papel como posições DIFERENTES), com fallback
+        // pra qualquer corretora.
+        existing = (a.code && first(
+            'SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE AND lower(COALESCE(broker,\'\'))=lower(?)',
+            [a.code, a.broker || '']
+          ))
+          || (a.code && first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE', [a.code]))
+          || first(
             'SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND (broker IS NULL OR lower(broker)=lower(?))',
             [a.name, a.broker || '']
-          ) || first('SELECT id FROM inv_assets WHERE lower(name)=lower(?)', [a.name]));
+          ) || first('SELECT id FROM inv_assets WHERE lower(name)=lower(?)', [a.name]);
+      }
 
       let assetId;
       if (existing) {

@@ -10962,6 +10962,16 @@ async function reviewNewAssetsBeforeImport(parsed) {
     if (asset.category === 'valor_em_caixa') {
       return !_invAssetsList.some(a => norm(a.name) === nName && norm(a.broker || '') === norm(asset.broker || ''));
     }
+    // Código (ticker) primeiro — mesma prioridade de main.js
+    // (broker:save-parsed). Sem isso, um ativo de renda variável cujo
+    // NOME completo mudou (ex.: a BTG inserindo/removendo uma flag tipo
+    // "ATZ"/"ERJ" no meio do texto) aparecia aqui como "novo" toda
+    // importação, mesmo já batendo perfeitamente pelo código — ruído
+    // desnecessário, já que o salvamento nem precisa da confirmação.
+    if (asset.code) {
+      const nCode = norm(asset.code);
+      if (_invAssetsList.some(a => a.code && norm(a.code) === nCode)) return false;
+    }
     return !_invAssetsList.some(a => norm(a.name) === nName);
   };
   const candidates = parsed.assets

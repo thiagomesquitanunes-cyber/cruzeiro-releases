@@ -12,6 +12,90 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-01 (4) — v4.85.15: fix raiz — renda variável (BTG) casando por CÓDIGO em vez de nome, elimina duplicatas/fantasmas de vez
+
+### Relato do usuário
+"Ainda está dando problema na importação, confundindo nomes." — com 5
+prints da aba Patrimônio mostrando várias linhas por ticker (ex.:
+"PETROBRAS PN N2" / "PETROBRAS PN ATZ N2" / "PETROBRAS PN ERJ N2", todas
+com código PETR4) e os 5 arquivos reais BTG de Jan a Mai/2026.
+
+### Causa raiz (achada analisando os arquivos reais)
+A BTG insere uma "flag" transitória de 2-3 letras no meio do nome
+completo de cada ação/BDR — "ATZ", "ERJ", "EJ", "ED" — que **muda de mês
+pra mês pro MESMO papel**, sem relação com identidade do ativo (parece
+algum indicador de evento societário passageiro do sistema da BTG).
+Exemplo real extraído dos arquivos do usuário, mesmo código PETR4 nos 5
+meses:
+```
+Jan: PETROBRAS   PN      N2
+Fev: PETROBRAS   PN  ATZ N2
+Mar: PETROBRAS   PN  ATZ N2
+Abr: PETROBRAS   PN  ERJ N2
+Mai: PETROBRAS   PN  ATZ N2
+```
+PRIO3 teve o caso mais extremo: a própria BTG trocou o nome da empresa de
+"PETRORIO" pra "PRIO" no meio do período, combinado com a flag variável —
+4 variações de nome pro mesmo código em 5 meses.
+
+O parser da BTG sempre usou esse nome completo (com a flag) como `name`
+do ativo — e `broker:save-parsed` (main.js) sempre casou ativos por
+**nome**, não por código. Cada mudança de flag = ativo "novo" pro app =
+duplicata, com o anterior virando fantasma (parado, repetindo o último
+valor). As correções anteriores desta sessão (v4.85.11: revisão de
+"ativos novos"; v4.85.13: "Valores em Trânsito") atacaram sintomas
+relacionados mas não esta causa — a revisão de v4.85.11 dependia do
+usuário confirmar manualmente a cada import, o que não escala pra um
+problema que acontece quase todo mês em quase todo papel.
+
+### Correção
+O **código** (ticker, ex.: PETR4) é uma identidade muito mais estável que
+o nome completo — nunca muda entre os 5 arquivos analisados, mesmo
+quando o nome muda 4 vezes.
+
+- `main.js` (`broker:save-parsed`): ativos NÃO-caixa agora casam por
+  **código primeiro** (broker exato, depois qualquer broker), só caindo
+  pro casamento por nome (comportamento antigo, inalterado) quando o
+  ativo não tem código. `name` continua imutável após a criação (como já
+  era) — a primeira variação de flag capturada fica congelada no nome de
+  exibição pra sempre, o que é cosmético, não um bug de dados.
+- `renderer.js` (`reviewNewAssetsBeforeImport` → `willCreateNew()`):
+  mesma prioridade de código aplicada na checagem de "isto vai criar um
+  ativo novo?" — evita que a revisão de v4.85.11 sinalize como "novo" um
+  ativo que já vai bater sozinho pelo código, reduzindo ruído.
+
+### Verificado (com os arquivos reais do usuário)
+Escrevi um script isolado (`sql.js` em memória, mesma engine SQLite do
+app) que reimplementa a extração de posições de Renda Variável e simula
+as 5 importações sequenciais (Jan→Mai) com a lógica ANTIGA e a NOVA lado
+a lado:
+```
+LÓGICA ANTIGA (só nome): 25 linhas criadas p/ 14 tickers reais
+  ⚠️ DUPLICADO ASML34: 2 linhas   ⚠️ DUPLICADO BBAS3: 3 linhas
+  ⚠️ DUPLICADO ITUB4: 2 linhas    ⚠️ DUPLICADO PETR4: 3 linhas
+  ⚠️ DUPLICADO PRIO3: 4 linhas    ⚠️ DUPLICADO VALE3: 2 linhas
+  ⚠️ DUPLICADO VBBR3: 2 linhas
+LÓGICA NOVA (código primeiro): 14 linhas criadas, 56 atualizações
+  ✅ Nenhum código duplicado — 1 linha por ticker
+```
+Bate exatamente com os prints do usuário (mesmos tickers duplicados,
+mesma contagem de variações no PRIO3). `node --check` nos dois arquivos —
+sem erro de sintaxe. `npm start` — app abre normal.
+
+### Dado já existente
+Este fix impede duplicatas NOVAS a partir de agora, mas não limpa as que
+já foram criadas nas importações anteriores (as linhas "fantasma" visíveis
+nos prints do usuário, ex.: "PETROBRAS PN N2" parada desde Jan enquanto
+"PETROBRAS PN ATZ N2" seguia sendo atualizada). Não mexi nos dados de
+produção nesta sessão — recomendo ao usuário revisar a aba Patrimônio,
+identificar as linhas duplicadas por ticker (mesmo "Código", nomes
+parecidos, uma delas com valor congelado há meses) e excluir as
+fantasmas manualmente, mantendo a que tem o histórico mais completo/atual.
+
+**Arquivos tocados**: `src/main.js`, `src/renderer.js`.
+
+---
+
 ## 2026-08-01 (3) — v4.85.14: importação de corretora — "vincular a ativo" também nas movimentações fora de ativos
 
 ### Relato do usuário
