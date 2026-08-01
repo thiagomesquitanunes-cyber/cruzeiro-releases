@@ -12,6 +12,50 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-01 (3) — v4.85.14: importação de corretora — "vincular a ativo" também nas movimentações fora de ativos
+
+### Relato do usuário
+"Não está dando a opção de vincular a um ativo, como tínhamos combinado"
+— com print do modal "Lançamentos não relacionados a ativos" (ex.: "VLR.
+AMORTIZ. - DEB AUTOPISTA LITORAL SUL", "CASHBACK GESTÃO DE CARTEIRA"),
+mostrando só Categoria (sem opção de vincular a ativo).
+
+### Contexto
+O pedido original ("permitir que o usuário identifique que é uma
+movimentação vinculada a algum investimento financeiro sim") foi
+implementado em v4.85.11, mas só no fluxo de **"movimentações não
+identificadas"** (`unresolvedMovements` — itens que o parser suspeita
+serem de algum ativo mas não conseguiu casar com segurança). Existe um
+SEGUNDO fluxo, separado, pra **"lançamentos não relacionados a ativos"**
+(`nonAssetMovements` — itens que o parser tem confiança de que NÃO são de
+nenhum ativo, tipo PIX/TED avulsos) — esse modal (`showBrokerNonAssetReview`)
+nunca ganhou a opção de vincular, só Memorando/Categoria (fluxo igual ao
+importador bancário comum). Os itens do print (amortização de debênture,
+cashback) claramente pertencem a um ativo específico — o parser só não
+tinha confiança pra atribuir sozinho.
+
+### Correção (`renderer.js`, `index.html`)
+Diferença importante de arquitetura: a revisão de `nonAssetMovements` roda
+**DEPOIS** de `ff.brokerSaveParsed()` já ter persistido os ativos desta
+importação (ao contrário de `unresolvedMovements`, que roda antes) — não
+dá mais pra simplesmente empurrar pra `parsed.assets`. A vinculação aqui
+grava direto via `ff.invTxSave()`, mesmo mecanismo já usado pela inserção
+manual (`applyManualEntryToAsset`).
+
+- `showBrokerNonAssetReview()`: recarrega `_invAssetsList` (`loadInvAssetsList()`) antes de renderizar, pra incluir ativos recém-criados nesta mesma importação como opção.
+- `renderBrokerNonAssetRows()`: cada linha ganhou um `<select>` "🔗 Vincular a ativo…" com todos os ativos cadastrados. Ao escolher um, a linha muda de modo — mostra o nome do ativo + um segundo `<select>` com o tipo de movimentação (Compra/Aporte, Venda, Amortização/Resgate, Dividendo, Juros, Taxa, JCP, Cupom — mesmo conjunto de `INV_TX_CASH`, com um palpite inicial baseado no sinal do valor: positivo→Dividendo, negativo→Taxa, sempre editável) e um botão "✕" pra desvincular.
+- `resolveBrokerNonAsset()`: linhas vinculadas não entram mais no lançamento avulso da conta — para cada uma, chama `ff.invTxSave({asset_id, month, tx_type, total_value: Math.abs(amount), notes:'__broker_import__'})`. O efeito de caixa dessas movimentações continua coberto pelo ajuste de saldo calculado depois (mesma lógica de itens ignorados) — o que muda é que agora ficam registradas no histórico do ativo específico, em vez de aparecerem como lançamento genérico da conta ou desaparecerem no ajuste sem rastro.
+- `index.html`: modal `#modal-broker-nonasset` alargado (820px→900px) e cabeçalho da tabela ganhou a coluna "Vincular a ativo".
+
+### Verificado
+`node --check` — sem erro de sintaxe. `npm start` — app abre normal, sem
+erro no console do processo principal. Não testado fim-a-fim com um
+extrato real nesta sessão.
+
+**Arquivos tocados**: `src/renderer.js`, `src/index.html`.
+
+---
+
 ## 2026-08-01 (2) — v4.85.13: fix — "Valores em Trânsito" (BTG) continuava duplicando/criando ativo fantasma
 
 ### Relato do usuário

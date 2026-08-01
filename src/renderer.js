@@ -10737,7 +10737,12 @@ let _brokerNonAssetAccountId = null;
 
 async function showBrokerNonAssetReview(movements, accountId) {
   _brokerNonAssetAccountId = accountId;
-  _brokerNonAssetRows = movements.map((m, i) => ({ ...m, _idx: i, memo: m.desc, category: '' }));
+  _brokerNonAssetRows = movements.map((m, i) => ({ ...m, _idx: i, memo: m.desc, category: '', _linkAssetId: null, _linkTxType: null }));
+
+  // Recarrega a lista de ativos — se esta mesma importação acabou de criar
+  // um ativo novo (broker:save-parsed já rodou antes desta revisão), ele
+  // precisa aparecer como opção pra vincular também.
+  await loadInvAssetsList();
 
   // Sugestões de ML em lote — mesma mecânica da importação bancária normal.
   let preds = [];
@@ -10756,7 +10761,7 @@ async function showBrokerNonAssetReview(movements, accountId) {
   });
 
   G('broker-nonasset-sub').textContent =
-    `${_brokerNonAssetRows.length} lançamento(s) do extrato não foram reconhecidos como movimentação de nenhum ativo. Escolha quais registrar individualmente na conta — o restante é absorvido pelo ajuste de saldo ao final.`;
+    `${_brokerNonAssetRows.length} lançamento(s) do extrato não foram reconhecidos como movimentação de nenhum ativo. Escolha quais registrar individualmente na conta, ou vincule a um ativo específico (ex.: amortização, cashback) — o restante é absorvido pelo ajuste de saldo ao final.`;
   renderBrokerNonAssetRows();
   const btn = document.querySelector('#modal-broker-nonasset button.primary');
   if (btn) { btn.disabled = false; btn.textContent = 'Importar selecionadas'; }
@@ -10765,18 +10770,72 @@ async function showBrokerNonAssetReview(movements, accountId) {
   return new Promise(resolve => { _brokerNonAssetResolve = resolve; });
 }
 
+// Vincula uma "movimentação não relacionada a ativo" a um ativo existente
+// em vez de importá-la como lançamento avulso na conta — pedido do
+// usuário: itens como "VLR. AMORTIZ. - DEB AUTOPISTA LITORAL SUL" ou
+// "CASHBACK GESTÃO DE CARTEIRA" claramente pertencem a um ativo
+// específico, mas o parser não tem confiança suficiente pra atribuir
+// sozinho. Diferente da revisão de "movimentações não identificadas"
+// (que roda ANTES de broker:save-parsed e injeta em parsed.assets), esta
+// tela roda DEPOIS — os ativos desta importação já foram persistidos —
+// então vincular aqui grava a transação diretamente via ff.invTxSave
+// (mesmo mecanismo de applyManualEntryToAsset/inserção manual).
+window._naToggleAssetSelect = (idx) => {
+  const sel = G(`na-asset-sel-${idx}`);
+  const assetId = parseInt(sel?.value);
+  if (!assetId) return;
+  const r = _brokerNonAssetRows[idx];
+  if (!r) return;
+  r._linkAssetId = assetId;
+  r._linkTxType = r.amount >= 0 ? 'dividendo' : 'taxa';
+  renderBrokerNonAssetRows();
+};
+window._naSetTxType = (idx, val) => {
+  const r = _brokerNonAssetRows[idx];
+  if (r) r._linkTxType = val;
+};
+window._naUnlink = (idx) => {
+  const r = _brokerNonAssetRows[idx];
+  if (r) { r._linkAssetId = null; r._linkTxType = null; }
+  renderBrokerNonAssetRows();
+};
+
 function renderBrokerNonAssetRows() {
   const el = G('broker-nonasset-rows');
   if (!el) return;
-  el.innerHTML = _brokerNonAssetRows.map(r => `
+  const assetOptions = _invAssetsList.slice()
+    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'))
+    .map(a => `<option value="${a.id}">${esc(a.name)}${a.broker ? ` (${esc(a.broker)})` : ''}</option>`).join('');
+  const txTypeOptionsFor = sel => Object.entries(INV_TX_CASH)
+    .map(([k, v]) => `<option value="${k}" ${k === sel ? 'selected' : ''}>${v.label}</option>`).join('');
+
+  el.innerHTML = _brokerNonAssetRows.map(r => {
+    if (r._linkAssetId) {
+      const asset = _invAssetsList.find(a => a.id === r._linkAssetId);
+      return `
+      <div style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);background:var(--accent-bg)">
+        <div style="width:76px;flex-shrink:0;font-size:12px;color:var(--text2)">${fmtDateBR(r.date)}</div>
+        <div style="width:110px;flex-shrink:0;font-size:13px;font-weight:600;text-align:right;color:${r.amount<0?'#c0392b':'#1a7f37'}">${fmtBRL(r.amount)}</div>
+        <div style="flex:1;font-size:12px;min-width:140px" title="${esc(r.desc)}">🔗 <strong>${esc(asset?.name || '')}</strong></div>
+        <select class="inp" style="width:190px;font-size:11px" onchange="window._naSetTxType(${r._idx},this.value)">
+          ${txTypeOptionsFor(r._linkTxType)}
+        </select>
+        <button type="button" class="btn xs" title="Desvincular" onclick="window._naUnlink(${r._idx})">✕</button>
+      </div>`;
+    }
+    return `
     <div style="display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
       <input type="checkbox" class="broker-nonasset-chk" data-idx="${r._idx}" checked>
       <div style="width:76px;flex-shrink:0;font-size:12px;color:var(--text2)">${fmtDateBR(r.date)}</div>
       <div style="width:110px;flex-shrink:0;font-size:13px;font-weight:600;text-align:right;color:${r.amount<0?'#c0392b':'#1a7f37'}">${fmtBRL(r.amount)}</div>
-      <input class="inp broker-nonasset-memo" data-idx="${r._idx}" style="flex:1;min-width:140px" value="${esc(r.memo)}" title="${esc(r.desc)}">
-      <input class="inp broker-nonasset-cat" data-idx="${r._idx}" style="width:180px" value="${esc(r.category)}" oninput="openGlobalCatDrop(this)" onfocus="openGlobalCatDrop(this)" placeholder="Categoria">
-    </div>
-  `).join('');
+      <input class="inp broker-nonasset-memo" data-idx="${r._idx}" style="flex:1;min-width:120px" value="${esc(r.memo)}" title="${esc(r.desc)}">
+      <input class="inp broker-nonasset-cat" data-idx="${r._idx}" style="width:150px" value="${esc(r.category)}" oninput="openGlobalCatDrop(this)" onfocus="openGlobalCatDrop(this)" placeholder="Categoria">
+      <select class="inp" id="na-asset-sel-${r._idx}" style="width:150px;font-size:11px" onchange="window._naToggleAssetSelect(${r._idx})">
+        <option value="">🔗 Vincular a ativo…</option>
+        ${assetOptions}
+      </select>
+    </div>`;
+  }).join('');
 }
 
 function toggleAllBrokerNonAsset(checked) {
@@ -10800,10 +10859,25 @@ async function resolveBrokerNonAsset(action) {
   });
   const checkedIdx = new Set();
   document.querySelectorAll('.broker-nonasset-chk').forEach(c => { if (c.checked) checkedIdx.add(parseInt(c.dataset.idx)); });
-  const toImport = _brokerNonAssetRows.filter(r => checkedIdx.has(r._idx));
+  const linked   = _brokerNonAssetRows.filter(r => r._linkAssetId);
+  const toImport = _brokerNonAssetRows.filter(r => !r._linkAssetId && checkedIdx.has(r._idx));
 
   const btn = document.querySelector('#modal-broker-nonasset button.primary');
   if (btn) { btn.disabled = true; btn.textContent = 'Importando…'; }
+
+  // Linhas vinculadas a um ativo (ver window._naToggleAssetSelect) — grava
+  // a movimentação direto no ativo (mesmo mecanismo de applyManualEntryToAsset),
+  // em vez de lançar como transação avulsa na conta.
+  let linkedCount = 0;
+  for (const r of linked) {
+    try {
+      await ff.invTxSave({
+        id: null, asset_id: r._linkAssetId, month: r.date.slice(0, 7), tx_type: r._linkTxType,
+        qty: null, unit_value: null, total_value: Math.abs(r.amount), notes: '__broker_import__',
+      });
+      linkedCount++;
+    } catch(e) { /* segue pras próximas */ }
+  }
 
   let imported = 0;
   for (const r of toImport) {
@@ -10825,7 +10899,7 @@ async function resolveBrokerNonAsset(action) {
 
   if (btn) { btn.disabled = false; btn.textContent = 'Importar selecionadas'; }
   closeModal('modal-broker-nonasset');
-  if (_brokerNonAssetResolve) { _brokerNonAssetResolve({ imported }); _brokerNonAssetResolve = null; }
+  if (_brokerNonAssetResolve) { _brokerNonAssetResolve({ imported, linked: linkedCount }); _brokerNonAssetResolve = null; }
 }
 
 // ── Revisão de "ativos novos" antes de salvar ───────────────────────────
@@ -11207,7 +11281,8 @@ async function confirmBrokerImport() {
     let nonAssetMsg = '';
     if (brokerAccountId && parsed.nonAssetMovements?.length) {
       const naResult = await showBrokerNonAssetReview(parsed.nonAssetMovements, brokerAccountId);
-      if (naResult?.imported) nonAssetMsg = `<br>📥 ${naResult.imported} lançamento(s) fora de ativos importado(s) individualmente`;
+      if (naResult?.imported) nonAssetMsg += `<br>📥 ${naResult.imported} lançamento(s) fora de ativos importado(s) individualmente`;
+      if (naResult?.linked)   nonAssetMsg += `<br>🔗 ${naResult.linked} lançamento(s) vinculado(s) a ativos existentes`;
     }
 
     let adjMsg = '';
