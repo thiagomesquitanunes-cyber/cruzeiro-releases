@@ -10195,8 +10195,36 @@ async function checkUnresolvedAgainstAccount(p, accountId) {
       const mv = p.unresolvedMovements[mt.rowIndex];
       if (mv) { mv._existingMatch = mt.existing[0]; found = true; }
     });
-    if (found) renderBrokerPreview(p);
+    if (found) { syncBrokerPreviewEdits(p); renderBrokerPreview(p); }
   } catch(e) {}
+}
+
+// Grava de volta em `p.assets[i]` o que o usuário já tinha editado nos
+// campos desta tabela (nome/categoria/tipo/valor/ext/rend) ANTES de um
+// rebuild completo do HTML disparado por uma ação em OUTRA linha
+// (reclassificar movimentação ❓, remover/restaurar ativo, resolver
+// movimentação não atribuída, etc.). Bug real: o usuário selecionava o
+// nome certo no dropdown de apelidos pra vários ativos BTG, um a um, mas
+// ao reclassificar uma movimentação no meio do processo (bem comum, já
+// que BTG costuma ter várias ❓) a tela inteira era reconstruída a partir
+// do `parsed` original — que só recebe o nome editado no confirm final —
+// revertendo silenciosamente TODAS as escolhas já feitas nas outras
+// linhas pro nome cru do extrato. Isso fazia o "aprendizado" nunca rodar
+// de fato: no confirm, o nome lido do campo (já revertido) batia com o
+// nome original, então `ff.brokerMappingLearn` era chamado como um no-op.
+function syncBrokerPreviewEdits(p) {
+  const preview = G('broker-preview');
+  if (!preview || !p?.assets) return;
+  const grab = (sel, field) => preview.querySelectorAll(sel).forEach(el => {
+    const i = parseInt(el.dataset.idx);
+    if (p.assets[i]) p.assets[i][field] = el.value;
+  });
+  grab('.broker-name-inp', '_editedName');
+  grab('.broker-cat-sel', '_editedCategory');
+  grab('.broker-type-sel', '_editedType');
+  grab('.broker-valor-inp', '_editedValorInp');
+  grab('.broker-ext-inp', '_editedExtInp');
+  grab('.broker-inc-inp', '_editedIncInp');
 }
 
 function renderBrokerPreview(parsed) {
@@ -10260,6 +10288,7 @@ function renderBrokerPreview(parsed) {
 
   // Handler to reclassify an unknown flow and memorize the term
   window._reclassifyBrokerFlow = function(assetIdx, globalMovIdx, newType) {
+    syncBrokerPreviewEdits(parsed);
     const a = parsed.assets[assetIdx];
     const mov = (a.movimentacoes||[])[globalMovIdx];
     if (!mov) return;
@@ -10334,6 +10363,7 @@ function renderBrokerPreview(parsed) {
   window._toggleBrokerAssetRemoved = (idx) => {
     const p = G('broker-preview')._parsed;
     if (!p?.assets?.[idx]) return;
+    syncBrokerPreviewEdits(p);
     p.assets[idx]._removed = !p.assets[idx]._removed;
     renderBrokerPreview(p);
   };
@@ -10378,7 +10408,10 @@ function renderBrokerPreview(parsed) {
     // vez de deixar em branco. O usuário pode alterar (e o app memoriza,
     // como já fazia) ou simplesmente manter o nome oficial sem trabalho.
     // Deixar em branco fazia o ativo ser pulado silenciosamente na importação.
-    const prefill = learned || a.name || '';
+    // PRIORIDADE MÁXIMA: uma edição já em andamento nesta MESMA sessão de
+    // pré-visualização (ver syncBrokerPreviewEdits) — sem isso, um rebuild
+    // disparado por outra linha reverteria a escolha do usuário.
+    const prefill = a._editedName != null ? a._editedName : (learned || a.name || '');
     const borderStyle = learned ? 'border-color:var(--accent)' : '';
     const nameInput = `<div style="display:flex;align-items:center;gap:2px">
       <input class="inp broker-name-inp" data-idx="${i}"
@@ -10389,8 +10422,10 @@ function renderBrokerPreview(parsed) {
         style="padding:2px 4px;font-size:9px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer"
         onmousedown="event.preventDefault();window._openBrokerNameDrop(this.previousElementSibling)">▾</button>
     </div>`;
+    const curCategory = a._editedCategory != null ? a._editedCategory : a.category;
+    const curType = a._editedType != null ? a._editedType : (a.inv_type || '');
     const CAT_OPTIONS = ['fundos','renda_fixa','tesouro','previdencia','renda_variavel','valor_em_caixa']
-      .map(c => `<option value="${c}" ${a.category===c?'selected':''}>${catLabel(c)}</option>`).join('');
+      .map(c => `<option value="${c}" ${curCategory===c?'selected':''}>${catLabel(c)}</option>`).join('');
     const { extCell, incCell, extTotal, incTotal, unkHtml } = buildFlowCells(a, i);
     const unkRow = unkHtml ? `<tr style="background:var(--bg3)">
       <td colspan="6" style="padding:0 4px"></td>
@@ -10416,20 +10451,20 @@ function renderBrokerPreview(parsed) {
       </td>
       <td style="padding:3px 4px">
         <select class="broker-type-sel inp" data-idx="${i}" style="font-size:11px;padding:2px 4px;min-width:110px" ${dis}>
-          ${window._brokerTypeOptions(a.category, a.inv_type||'')}
+          ${window._brokerTypeOptions(curCategory, curType)}
         </select>
       </td>
       <td style="font-size:11px;padding:4px 6px;text-align:center">${vencLabel}</td>
       <td style="text-align:center;padding:4px 6px">
-        <input class="broker-valor-inp inp" data-idx="${i}" value="${a.valor!=null?fmtBRL(a.valor):''}" ${dis}
+        <input class="broker-valor-inp inp" data-idx="${i}" value="${esc(a._editedValorInp != null ? a._editedValorInp : (a.valor!=null?fmtBRL(a.valor):''))}" ${dis}
           style="font-size:11px;padding:2px 5px;min-width:90px;text-align:right;font-family:'DM Mono',monospace;color:var(--green)">
       </td>
       <td style="text-align:center;padding:4px 6px">
-        <input class="broker-ext-inp inp" data-idx="${i}" value="${extTotal?fmtBRL(extTotal):''}" ${dis}
+        <input class="broker-ext-inp inp" data-idx="${i}" value="${esc(a._editedExtInp != null ? a._editedExtInp : (extTotal?fmtBRL(extTotal):''))}" ${dis}
           style="font-size:11px;padding:2px 5px;min-width:80px;text-align:right;font-family:'DM Mono',monospace;color:var(--accent)">
       </td>
       <td style="text-align:center;padding:4px 6px">
-        <input class="broker-inc-inp inp" data-idx="${i}" value="${incTotal?fmtBRL(incTotal):''}" ${dis}
+        <input class="broker-inc-inp inp" data-idx="${i}" value="${esc(a._editedIncInp != null ? a._editedIncInp : (incTotal?fmtBRL(incTotal):''))}" ${dis}
           style="font-size:11px;padding:2px 5px;min-width:80px;text-align:right;font-family:'DM Mono',monospace;color:var(--green)">
       </td>
       <td style="font-size:11px;padding:4px 8px;text-align:center;color:#d97706">${unclassifiedCount ? `❓ ${unclassifiedCount}` : ''}</td>
@@ -10459,6 +10494,7 @@ function renderBrokerPreview(parsed) {
     if (!val) return;
     const asset = _resolveUnresolvedAssetTarget(val, p);
     if (!asset) return;
+    syncBrokerPreviewEdits(p);
     asset.movimentacoes = asset.movimentacoes || [];
     asset.movimentacoes.push({ amount: m.amount, type: m.desc, flow_type: m.suggestedFlowType || null });
     p.unresolvedMovements.splice(i, 1);
@@ -10482,21 +10518,25 @@ function renderBrokerPreview(parsed) {
   window._unresolvedToggleSplit = (i) => {
     const p = G('broker-preview')._parsed;
     const m = p.unresolvedMovements[i];
+    syncBrokerPreviewEdits(p);
     m._split = m._split ? null : [{ assetIdx: null, amount: null }, { assetIdx: null, amount: null }];
     renderBrokerPreview(p);
   };
   window._unresolvedSplitAddRow = (i) => {
     const p = G('broker-preview')._parsed;
+    syncBrokerPreviewEdits(p);
     p.unresolvedMovements[i]._split.push({ assetIdx: null, amount: null });
     renderBrokerPreview(p);
   };
   window._unresolvedSplitRemoveRow = (i, ji) => {
     const p = G('broker-preview')._parsed;
+    syncBrokerPreviewEdits(p);
     p.unresolvedMovements[i]._split.splice(ji, 1);
     renderBrokerPreview(p);
   };
   window._unresolvedSplitSetAsset = (i, ji, val) => {
     const p = G('broker-preview')._parsed;
+    syncBrokerPreviewEdits(p);
     // Guarda o valor "cru" do <select> ("p:N" ou "db:ID") — não mais um
     // índice puro, já que agora também pode apontar pra um ativo só
     // cadastrado no app (sem linha nesta importação). Ver _resolveUnresolvedAssetTarget.
@@ -10505,12 +10545,14 @@ function renderBrokerPreview(parsed) {
   };
   window._unresolvedSplitSetAmount = (i, ji, val) => {
     const p = G('broker-preview')._parsed;
+    syncBrokerPreviewEdits(p);
     p.unresolvedMovements[i]._split[ji].amount = window._brokerParseBRL(val);
     renderBrokerPreview(p);
   };
   window._unresolvedSplitConfirm = (i) => {
     const p = G('broker-preview')._parsed;
     const m = p.unresolvedMovements[i];
+    syncBrokerPreviewEdits(p);
     const allocs = (m._split || []).filter(al => al.assetIdx != null && al.amount);
     const sum = allocs.reduce((s,al) => s + al.amount, 0);
     if (!allocs.length || Math.abs(Math.abs(sum) - Math.abs(m.amount)) > 0.01) return; // botão fica desabilitado nesse caso, mas reforça aqui
@@ -10525,6 +10567,7 @@ function renderBrokerPreview(parsed) {
   };
   window._unresolvedIgnore = (i) => {
     const p = G('broker-preview')._parsed;
+    syncBrokerPreviewEdits(p);
     p.unresolvedMovements.splice(i, 1);
     p._ignoredUnresolvedCount = (p._ignoredUnresolvedCount || 0) + 1;
     renderBrokerPreview(p);
@@ -26008,6 +26051,7 @@ async function completeBrokerAssetLink(assetId, assetName, link) {
     if (!p) return;
     if (p.unresolvedMovements[link.movementIdx]) p.unresolvedMovements.splice(link.movementIdx, 1);
     toast(`✅ Movimentação vinculada ao novo ativo "${assetName}"`);
+    syncBrokerPreviewEdits(p);
     renderBrokerPreview(p);
   }
 }

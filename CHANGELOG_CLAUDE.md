@@ -12,6 +12,90 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-03 — v4.85.17: fix — apelido escolhido no dropdown da importação ainda "não aprendia"
+
+### Relato do usuário
+Após o fix v4.85.16 (prefill por código a partir de `_invAssetsList`), o
+usuário contestou de novo: "Independentemente dessa sua alteração,
+precisa resolver o problema do aprendizado. Porque apenas o XP está
+aprendendo? Quero que funcione para todos." E, decisivo: "Eu já fiz a
+mudança manualmente anteriormente no BTG, no próprio fluxo de
+importação. Não mudei o nome no patrimônio, mas ao importar, um a um,
+selecionando qual o nome correto (não digitei, selecionei do dropdown).
+Por alguma razão ele não aprendeu ao fazer isso." Isso derrubava a
+hipótese do v4.85.16 (usuário renomeando só pela aba Patrimônio) — o
+usuário usou exatamente o mecanismo pensado pra "aprender" (o dropdown de
+apelidos, `_openBrokerNameDrop`/`_pickBrokerName`) e mesmo assim falhou.
+
+### Causa raiz real
+`renderBrokerPreview()` é chamada de novo (rebuild completo da tabela)
+por VÁRIAS ações que não têm nada a ver com o campo de nome: reclassificar
+uma movimentação "❓" (`_reclassifyBrokerFlow`), remover/restaurar um
+ativo (`_toggleBrokerAssetRemoved`), resolver uma movimentação não
+atribuída (`_unresolvedAssignSingle`/split/ignore), ou a checagem
+automática de duplicatas (`checkUnresolvedAgainstAccount`). Cada rebuild
+reconstrói o HTML inteiro a partir do `parsed` original — e o nome
+escolhido no dropdown só é de fato gravado em `parsed.assets[i].name` no
+momento de clicar "Importar" (`confirmBrokerImport`). Ou seja: qualquer
+rebuild ANTES do clique final revertia silenciosamente a escolha do
+usuário de volta pro nome cru do extrato, sem nenhum aviso visual.
+
+Isso bate exatamente com o relato: extratos BTG costumam ter várias
+movimentações "❓" pra classificar — um fluxo típico de "renomear os
+ativos um a um" quase sempre inclui pelo menos uma reclassificação no
+meio do caminho, disparando o rebuild e apagando as escolhas já feitas.
+No confirm final, o campo lido já estava revertido pro nome original, e
+`ff.brokerMappingLearn(origName, newName)` era chamado com
+`origName === newName` — um no-op que nunca gravava nada. Isso explica
+por que só a XP "aprendia": o fluxo de combinação dos 2 arquivos da XP
+(`showXPBrokerWizard`) não tem essa mesma sequência de reclassificações
+manuais no meio da pré-visualização.
+
+Mesmo bug afeta (silenciosamente) os campos de Categoria, Tipo, Valor,
+Ext. e Rend. editados manualmente na mesma tela — qualquer edição nesses
+campos também era descartada por um rebuild disparado por OUTRA linha, e
+o valor perdido ia pro banco assim mesmo (não é só um problema visual:
+`confirmBrokerImport()` lê o valor final direto do DOM).
+
+### Correção (`renderer.js`)
+Nova função `syncBrokerPreviewEdits(p)`: lê o valor atual de todos os
+campos editáveis da tabela (`.broker-name-inp`, `.broker-cat-sel`,
+`.broker-type-sel`, `.broker-valor-inp`, `.broker-ext-inp`,
+`.broker-inc-inp`) e grava de volta em `p.assets[i]` (`_editedName`,
+`_editedCategory`, `_editedType`, `_editedValorInp`, `_editedExtInp`,
+`_editedIncInp`) — chamada no início de TODO handler que dispara
+`renderBrokerPreview(p)` de novo (`_reclassifyBrokerFlow`,
+`_toggleBrokerAssetRemoved`, os handlers de movimentação não atribuída,
+`checkUnresolvedAgainstAccount`, `completeBrokerAssetLink`). O template
+de cada linha agora prioriza esses campos `_edited*` sobre o
+prefill/aprendizado original, então uma edição em andamento sobrevive a
+um rebuild disparado por outra linha da tabela.
+
+### Verificado
+`node --check` sem erro de sintaxe. Testado AO VIVO: abri uma instância
+dev (`electron . --remote-debugging-port=9222`, com a produção fechada
+pelo usuário pra liberar o lock de instância única) e usei o Chrome
+DevTools Protocol via WebSocket (script Node, `scratchpad/run_case.js` +
+`test_case.txt`/`test_case2.txt`) pra simular, dentro do processo
+renderer real: (1) escolher um nome via dropdown pro ativo 0, reclassificar
+uma movimentação "❓" do ativo 1 (dispara rebuild) e confirmar que o nome
+do ativo 0 sobreviveu (`sobreviveu: true`); (2) confirmar que o prefill
+por código (v4.85.15/16) continua funcionando numa 1ª renderização, e que
+remover+restaurar um ativo (outro rebuild) não apaga uma edição feita em
+OUTRA linha nem quebra o prefill do próprio ativo removido/restaurado.
+Não usei dados reais do usuário nesse teste (ativos e nomes fictícios,
+sem chamar `ff.brokerMappingLearn` de verdade) pra não poluir o
+`_broker_mappings.json` real.
+
+**Arquivos tocados**: `src/renderer.js` (`syncBrokerPreviewEdits()` nova;
+`renderBrokerPreview()`; `_reclassifyBrokerFlow`,
+`_toggleBrokerAssetRemoved`, `_unresolvedAssignSingle`,
+`_unresolvedToggleSplit`, `_unresolvedSplitAddRow/RemoveRow/SetAsset/
+SetAmount/Confirm`, `_unresolvedIgnore`, `checkUnresolvedAgainstAccount`,
+`completeBrokerAssetLink`).
+
+---
+
 ## 2026-08-01 (6) — v4.85.16: fix — importação de corretora "esquecia" 100% dos apelidos de ativos já dados
 
 ### Relato do usuário
