@@ -24,7 +24,16 @@
       rate = newRate;
     }
     if (!isFinite(rate) || rate <= -1) return null;
-    return Math.pow(1 + rate, 12) - 1; // anualiza
+    const annual = Math.pow(1 + rate, 12) - 1;
+    // Trava de sanidade: um fluxo de caixa inconsistente (ex.: um bug de
+    // importação duplicando/invertendo movimentações) pode fazer o
+    // Newton-Raphson divergir pra uma taxa astronômica mas ainda "finita"
+    // (passa no isFinite acima) — ex.: TIR "9.97e+118% a.a." reportado
+    // pelo usuário. Nenhum investimento real tem TIR de milhares de % a.a.;
+    // um resultado assim indica não-convergência, não um retorno de
+    // verdade, então é melhor não mostrar nada a mostrar um número absurdo.
+    if (!isFinite(annual) || Math.abs(annual) > 1000) return null;
+    return annual;
   }
 
   if (typeof module !== 'undefined' && module.exports) {

@@ -3869,11 +3869,29 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
         // primeiro (mesmo motivo do nome — duas contas na mesma corretora
         // podem ter o mesmo papel como posições DIFERENTES), com fallback
         // pra qualquer corretora.
-        existing = (a.code && first(
-            'SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE AND lower(COALESCE(broker,\'\'))=lower(?)',
-            [a.code, a.broker || '']
-          ))
-          || (a.code && first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE', [a.code]))
+        // Tesouro Direto é um caso à parte: o "código" que a BTG expõe
+        // (ex.: "NTNB-P") identifica o TIPO do título, não o título
+        // específico — dois vencimentos diferentes do mesmo tipo (ex.:
+        // Tesouro IPCA+ 2029 e 2040) compartilham o mesmo código. Casar só
+        // por código+corretora nesse caso é ambíguo e agarra o vencimento
+        // ERRADO (bug real: valor do 2040 sendo somado ao 2029 existente,
+        // ignorando silenciosamente o ativo certo). Quando o ativo tem
+        // vencimento (`maturity_month`, sempre presente em Renda
+        // Fixa/Tesouro), o casamento por código PRECISA incluir o
+        // vencimento — sem isso, prefere cair pro casamento por nome (mais
+        // lento de aprender, mas nunca mistura dois títulos diferentes) em
+        // vez de arriscar um código ambíguo.
+        existing = a.code && a.maturity_month
+          ? (
+              first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE AND maturity_month=? AND lower(COALESCE(broker,\'\'))=lower(?)', [a.code, a.maturity_month, a.broker || ''])
+              || first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE AND maturity_month=?', [a.code, a.maturity_month])
+            )
+          : (a.code && first(
+              'SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE AND lower(COALESCE(broker,\'\'))=lower(?)',
+              [a.code, a.broker || '']
+            ))
+            || (a.code && first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE', [a.code]));
+        existing = existing
           || first(
             'SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND (broker IS NULL OR lower(broker)=lower(?))',
             [a.name, a.broker || '']

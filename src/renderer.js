@@ -8311,26 +8311,63 @@ function parseBTGBroker(buffer) {
 
     // Movimentações Previdência
     // Header: Data(B), Transação(C), Qtde(D), Valor Cota(E), Valor Bruto(F), IR(G), Valor Líquido(H)
+    // Cada bloco de movimentações vem sob um cabeçalho de subseção
+    // "Movimentação > 342074/NOME DO FUNDO" — ANTES essa informação era
+    // capturada (`mvPlan`) mas nunca usada: toda movimentação encontrada era
+    // aplicada a TODOS os fundos de previdência do import (bug real
+    // reportado: uma transferência interna entre 2 fundos duplicava o valor
+    // idêntico nos dois, em vez de debitar um e creditar o outro). Agora o
+    // nome do fundo é extraído do cabeçalho e usado pra achar o ativo certo.
     const movPrevIdx = rows.findIndex(r => norm(String(r[sc(1)]||'')).startsWith('movimenta'));
     if (movPrevIdx >= 0) {
-      let mvPlan = null;
+      let mvFundName = null;
+      // Sinal (entrada/saída) do último movimento "com direção própria"
+      // desta subseção — usado como fallback pra linhas sem direção
+      // explícita no texto, como "Ajuste de Recotização" (sempre aparece
+      // colada a uma Entrada/Saída, corrigindo o mesmo sentido dela).
+      let mvSectionIsOut = null;
       for (let i=movPrevIdx+1; i<rows.length; i++) {
         const row = rows[i];
         const colB=row[sc(1)], colC=row[sc(2)], colH=row[sc(7)];
         const nb = norm(String(colB||''));
         // Sub-section header e.g. "Movimentação > 342074/ACS..."
-        if (nb.startsWith('movimenta') && String(colB).includes('>')) { mvPlan = String(colB); continue; }
+        if (nb.startsWith('movimenta') && String(colB).includes('>')) {
+          const raw = String(colB).split('>').pop().trim();
+          mvFundName = raw.includes('/') ? raw.split('/').slice(1).join('/').trim() : raw;
+          mvSectionIsOut = null;
+          continue;
+        }
         if (!isDate(colB)) continue;
         const txDesc = String(colC||'');
+        const dNorm = norm(txDesc);
         const flowType = classifyBTGFlow(txDesc);
         if (flowType === 'ignore') continue;
         const val = typeof colH==='number' ? colH : toNum(colH);
         if (!val) continue;
-        // Contribuição = capital outflow (money leaving investor)
-        const isOut = norm(txDesc).includes('contribui') || norm(txDesc).includes('aplicacao') || norm(txDesc).includes('aporte');
+        // Contribuição/entrada (aporte, ou transferência interna PRA este
+        // fundo) = capital saindo do bolso do investidor (compra). Saída
+        // (resgate, ou transferência interna DESTE fundo pra outro) = o
+        // inverso (venda). "Ajuste de Recotização" e afins não têm direção
+        // própria no texto — herdam o sentido do movimento anterior desta
+        // mesma subseção/fundo.
+        let isOut;
+        if (dNorm.includes('contribui') || dNorm.includes('aplicacao') || dNorm.includes('aporte') || dNorm.includes('entrada')) {
+          isOut = true;
+        } else if (dNorm.includes('saida') || dNorm.includes('resgate')) {
+          isOut = false;
+        } else {
+          isOut = mvSectionIsOut != null ? mvSectionIsOut : false;
+        }
+        mvSectionIsOut = isOut;
         const amount = isOut ? -val : val;
-        const prevAssets = result.assets.filter(a => a.category === 'previdencia');
-        prevAssets.forEach(a => a.movimentacoes.push({ amount, type: txDesc, flow_type: flowType || 'external' }));
+        const target = mvFundName
+          ? result.assets.find(a => a.category === 'previdencia' && norm(a.name).includes(norm(mvFundName)))
+          : null;
+        if (target) {
+          target.movimentacoes.push({ amount, type: txDesc, flow_type: flowType || 'external' });
+        } else {
+          result.unresolvedMovements.push({ date: month, desc: `${mvFundName || 'Previdência'} — ${txDesc}`, amount, suggestedFlowType: flowType || 'external' });
+        }
       }
     }
   }
@@ -10396,7 +10433,16 @@ function renderBrokerPreview(parsed) {
     // cru do extrato, "esquecendo" 100% dos apelidos dados fora desta
     // tela. Buscar o nome atual do ativo (por código) resolve isso na
     // fonte, sem depender de o usuário ter usado ESTE campo antes.
-    const existingByCode = a.code ? _invAssetsList.find(x => x.code && norm(x.code) === norm(a.code)) : null;
+    // Tesouro Direto usa o mesmo código pro TIPO do título (ex.: "NTNB-P"),
+    // não pro título específico — dois vencimentos diferentes colidem no
+    // mesmo código. Sem o vencimento pra desempatar, a pré-visualização
+    // "escolhia" sempre o primeiro ativo cadastrado com aquele código pra
+    // sugerir os DOIS (bug real reportado). Quando o ativo tem vencimento,
+    // exige também que bata pra considerar "o mesmo ativo".
+    const existingByCode = a.code
+      ? _invAssetsList.find(x => x.code && norm(x.code) === norm(a.code)
+          && (!a.maturity_month || !x.maturity_month || x.maturity_month === a.maturity_month))
+      : null;
     // Cache de "apelidos aprendidos" — cobre o caso do ativo ainda não
     // existir em _invAssetsList (1ª vez que aparece) OU não ter código
     // confiável (ex.: alguns CDBs/debêntures). Código primeiro, depois
@@ -16535,21 +16581,31 @@ function renderReturnsChart(months, portInvested, portRet, cdiRet, ibovRet) {
   const cdiSeries = [], ibovSeries = [], portSeries = [];
   let cumCDI = 1, cumIBOV = 1, cumPort = 1;
 
+  // Só começa a acumular CDI/IBOV a partir do mês em que a carteira TEM um
+  // primeiro valor (baseline) — sem isso, CDI/IBOV já apareciam com a
+  // valorização do próprio mês inicial embutida, enquanto a carteira
+  // começava do zero nesse mesmo mês: os três não partiam da mesma base
+  // (bug real reportado pelo usuário, visível nos gráficos de comparação).
+  let baselineStarted = false;
   for (const m of labels) {
     const cdiR  = _benchmarks.cdi[m]  ?? 0;
     const ibovR = _benchmarks.ibov[m] ?? 0;
-    cumCDI  *= (1 + cdiR);
-    cumIBOV *= (1 + ibovR);
-
     const portVal = portValueByMonth[m];
+    const isBaselineMonth = !baselineStarted && portVal !== undefined;
+    if (baselineStarted) {
+      cumCDI  *= (1 + cdiR);
+      cumIBOV *= (1 + ibovR);
+    }
+    if (isBaselineMonth) baselineStarted = true;
+
     if (portVal !== undefined && prevPortVal !== null && prevPortVal > 0) {
       const portR = (portVal - prevPortVal) / prevPortVal;
       cumPort *= (1 + portR);
     }
     if (portVal !== undefined) prevPortVal = portVal;
 
-    cdiSeries.push(((cumCDI - 1) * 100).toFixed(2));
-    ibovSeries.push(((cumIBOV - 1) * 100).toFixed(2));
+    cdiSeries.push(baselineStarted ? ((cumCDI - 1) * 100).toFixed(2) : null);
+    ibovSeries.push(baselineStarted ? ((cumIBOV - 1) * 100).toFixed(2) : null);
     portSeries.push(prevPortVal !== null ? ((cumPort - 1) * 100).toFixed(2) : null);
   }
 
@@ -21219,14 +21275,20 @@ function refreshPatrimonioChart() {
     let cumInv = 1, cumCDI = 1, cumIBOV = 1;
     const invRetSeries = [], cdiSeries = [], ibovSeries = [];
 
-    chartMonths.forEach(m => {
+    chartMonths.forEach((m, idx) => {
       // Apply TWR factor for this month if available
       if (allFactors[m] && allFactors[m].sumW > 0) {
         const wAvgR = allFactors[m].sumRW / allFactors[m].sumW;
         cumInv *= (1 + wAvgR);
       }
-      cumCDI  *= (1 + (_benchmarks.cdi[m]  ?? 0));
-      cumIBOV *= (1 + (_benchmarks.ibov[m] ?? 0));
+      // Pula o 1º mês (firstInvM = mês-base) pro CDI/IBOV também — sem
+      // isso eles já entravam com a valorização daquele mês embutida
+      // enquanto a série de investimentos começava do zero (bug real
+      // reportado: as três linhas não partiam da mesma base no gráfico).
+      if (idx > 0) {
+        cumCDI  *= (1 + (_benchmarks.cdi[m]  ?? 0));
+        cumIBOV *= (1 + (_benchmarks.ibov[m] ?? 0));
+      }
       invRetSeries.push(parseFloat(((cumInv  - 1) * 100).toFixed(2)));
       cdiSeries.push   (parseFloat(((cumCDI  - 1) * 100).toFixed(2)));
       ibovSeries.push  (parseFloat(((cumIBOV - 1) * 100).toFixed(2)));
@@ -21511,9 +21573,15 @@ function patRenderAssetChart() {
     }
   }
 
-  chartMonths.forEach(m => {
-    cumCDI  *= (1 + (_benchmarks.cdi[m]  ?? 0));
-    cumIBOV *= (1 + (_benchmarks.ibov[m] ?? 0));
+  // Pula o 1º mês (firstM = mês-base do ativo) pro CDI/IBOV também — sem
+  // isso eles já entravam com a valorização daquele mês embutida enquanto
+  // o ativo começava do zero (bug real reportado: no gráfico de
+  // comparação, o ativo aparecia em 0% no primeiro mês mas CDI/IBOV não).
+  chartMonths.forEach((m, idx) => {
+    if (idx > 0) {
+      cumCDI  *= (1 + (_benchmarks.cdi[m]  ?? 0));
+      cumIBOV *= (1 + (_benchmarks.ibov[m] ?? 0));
+    }
 
     if (assetFactors2[m] !== undefined) {
       cumAsset *= (1 + assetFactors2[m]);

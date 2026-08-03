@@ -12,6 +12,139 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-03 (2) — v4.85.18: fix — 4 bugs sérios na importação BTG (Previdência, Tesouro, TIR, gráficos)
+
+### Relato do usuário
+Logo após testar a v4.85.17, o usuário reportou 4 problemas distintos numa
+importação real (com print e o arquivo XLSX original da BTG anexados):
+1. Nomes editados ainda sendo ignorados em alguns casos.
+2. Tesouro Direto: dois vencimentos diferentes (2029 e 2040) do mesmo tipo
+   de título sendo tratados como o mesmo ativo — a importação sugeriu
+   "Tesouro IPCA+ 2029 BTG" pros DOIS, e ignorou o valor do 2040.
+3. Previdência: uma transferência interna entre dois fundos (R$60.000 +
+   ajuste de R$1,10) foi duplicada — os DOIS fundos ficaram com
+   R$120.001,10, positivo (como se fosse aporte/compra nos dois), quando
+   deveria ter sido -R$60.000 num fundo e +R$60.001,10 no outro. Além
+   disso, indicar no modal de "ativo novo" que o nome correto era "PGBL
+   Thi" não impediu a criação de um ativo duplicado.
+4. TIR de Previdência aparecendo em notação científica absurda
+   ("9.97e+118% a.a.").
+5. Gráfico de comparação de rentabilidade (ativo individual vs CDI/IBOV):
+   o ativo começa em 0% no primeiro mês, mas CDI/IBOV já aparecem com a
+   valorização daquele mês — as três linhas não partem da mesma base.
+
+### Causa raiz #1 — Tesouro Direto: código não é único
+A BTG expõe o "código" de um título do Tesouro (coluna "Ativo") como o
+TIPO do título (ex.: "NTNB-P"), não como um identificador do título
+específico — confirmado inspecionando o XLSX real: duas linhas com
+"Ativo"="NTNB-P" mas "Vencimento" diferente (2029-05 e 2040-08). O
+casamento por código (v4.85.15) tratava as duas como o MESMO ativo,
+sempre "ganhando" a que já existia primeiro no banco (confirmado
+consultando o banco real: as duas datas já existiam como ativos 67/68
+separados, mas o SELECT por código+corretora só retornava o 67).
+
+**Correção**: `main.js` (`broker:save-parsed`) agora exige também bater
+`maturity_month` quando o ativo tem vencimento, antes de cair pro
+casamento por código+corretora simples (que só continua valendo pra
+ativos SEM vencimento, ex.: ações). `renderer.js`
+(`renderBrokerPreview`'s `existingByCode`) recebeu o mesmo critério, pra
+a pré-visualização também parar de sugerir o vencimento errado.
+
+### Causa raiz #2 — Previdência: movimentação "espalhada" pra todos os fundos
+`parseBTGBroker()` capturava o cabeçalho de cada subseção de movimentação
+("Movimentação > 342074/NOME DO FUNDO") na variável `mvPlan` mas NUNCA a
+usava — cada movimentação encontrada era aplicada a TODOS os ativos de
+previdência do import (`prevAssets.forEach(a => a.movimentacoes.push(...))`).
+Numa transferência interna entre 2 fundos (ex.: R$60.000 saindo de A e
+entrando em B), os DOIS fundos recebiam as DUAS movimentações. Além
+disso, o sinal (entrada = aporte / saída = resgate) só reconhecia
+"contribuição"/"aplicação"/"aporte" — "Transferência Interna de
+Entrada/Saída" e "Ajuste de Recotização" (termos reais do extrato) caíam
+no sinal padrão (positivo), fazendo até uma SAÍDA de dinheiro entrar como
+se fosse positiva.
+
+**Correção**: o nome do fundo agora é extraído do cabeçalho da subseção e
+usado pra achar o ativo certo em `result.assets` (uma movimentação sem
+fundo correspondente cai em `unresolvedMovements`, nunca é descartada
+nem espalhada). O reconhecimento de sinal ganhou "entrada"/"saída"
+explícitos, e um "ajuste" sem direção própria no texto herda o sinal do
+movimento anterior da mesma subseção. Verificado rodando o parser real
+(via CDP, dentro do próprio processo Electron) contra o XLSX que o
+usuário enviou: ARCA GRAO recebeu só a entrada (-60000, "compra"), ACS
+ABSOLUTE recebeu só a saída+ajuste (+60000, +1.10, "venda") — sem
+duplicação, sinal correto, zero movimentações órfãs.
+
+O modal de "revisar ativos que seriam criados como novos"
+(`reviewNewAssetsBeforeImport`/`_narConfirmAll`) foi auditado à parte —
+simulei ao vivo (CDP, com `ff.brokerMappingLearn`/`ff.invTxAll` mockados
+pra não gravar nada de verdade) o fluxo exato relatado (selecionar "PGBL
+Thi" no dropdown pro candidato "ACS Absolute..." e confirmar) e o
+mecanismo aplicou a escolha corretamente (`parsed.assets[i].name` virou
+"PGBL Thi" antes do save). Não consegui reproduzir uma causa adicional
+pra esse ponto especificamente — é possível que fosse só um sintoma da
+duplicação de movimentações (causa raiz #2) corrompendo o estado visual
+da tela. Pedir pro usuário testar de novo nesta versão.
+
+### Causa raiz #3 — TIR sem trava de sanidade
+`calcIRR()` (`src/lib/irr.js`), o solver de Newton-Raphson usado pra
+todos os cálculos de TIR do app, só checava `isFinite(rate)` — uma
+divergência real (fluxo de caixa inconsistente, como o gerado pela causa
+raiz #2 antes de corrigida) pode convergir pra uma taxa astronômica mas
+ainda tecnicamente "finita" (passa no `isFinite`), virando um
+"9.97e+118% a.a." absurdo na tela.
+
+**Correção**: depois de anualizar a taxa, se o resultado for maior que
+100000% a.a. (limite generosíssimo — nenhum investimento real chega
+perto disso), retorna `null` em vez do número absurdo. Casos normais
+continuam idênticos (testado: fluxo de 10%/mês por 3 meses → 213,8%
+a.a., sem mudança).
+
+### Causa raiz #4 — Gráficos de comparação não partem da mesma base
+Em 3 lugares diferentes que constroem o gráfico de rentabilidade
+acumulada (carteira x CDI x IBOV, e ativo individual x CDI x IBOV), a
+série do investimento/ativo deliberadamente não aplica retorno no
+primeiro mês (é o mês-base, fica em 0%) — mas CDI e IBOV SEMPRE aplicam o
+retorno do mês, inclusive o primeiro, entrando já com a valorização
+daquele mês embutida. Um 4º local (`patRenderInvChart`, a versão com
+seletor de período) já fazia isso certo (`if (m > effectiveFrom)`),
+confirmando que era o padrão pretendido.
+
+**Correção**: os 3 locais afetados (`renderReturnsChart`,
+`refreshInvestimentos`'s gráfico agregado, e o gráfico por-ativo) agora
+pulam a acumulação de CDI/IBOV também no primeiro mês/mês-base, igual ao
+4º local que já estava certo. Verificado com simulação aritmética
+isolada da lógica corrigida — as três séries agora começam em 0.00% no
+mesmo ponto.
+
+### Verificado
+`node --check` nos 3 arquivos tocados — sem erro de sintaxe. Testado ao
+vivo (instância dev com produção fechada pelo usuário, CDP via
+WebSocket): parser de previdência contra o XLSX real enviado (sem
+duplicação/sinal correto), matching de Tesouro por código+vencimento
+contra cópia do banco real (sql.js — antes: os 2 vencimentos colidiam no
+id 67; depois: 2040→68, 2029→67, corretamente separados), trava de TIR
+(caso normal inalterado), lógica de baseline dos gráficos (simulação
+isolada), fluxo do modal de ativo novo (mecanismo confirmado correto em
+isolamento), e abertura da aba Patrimônio sem exceções com todas as
+mudanças carregadas. Nenhum dado real foi alterado durante os testes
+(cópias/mocks usados pra tudo que gravaria em disco).
+
+**Nota importante pro usuário**: as tentativas de importação anteriores
+(antes desta correção) podem ter deixado dados incorretos no banco real
+— um ativo "ACS Absolute Atenas Prev" duplicado, valores de Previdência
+inflados, e um dos vencimentos do Tesouro pode estar com o valor errado.
+Vale revisar a aba Patrimônio (Previdência e Tesouro Direto) antes de
+confiar nos números, e reimportar o extrato de julho/2026 se necessário.
+
+**Arquivos tocados**: `src/main.js` (`broker:save-parsed`, matching por
+código+vencimento), `src/renderer.js` (`parseBTGBroker` — movimentações
+de Previdência; `renderBrokerPreview` — `existingByCode` com
+vencimento), `src/lib/irr.js` (`calcIRR` — trava de sanidade),
+`src/renderer.js` (`renderReturnsChart`, gráfico agregado de
+investimentos, gráfico por-ativo — baseline dos benchmarks).
+
+---
+
 ## 2026-08-03 — v4.85.17: fix — apelido escolhido no dropdown da importação ainda "não aprendia"
 
 ### Relato do usuário
