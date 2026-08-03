@@ -10351,11 +10351,28 @@ function renderBrokerPreview(parsed) {
       ? `<span style="color:var(--text3);font-size:10px">${a.maturity_month}</span>` : '—';
     const brokerMap     = _brokerMappings[parsed.broker] || {};
     const brokerMapNorm = _brokerMappingsNorm[parsed.broker] || {};
-    // Tenta correspondência exata primeiro; se não achar, tenta normalizada
-    // (ignora acentos/maiúsculas/espaços) — cobre variações sutis no texto
-    // bruto do extrato entre um mês e outro, que antes faziam o app
-    // "esquecer" um mapeamento já ensinado.
-    const learned = brokerMap[a.name] ?? brokerMapNorm[norm(a.name)];
+    // FONTE PRINCIPAL: o nome ATUAL do ativo já cadastrado, casado por
+    // código — não o cache separado de "apelidos aprendidos" abaixo.
+    // Motivo (bug real reportado, confirmado inspecionando o
+    // _broker_mappings.json real do usuário: só tinha entradas da XP,
+    // nenhuma da BTG): a maioria dos usuários renomeia o ativo direto na
+    // aba Patrimônio (o jeito natural), não digitando no campo de
+    // renomear desta tela — isso muda `inv_assets.name` no banco, mas
+    // NUNCA passava pelo cache de "apelidos aprendidos" (que só é escrito
+    // quando o usuário edita o nome AQUI, na pré-visualização da
+    // importação). Resultado: o apelido existia e funcionava (o
+    // casamento por código, v4.85.15, sempre atualizava o ativo certo),
+    // mas a pré-visualização nunca sabia disso e sempre mostrava o nome
+    // cru do extrato, "esquecendo" 100% dos apelidos dados fora desta
+    // tela. Buscar o nome atual do ativo (por código) resolve isso na
+    // fonte, sem depender de o usuário ter usado ESTE campo antes.
+    const existingByCode = a.code ? _invAssetsList.find(x => x.code && norm(x.code) === norm(a.code)) : null;
+    // Cache de "apelidos aprendidos" — cobre o caso do ativo ainda não
+    // existir em _invAssetsList (1ª vez que aparece) OU não ter código
+    // confiável (ex.: alguns CDBs/debêntures). Código primeiro, depois
+    // nome exato, depois nome normalizado.
+    const learned = (existingByCode && existingByCode.name)
+      || (a.code && brokerMap[`code:${a.code}`]) || brokerMap[a.name] || brokerMapNorm[norm(a.name)];
     // Sem mapeamento aprendido ainda (1ª vez que esse ativo aparece nessa
     // corretora) → pré-preenche com o nome oficial dado pela corretora, em
     // vez de deixar em branco. O usuário pode alterar (e o app memoriza,
@@ -11112,10 +11129,14 @@ window._narConfirmAll = () => {
         // broker mesmo sem isso).
         parsed.assets[c.idx].broker = matched.broker;
         // Aprende o mapeamento (mesmo mecanismo do rename manual na
-        // tabela) — a próxima importação já reconhece sozinha.
-        ff.brokerMappingLearn({ broker: parsed.broker, original: origName, mapped: matched.name }).catch(() => {});
+        // tabela) — a próxima importação já reconhece sozinha. Também sob
+        // a chave de código (se houver), pra sobreviver ao nome bruto
+        // mudando de mês a mês (ver comentário em broker:mapping-learn).
+        const origCode = parsed.assets[c.idx].code;
+        ff.brokerMappingLearn({ broker: parsed.broker, original: origName, mapped: matched.name, code: origCode }).catch(() => {});
         if (!_brokerMappings[parsed.broker]) _brokerMappings[parsed.broker] = {};
         _brokerMappings[parsed.broker][origName] = matched.name;
+        if (origCode) _brokerMappings[parsed.broker][`code:${origCode}`] = matched.name;
         if (!_brokerMappingsNorm[parsed.broker]) _brokerMappingsNorm[parsed.broker] = {};
         _brokerMappingsNorm[parsed.broker][norm(origName)] = matched.name;
       }
@@ -11169,12 +11190,19 @@ async function confirmBrokerImport() {
       const newName = inp.value.trim();
       const origName = parsed.assets[i].name;
       if (newName) {
-        ff.brokerMappingLearn({ broker: parsed.broker, original: origName, mapped: newName }).catch(() => {});
+        // Grava também sob a chave de código (se houver) — o nome bruto
+        // da corretora pode mudar de mês a mês (ex.: BTG inserindo uma
+        // flag tipo "ATZ"/"ERJ" no meio do texto), o que fazia o apelido
+        // salvo só pelo nome nunca bater de novo, obrigando o usuário a
+        // renomear tudo manualmente toda importação. Ver broker:mapping-learn.
+        const origCode = parsed.assets[i].code;
+        ff.brokerMappingLearn({ broker: parsed.broker, original: origName, mapped: newName, code: origCode }).catch(() => {});
         // Atualiza o cache local imediatamente — assim, se o usuário importar
         // outro extrato da mesma corretora na mesma sessão (sem reabrir o
         // app), o mapeamento recém-aprendido já vale sem precisar recarregar.
         if (!_brokerMappings[parsed.broker]) _brokerMappings[parsed.broker] = {};
         _brokerMappings[parsed.broker][origName] = newName;
+        if (origCode) _brokerMappings[parsed.broker][`code:${origCode}`] = newName;
         if (!_brokerMappingsNorm[parsed.broker]) _brokerMappingsNorm[parsed.broker] = {};
         _brokerMappingsNorm[parsed.broker][norm(origName)] = newName;
         parsed.assets[i].name = newName;

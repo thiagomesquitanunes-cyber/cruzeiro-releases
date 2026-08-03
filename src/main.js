@@ -1054,12 +1054,17 @@ ipcMain.handle('tx:update', (_, { id, date, category, memo, amount, cleared, pat
     else _onInstallmentTxUncleared(updated);
   }
 
-  // If this is part of a transfer, sync date and memo to the paired leg (invert amount)
+  // If this is part of a transfer, sync date, memo and cleared to the
+  // paired leg (invert amount). 'cleared' foi adicionado aqui — faltava,
+  // e é exatamente o que fazia conferir uma perna (via este handler, usado
+  // pelo menu de contexto "marcar como conferido" e pelo modal de edição)
+  // não conferir a outra automaticamente, apesar de date/memo/amount já
+  // sincronizarem havia tempo.
   if (old?.transfer_id) {
     const paired = first('SELECT * FROM transactions WHERE transfer_id=? AND id!=?', [old.transfer_id, id]);
     if (paired) {
-      run('UPDATE transactions SET date=?,memo=?,amount=? WHERE id=?',
-        [date, memo, -amount, paired.id]);
+      run('UPDATE transactions SET date=?,memo=?,amount=?,cleared=? WHERE id=?',
+        [date, memo, -amount, cleared?1:0, paired.id]);
     }
   }
 
@@ -1068,8 +1073,8 @@ ipcMain.handle('tx:update', (_, { id, date, category, memo, amount, cleared, pat
       params: [old.date, old.category, old.memo, old.amount, old.cleared, id] },
     // Also restore paired leg if transfer — the paired leg's original amount is -old.amount
     ...(old.transfer_id ? [{
-      sql: 'UPDATE transactions SET date=?,memo=?,amount=? WHERE transfer_id=? AND id!=?',
-      params: [old.date, old.memo, -old.amount, old.transfer_id, id]   // paired leg = inverse of edited leg
+      sql: 'UPDATE transactions SET date=?,memo=?,amount=?,cleared=? WHERE transfer_id=? AND id!=?',
+      params: [old.date, old.memo, -old.amount, old.cleared, old.transfer_id, id]   // paired leg = inverse of edited leg
     }] : [])
   ]);
   save();
@@ -2369,14 +2374,21 @@ ipcMain.handle('tx:inline-update', (_, { id, field, value }) => {
 
   db.run(`UPDATE transactions SET ${field}=? WHERE id=?`, [value, id]);
 
-  // Sync transfer pair for date, memo, and amount changes.
+  // Sync transfer pair for date, memo, amount, and cleared changes.
   // pairedUndo guarda a operação que restaura a OUTRA perna. Sem ela, o undo
   // revertia só a perna editada e deixava a transferência dessincronizada
   // (ex: -100 de um lado e +150 do outro), corrompendo o saldo das duas contas
   // em silêncio. `field` já passou pela whitelist `allowed` no topo do handler,
   // então interpolá-lo no SELECT é seguro.
+  // 'cleared' foi adicionado aqui (bug real reportado: conferir uma perna
+  // não conferia a outra automaticamente) — esta era a lógica genérica de
+  // sync de perna, mas só cobria date/memo/amount; a única sincronização de
+  // cleared existia isolada em toggleCleared() (renderer.js, um segundo
+  // IPC dedicado, tx:clear-transfer-pair), então caminhos que chamam
+  // tx:inline-update diretamente com field='cleared' sem passar por
+  // toggleCleared() (ex.: busca avançada) nunca sincronizavam a perna.
   let pairedUndo = null;
-  if (old.transfer_id && ['date','memo','amount'].includes(field)) {
+  if (old.transfer_id && ['date','memo','amount','cleared'].includes(field)) {
     const paired = first(`SELECT id, ${field} as oldValue FROM transactions WHERE transfer_id=? AND id!=?`, [old.transfer_id, id]);
     if (paired) {
       const syncValue = field === 'amount' ? -value : value;
@@ -4142,10 +4154,17 @@ ipcMain.handle('broker:label-pref-set', (_, { accountId, label }) => {
   saveSettings(s);
   return { ok: true };
 });
-ipcMain.handle('broker:mapping-learn', (_, { broker, original, mapped }) => {
+ipcMain.handle('broker:mapping-learn', (_, { broker, original, mapped, code }) => {
   const m = loadBrokerMappings();
   if (!m[broker]) m[broker] = {};
   m[broker][original] = mapped;
+  // Grava TAMBÉM sob a chave "code:<ticker>", quando disponível — o nome
+  // bruto da BTG muda mês a mês (flag "ATZ"/"ERJ"/"EJ" no meio do texto),
+  // então um apelido salvo só pelo nome "esquecia" quase todo mês (bug
+  // real reportado). O código do ativo (ex.: PETR4) não muda — chave mais
+  // estável, sem quebrar apelidos já salvos antes deste fix (a busca em
+  // renderer.js tenta código primeiro, cai pro nome depois).
+  if (code) m[broker][`code:${code}`] = mapped;
   saveBrokerMappings(m);
   return { ok: true };
 });

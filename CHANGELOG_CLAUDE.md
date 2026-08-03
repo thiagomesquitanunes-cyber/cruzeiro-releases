@@ -12,6 +12,119 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-01 (6) — v4.85.16: fix — importação de corretora "esquecia" 100% dos apelidos de ativos já dados
+
+### Relato do usuário
+"eu coloquei um apelido para cada um dos meus ativos de corretora. Ao
+tentar importar um novo mês, ele não 'lembra' nenhum nome, ele mantém
+todos exatamente com o nome do extrato, e dá um baita trabalho apagar um
+a um e colocar o nome certo." Quando sugeri que fosse o mesmo problema de
+nome variável da BTG (v4.85.15), o usuário corretamente contestou: "Não
+deve ser por conta da mudança do nome, pq ele está ignorando 100% das
+vezes. Fosse a mudança do nome, em alguns pelo menos ele deveria acertar."
+
+### Investigação — causa raiz real (confirmada, não hipótese)
+Inspecionei o `_broker_mappings.json` real do usuário (pasta do Dropbox,
+`dataDir` configurado) — o arquivo de "apelidos aprendidos" só tinha
+entradas da corretora **XP**, nenhuma da **BTG**, apesar do usuário
+claramente ter renomeado ativos da BTG (todo o resto desta sessão girou
+em torno de bugs específicos de ativos BTG). Isso apontou pra causa real:
+o cache de "apelidos aprendidos" (`_brokerMappings`, escrito em
+`broker:mapping-learn`) só é alimentado quando o usuário edita o nome
+**dentro do campo de renomear da própria tela de importação**. Mas o
+jeito mais natural de dar um apelido a um ativo é editar direto na aba
+**Patrimônio** — isso atualiza `inv_assets.name` no banco imediatamente,
+sem NUNCA passar pelo mecanismo de "aprendizado" da tela de importação.
+
+A pré-visualização da próxima importação, por sua vez, só sabia consultar
+esse cache separado (`_brokerMappings`) — nunca o nome ATUAL de verdade
+do ativo já cadastrado. Resultado: qualquer apelido dado fora da tela de
+importação (o caso mais comum) era 100% invisível pra ela, sempre — não
+dependia de a BTG ter mudado o nome bruto ou não, por isso "ignorava
+sempre", confirmando a observação do usuário.
+
+Importante: os DADOS em si nunca ficaram errados — o casamento por código
+(v4.85.15) já garantia que o valor importado ia pro ativo certo (o
+renomeado), sem criar duplicata. O bug era só a pré-visualização mostrar
+o nome cru do extrato em vez do nome já dado ao ativo, obrigando
+retrabalho manual desnecessário.
+
+### Correção (`renderer.js`)
+`renderBrokerPreview()`: antes de consultar o cache de apelidos
+aprendidos, busca primeiro em `_invAssetsList` (já carregada) um ativo
+com o MESMO CÓDIGO — se achar, usa o nome ATUAL dele (a fonte de verdade
+real) como prefill. Só cai pro cache de apelidos aprendidos (por código,
+depois nome exato, depois nome normalizado) quando o ativo ainda não
+existe cadastrado (1ª importação daquele papel) ou não tem código
+confiável.
+
+Mantive também o fix complementar já em andamento (chave por código no
+cache de aprendizado, `broker:mapping-learn` em main.js + os dois pontos
+de `ff.brokerMappingLearn(...)` em renderer.js) — cobre o caso de um
+ativo recém-criado NESTA importação (ainda não em `_invAssetsList`) cujo
+nome o usuário edita na própria tela.
+
+### Verificado
+`node --check` — sem erro de sintaxe. Não foi possível testar ao vivo
+nesta sessão — o app de produção instalado estava aberto (mesmo
+`app.requestSingleInstanceLock()`, `npm start` não consegue abrir uma 2ª
+instância enquanto isso). Lógica confirmada por leitura de código e
+inspeção direta do arquivo `_broker_mappings.json` real do usuário.
+
+**Arquivo tocado**: `src/renderer.js` (`renderBrokerPreview()`).
+
+---
+
+## 2026-08-01 (5) — conciliação de transferências: conferir uma perna não conferia a outra
+
+### Relato do usuário
+"uma coisa que costumava funcionar, mas por alguma razão não tem
+funcionado, é a conciliação de transferências (ao marcar uma conferida,
+a outra perna ficar conferida automaticamente)"
+
+### Causa raiz
+Existem TRÊS caminhos que marcam uma transação como "conferida" (✅):
+1. Clique no ícone da coluna "C" na tabela (`toggleCleared()`, renderer.js) — chama `ff.inlineUpdate` E, separadamente, `ff.clearTransferPair` — este SEMPRE funcionou.
+2. Menu de contexto (botão direito → "marcar como conferido", inclusive em lote com várias linhas selecionadas) e o modal de edição de lançamento — ambos usam `tx:update` (main.js).
+3. Busca avançada (resultado da pesquisa) — usa `tx:inline-update` (main.js) diretamente, sem o segundo passo que o caminho 1 tem.
+
+`tx:update` já sincronizava `date`/`memo`/`amount` da OUTRA perna da
+transferência havia tempo (UPDATE dedicado, com undo correto) — mas
+**nunca incluiu `cleared`** nesse UPDATE. `tx:inline-update` tinha uma
+lista genérica de campos sincronizados (`['date','memo','amount']`) que
+também **nunca incluiu `'cleared'`** — só funcionava pra conferir por
+coincidência de o caminho 1 (checkbox da tabela) chamar um segundo IPC
+dedicado (`tx:clear-transfer-pair`) só pra isso. Ou seja: conciliar pela
+tabela funcionava (sempre funcionou); conciliar pelo menu de contexto, em
+lote, pelo modal de edição, ou pela busca avançada, nunca sincronizava a
+outra perna — o usuário só notava quando usava um desses outros caminhos
+(plausível que o hábito de uso tenha migrado pra conciliação em lote via
+menu de contexto após importações, daí a impressão de regressão).
+
+### Correção (`main.js`)
+- `tx:inline-update`: `'cleared'` adicionado à lista de campos que
+  sincronizam a perna pareada (`['date','memo','amount','cleared']`) —
+  a lógica de sync já era genérica por campo, só faltava incluir esse.
+- `tx:update`: o UPDATE da perna pareada e o bloco de undo agora também
+  incluem `cleared` (antes só `date,memo,amount`).
+
+Cobre AUTOMATICAMENTE os 3 caminhos — `ctxToggleCleared` (menu de
+contexto) e o modal de edição usam `tx:update`; a busca avançada
+(`advToggleCleared`) usa `tx:inline-update`; ambos corrigidos na raiz
+(main.js), sem precisar de mudança em cada função do renderer que os
+chama.
+
+### Verificado
+`node --check` — sem erro de sintaxe. Escrevi um script isolado (sql.js
+em memória) simulando um par de transferência e os dois caminhos
+corrigidos (`tx:inline-update` e `tx:update`) — ambos confirmaram as duas
+pernas ficando conferidas juntas. Não testado na UI real nesta sessão
+(app de produção aberto, mesma limitação do fix seguinte).
+
+**Arquivo tocado**: `src/main.js` (`tx:inline-update`, `tx:update`).
+
+---
+
 ## 2026-08-01 (4) — v4.85.15: fix raiz — renda variável (BTG) casando por CÓDIGO em vez de nome, elimina duplicatas/fantasmas de vez
 
 ### Relato do usuário
