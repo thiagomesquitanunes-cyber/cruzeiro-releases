@@ -20683,8 +20683,19 @@ function _invAssetCurrentValue(asset, txByAsset, curM) {
   const months = Object.keys(txs).filter(m => m <= curM).sort();
   let lastVal = 0;
   months.forEach(m => {
-    (txs[m] || []).forEach(t => { if (t.tx_type in INV_TX_VALUATION) lastVal = t.total_value; });
+    let hadValuation = false;
+    (txs[m] || []).forEach(t => { if (t.tx_type in INV_TX_VALUATION) { lastVal = t.total_value; hadValuation = true; } });
+    // Ativo encerrado neste mês sem avaliação explícita (ex.: uma venda
+    // total sem "atualização" de fechamento registrada) — trata como
+    // liquidado (0) em vez de carregar o último valor conhecido, que já
+    // deixou de existir na carteira. Ver mesmo ajuste em
+    // calcInvTotalByMonth/buildInvRows/buildCatSubtotalRow.
+    if (asset.closed_month && m === asset.closed_month && !hadValuation) lastVal = 0;
   });
+  // Além do mês de encerramento em si, qualquer mês POSTERIOR também deve
+  // ser 0 — sem isso, um ativo fechado continuaria "valendo" pra sempre
+  // em ordenações que consultem meses futuros ao encerramento.
+  if (asset.closed_month && curM > asset.closed_month) return 0;
   return lastVal;
 }
 
@@ -26380,8 +26391,20 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths
             lv = t.total_value;
           }
         });
-        running2 += cd;
-        if (lv !== null) running2 = lv;
+        if (m2 === a.closed_month && lv === null) {
+          // Encerrado neste mês sem avaliação explícita (ex.: uma venda
+          // total sem "atualização" de fechamento) — trata como liquidado
+          // (0) em vez de aplicar o delta de caixa (cd) sobre o valor
+          // contábil do mês anterior, o que podia resultar num valor
+          // residual negativo sem sentido (bug real reportado: subtotal
+          // da categoria R$350,07 menor que a soma dos ativos visíveis,
+          // porque uma venda de CDB um pouco maior que o último valor
+          // registrado deixava esse resíduo negativo).
+          running2 = 0;
+        } else {
+          running2 += cd;
+          if (lv !== null) running2 = lv;
+        }
         bv[m2] = running2;
       });
 
@@ -26533,8 +26556,17 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths
     const allM = months.filter(m => m >= (txMonths[0] || curM) && m <= (a.closed_month || curM));
     let lastVal = 0;
     allM.forEach(m => {
-      if (bookValue[m] !== undefined) lastVal = bookValue[m];
-      else bookValue[m] = lastVal;
+      if (bookValue[m] !== undefined) {
+        lastVal = bookValue[m];
+      } else if (m === a.closed_month) {
+        // Encerrado neste mês sem avaliação explícita (ex.: venda total
+        // sem "atualização" de fechamento) — liquidado, vale 0, não o
+        // último valor conhecido de antes da venda.
+        lastVal = 0;
+        bookValue[m] = 0;
+      } else {
+        bookValue[m] = lastVal;
+      }
     });
 
     // Latest value (for IRR projection)
@@ -26790,6 +26822,13 @@ function calcInvTotalByMonth(months) {
       .filter(m => m >= valMonthsSorted[0] && m <= (a.closed_month || months[months.length-1]))
       .forEach(m => {
         if (valByM[m] !== undefined) lastVal = valByM[m];
+        // Ativo encerrado neste mês sem avaliação explícita (ex.: uma
+        // venda total sem "atualização" de fechamento registrada) — trata
+        // como liquidado (0) em vez de carregar o último valor conhecido
+        // (bug real reportado: o total geral ficava R$36.798,66 maior do
+        // que a soma manual das categorias, porque um CDB vendido em
+        // cheio continuava contando seu valor de um mês antes da venda).
+        else if (m === a.closed_month) lastVal = 0;
         totals[m] += lastVal;
         if (!isCash) totalsExCash[m] += lastVal;
       });

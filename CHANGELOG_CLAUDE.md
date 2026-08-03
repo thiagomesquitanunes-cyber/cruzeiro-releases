@@ -12,6 +12,78 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-03 (3) — v4.85.19: fix — total de investimentos não batia com a soma das categorias
+
+### Relato do usuário
+"No mês de junho/2026, ele está marcando total de R$1.817.397,11. Mas a
+soma não está batendo." O usuário forneceu os valores por categoria que
+via na tela (renda fixa, tesouro, previdência, fundos, renda variável,
+private equity, caixa) — somados dava R$1.780.248,38, uma diferença de
+R$37.148,73 em relação ao total mostrado pelo app. Também apontou uma
+pista certeira: "Talvez o 'investimentos totais' compute os ocultos, e as
+totalizações das categorias deixem de considerar isso." Disponibilizou
+uma cópia real do banco de dados (pasta `Dados Reais/`) pra investigação.
+
+### Investigação
+Copiei o banco pra um local isolado (sql.js, sem tocar no arquivo real) e
+reconstruí manualmente o total de investimentos de junho/2026 ativo por
+ativo. Achei o culpado exato: **CDB Original** (id 56, categoria Renda
+Fixa) foi totalmente resgatado em junho/2026 — uma transação `venda` de
+R$37.148,73 — mas SEM uma transação `atualização` de fechamento zerando
+o valor do ativo (diferente de todos os outros ativos encerrados na base,
+que têm esse zeramento explícito). `closed_month` ficou como '2026-06'.
+
+Encontrei TRÊS lugares diferentes do código que calculam "o valor atual
+de um ativo mês a mês", e os três lidavam com esse caso (mês de
+encerramento sem avaliação explícita) de formas diferentes — e as três
+erradas:
+1. `calcInvTotalByMonth()` (o total geral, card "Total Investimentos"):
+   simplesmente carrega adiante o último valor conhecido (R$36.798,66, de
+   maio) — o total geral ficava R$36.798,66 maior do que devia.
+2. `buildCatSubtotalRow()` (subtotal por categoria, ex.: linha "Renda
+   Fixa" da tabela): tem uma lógica diferente que ajusta o valor contábil
+   pelo delta de caixa das movimentações — a venda de R$37.148,73 sendo
+   subtraída do valor de maio (R$36.798,66) resultava num resíduo
+   NEGATIVO de -R$350,07 (a venda foi por um valor um pouco maior que o
+   book value do mês anterior — rendimento não capturado). Isso
+   explicava a segunda pista, mais sutil: a soma manual do usuário
+   (R$291.829,49 pra Renda Fixa) ficava R$350,07 MENOR que a soma dos
+   ativos individualmente visíveis — porque essa linha de subtotal
+   incluía essa contribuição negativa de -R$350,07 do CDB (que, sendo
+   `hidden`, nem aparece como linha própria na tabela pro usuário
+   conferir o motivo).
+3. `buildInvRows()` (linha individual do próprio ativo, `bookValue`):
+   mesma falha do item 1 (carrega o valor de maio adiante), mas sem o
+   ajuste de caixa — pelo menos não ficava negativo, só desatualizado.
+
+A hipótese do usuário ("categorias não contam ocultos") não era bem o
+mecanismo exato — `buildCatSubtotalRow` já usa `byCategoryAll` (inclui
+ocultos) — mas o RESULTADO observado (total geral ≠ soma das categorias)
+vinha de dois bugs genuinamente diferentes nesse mesmo ativo, cada
+cálculo errando de um jeito distinto.
+
+### Correção
+Nos três lugares (`calcInvTotalByMonth`, `buildCatSubtotalRow`,
+`buildInvRows`) e também em `_invAssetCurrentValue` (usada pra ordenação
+por valor): quando o mês corrente é exatamente o `closed_month` do ativo
+E não há avaliação (`atualização`/`cota`/etc.) explícita registrada
+naquele mês, o valor passa a ser tratado como **0** (liquidado) — em vez
+de carregar o último valor conhecido (bug 1/3) ou aplicar o delta de
+caixa sobre ele (bug 2, que podia até ficar negativo).
+
+### Verificado
+`node --check` sem erro de sintaxe. Reimplementei os três algoritmos
+(antes/depois) num script isolado usando o histórico real de transações
+do CDB Original — confirmado que as três versões corrigidas agora
+concordam entre si e mostram R$0,00 em junho/2026 (mês do resgate), em
+vez de R$36.798,66 (bug 1/3) ou -R$350,07 (bug 2). Com a correção, o
+total geral bate exatamente com a soma das categorias.
+
+**Arquivos tocados**: `src/renderer.js` (`calcInvTotalByMonth`,
+`buildCatSubtotalRow`, `buildInvRows`, `_invAssetCurrentValue`).
+
+---
+
 ## 2026-08-03 (2) — v4.85.18: fix — 4 bugs sérios na importação BTG (Previdência, Tesouro, TIR, gráficos)
 
 ### Relato do usuário
