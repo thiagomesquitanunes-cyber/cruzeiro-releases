@@ -12,6 +12,83 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-03 (4) — v4.85.20: feat — importador de fatura BTG entende também a "fatura parcial"
+
+### Pedido do usuário
+"O BTG não emite oficialmente uma fatura parcial (só a fechada), mas
+consegui copiar os lançamentos e colocar em um xls, em um formato que
+parece possível treinar o parser. [...] atenção para não mudar nada no
+que já existe, só ensinar a fazer este paralelamente, no mesmo
+importador de fatura BTG." Anexou `Fatura Parcial BTG.xlsx` — uma cópia
+manual (copiar-colar) da lista de lançamentos da tela do app/site do
+banco, numa única coluna, sem NENHUM cabeçalho (bem diferente do arquivo
+oficial da fatura fechada, que tem uma tabela "Data | Descrição | Valor").
+
+### Formato identificado (analisando o arquivo real)
+Layout linha a linha, em blocos:
+- Um rótulo de dia decorativo ("Ontem"/"Hoje" ou nome do dia da semana
+  "Segunda-feira" etc.) — não confiável como identificador de data.
+- A data de verdade, por extenso e sem ano: "02 de Agosto" (ou, mais pra
+  trás no arquivo, sem o rótulo decorativo antes, só "08 De Julho" —
+  duas variações de maiúscula em "de/De" observadas).
+- Depois, um bloco de 3 linhas por lançamento: estabelecimento, tipo da
+  transação (ex.: "Compra no crédito", "Compra no crédito parcelada",
+  "Pagamento de fatura por boleto"), valor. Linhas em branco entre
+  lançamentos são OPCIONAIS, não um separador confiável (às vezes o
+  próximo cabeçalho de dia vem colado, sem branco antes).
+- O valor já vem no sinal certo pra convenção do Cruzeiro (negativo =
+  despesa, positivo = estorno/pagamento — confirmado com um "Pagamento
+  de fatura por boleto" de +R$27.908,81 e uma "Compra parcialmente
+  cancelada pelo estabelecimento" de +R$14,95) — ao contrário do arquivo
+  oficial (que vem invertido, precisa ser negado).
+- "Compra no crédito internacional" tem o valor em moeda estrangeira
+  ("- US$ 25,00", texto, não número) em vez de reais — a fatura ainda
+  não fechou, então o BTG não calculou o valor final em R$ (câmbio+IOF)
+  pra essas linhas ainda.
+- Sem ano em lugar nenhum — precisa ser inferido.
+
+### Implementação (`parseBTGFaturaParcial`, nova função)
+Adicionada como um FALLBACK dentro de `parseBankBTG()`: tenta o parsing
+oficial primeiro (cabeçalho "Data/Descrição/Valor", código 100%
+inalterado); só se NENHUM cabeçalho oficial for encontrado, tenta o novo
+formato. Nunca interfere no caminho já existente.
+
+- Rótulos de dia (dia da semana, "Ontem", "Hoje") são reconhecidos e
+  pulados — só a linha de data por extenso é usada de fato.
+- Ano inferido a partir de hoje: a data mais recente da fatura ancora o
+  ano (se colocasse a data no futuro, é do ano anterior); dali em diante,
+  como os lançamentos vêm em ordem decrescente, um mês "maior" que o
+  anterior indica que cruzamos a virada do ano pro passado (ex.: de
+  "05 de Janeiro" pra "20 de Dezembro" → ano anterior).
+- Cada lançamento é lido por um pequeno estado (estabelecimento → tipo →
+  valor), pulando linhas em branco onde quer que apareçam, em vez de
+  assumir uma posição fixa — resiliente à inconsistência de separadores
+  observada no arquivo real.
+- "Compra no crédito internacional" sem valor em R$ (texto tipo "- US$
+  X,XX" em vez de número) é ignorada — sem uma taxa de câmbio confiável
+  disponível, é mais seguro deixar de fora do que arriscar um valor
+  errado.
+
+### Verificado
+`node --check` sem erro de sintaxe. Reimplementei a função isoladamente
+(sem depender do Electron) e rodei contra o arquivo `Fatura Parcial
+BTG.xlsx` real enviado pelo usuário: 100 de 103 lançamentos
+corretamente interpretados (os 3 restantes são as compras
+internacionais sem R$ disponível, puladas de propósito); datas
+resolvidas corretamente de 02/08 até 14/05, todas em ordem decrescente;
+"Pagamento de fatura por boleto" e a compra parcialmente cancelada com o
+sinal certo (positivo). Testei também, com dados sintéticos, a virada de
+ano (dezembro→janeiro) — o ano foi decrementado corretamente ao cruzar a
+virada. Não testei a importação ao vivo na tela (não roda Electron nesta
+verificação) — recomendo o usuário testar o import real antes de confiar
+100%, mas a lógica está sólida contra os dados reais fornecidos.
+
+**Arquivo tocado**: `src/renderer.js` (`parseBankBTG()` — fallback
+adicionado sem alterar o caminho oficial; nova função
+`parseBTGFaturaParcial()`).
+
+---
+
 ## 2026-08-03 (3) — v4.85.19: fix — total de investimentos não batia com a soma das categorias
 
 ### Relato do usuário

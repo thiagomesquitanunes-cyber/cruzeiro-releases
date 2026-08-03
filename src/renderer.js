@@ -7568,6 +7568,7 @@ function parseBankBTG(buffer) {
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:true });
   const res = [];
+  let foundOfficialHeader = false;
   // Find all header rows (BTG files can have multiple sections)
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -7578,6 +7579,7 @@ function parseBankBTG(buffer) {
       (r3.includes('valor') || r2.includes('valor'));
     const valCol = r3.includes('valor') ? 3 : r2.includes('valor') ? 2 : 3;
     if (isHeader) {
+      foundOfficialHeader = true;
       i++;
       while (i < rows.length) {
         const r = rows[i];
@@ -7595,6 +7597,102 @@ function parseBankBTG(buffer) {
         i++;
       }
     }
+  }
+  // Não achou o formato oficial (fatura fechada, com cabeçalho
+  // "Data | Descrição | ... | Valor") — tenta o formato "fatura parcial"
+  // (fatura ainda em aberto; a BTG não emite oficialmente, mas o usuário
+  // consegue copiar os lançamentos da tela do app/site pra uma planilha,
+  // numa coluna só, sem cabeçalho nenhum). Ver parseBTGFaturaParcial.
+  if (!foundOfficialHeader) return parseBTGFaturaParcial(rows);
+  return res;
+}
+
+// ── BTG — "fatura parcial" (extrato de cartão ainda em aberto) ──
+// A BTG não emite oficialmente uma fatura parcial (só a fechada, tratada
+// acima). O usuário copia manualmente os lançamentos da lista do app/site
+// do banco pra uma planilha, numa única coluna, sem cabeçalho nenhum.
+// Layout observado (linhas em branco entre lançamentos são opcionais, não
+// confiáveis como separador):
+//   [rótulo do dia — "Ontem"/"Hoje" ou nome do dia da semana]  (decorativo)
+//   [data por extenso — "02 de Agosto" / "08 De Julho"]        (a de verdade)
+//   [nome do estabelecimento]
+//   [tipo da transação — "Compra no crédito", "Compra no crédito
+//    parcelada", "Compra no crédito internacional", "Pagamento de fatura
+//    por boleto", etc. — só usado pra pular a linha, não vai pro memo]
+//   [valor — número (já no sinal certo: negativo=despesa,
+//    positivo=estorno/pagamento) OU texto tipo "- US$ 25,00" quando é
+//    compra internacional sem o valor em R$ ainda calculado — nesse caso
+//    não dá pra criar o lançamento com um valor confiável, então é
+//    ignorado]
+// As datas não têm ano — como a fatura é sempre copiada com os
+// lançamentos mais recentes primeiro (a mais recente é sempre "Ontem"),
+// o ano é inferido a partir de hoje, andando pra trás: se o mês de uma
+// data for MAIOR que o da data anterior (ordem cronológica decrescente
+// "voltando" pra frente), cruzamos a virada do ano.
+const BTG_FATURA_PARCIAL_DAY_LABELS = new Set([
+  'ontem','hoje','segunda-feira','terca-feira','quarta-feira',
+  'quinta-feira','sexta-feira','sabado','domingo',
+]);
+const BTG_FATURA_PARCIAL_MONTHS = {
+  janeiro:1, fevereiro:2, marco:3, abril:4, maio:5, junho:6,
+  julho:7, agosto:8, setembro:9, outubro:10, novembro:11, dezembro:12,
+};
+function parseBTGFaturaParcial(rows) {
+  const res = [];
+  const cellText = v => (v === null || v === undefined) ? '' : String(v).trim();
+  let i = 0;
+  const nextNonBlank = () => {
+    while (i < rows.length && cellText(rows[i][0]) === '') i++;
+    return i < rows.length ? rows[i][0] : undefined;
+  };
+
+  let curDate = null;
+  let lastMonth = null;
+  let year = new Date().getFullYear();
+
+  while (i < rows.length) {
+    const text = cellText(rows[i][0]);
+    if (text === '') { i++; continue; }
+
+    if (BTG_FATURA_PARCIAL_DAY_LABELS.has(norm(text))) { i++; continue; } // rótulo decorativo — a data vem a seguir
+
+    const dm = text.match(/^(\d{1,2})\s+de\s+(\S+)$/i);
+    if (dm) {
+      const day = parseInt(dm[1]);
+      const month = BTG_FATURA_PARCIAL_MONTHS[norm(dm[2])];
+      if (month) {
+        if (curDate === null) {
+          // A data mais recente da fatura deve estar próxima de hoje —
+          // se o ano corrente colocasse essa data no futuro, é porque na
+          // verdade é do ano anterior (ex.: hoje é 02/01, 1ª data é
+          // "30 de Dezembro" → ano anterior, não o atual).
+          const inThreeDays = new Date(); inThreeDays.setDate(inThreeDays.getDate() + 3);
+          if (new Date(year, month - 1, day) > inThreeDays) year--;
+        } else if (month > lastMonth) {
+          // Datas vêm em ordem decrescente — se o mês "voltou pra frente"
+          // em relação ao anterior, cruzamos a virada do ano indo pro passado.
+          year--;
+        }
+        lastMonth = month;
+        curDate = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      }
+      i++;
+      continue;
+    }
+
+    // Início de um lançamento: estabelecimento, tipo (só pra pular), valor.
+    const merchant = text;
+    i++;
+    nextNonBlank(); i++; // tipo da transação — não vai pro memo, só ocupa a linha
+    const amountRaw = nextNonBlank(); i++;
+
+    if (!curDate || amountRaw === undefined) continue; // bloco incompleto — ignora com segurança
+    if (typeof amountRaw !== 'number') continue; // valor só em moeda estrangeira (compra intl.) — sem R$ confiável, não importa
+
+    // Formato já vem com o sinal certo pra convenção do Cruzeiro
+    // (negativo=despesa, positivo=estorno/pagamento) — ao contrário do
+    // formato oficial (parseBankBTG acima), que vem invertido.
+    res.push({ date: curDate, desc: merchant, memo: merchant, amount: amountRaw, saldo: null, category: '' });
   }
   return res;
 }
