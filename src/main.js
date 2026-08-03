@@ -3099,15 +3099,37 @@ ipcMain.handle('bank:check-memo-dups', (_, { accountId, rows }) => {
   for (let i = 0; i < (rows || []).length; i++) {
     const r = rows[i];
     if (!r || !r.memo || !r.dateISO) continue;
+    // Sem valor informado (chamadas antigas/parciais) → `0` desliga a trava
+    // de sanidade abaixo e mantém o comportamento original.
+    const amt = typeof r.amount === 'number' ? r.amount : 0;
     try {
+      // O valor entra como TRAVA DE SANIDADE, não como critério de
+      // casamento: a razão de existir desta 2ª rodada é justamente pegar o
+      // caso em que o valor MUDOU (previsão de recorrência estimada vs. o
+      // valor real do extrato), então exigir valor igual anularia a
+      // checagem. Mas sem limite nenhum — como era antes — um comerciante
+      // que aparece muitas vezes no mesmo período com valores
+      // completamente diferentes (ex.: pedágios de R$4,50 casando com uma
+      // fatura de R$483,54 do mesmo nome) gerava falso positivo puro.
+      // Provisão de recorrência não conferida continua casando com
+      // QUALQUER valor (é o caso que a rodada existe pra cobrir); as
+      // demais precisam ao menos ter o mesmo sinal e ficar dentro de 3x.
       const existing = all(
         `SELECT id, date, amount, memo, category, cleared, recurring_id FROM transactions
          WHERE account_id=?
            AND LOWER(TRIM(memo)) = LOWER(TRIM(?))
            AND LOWER(TRIM(COALESCE(category,''))) = LOWER(TRIM(?))
            AND ABS(julianday(date) - julianday(?)) <= 7
+           AND ( (recurring_id IS NOT NULL AND cleared=0)
+                 OR ?=0
+                 OR (amount * ? > 0 AND ABS(amount) <= 3.0 * ABS(?) AND ABS(?) <= 3.0 * ABS(amount)) )
+         ORDER BY (CASE WHEN recurring_id IS NOT NULL AND cleared=0 THEN 0 ELSE 1 END),
+                  ABS(amount - ?),
+                  ABS(julianday(date) - julianday(?))
          LIMIT 3`,
-        [accountId, r.memo, r.category || '', r.dateISO]
+        [accountId, r.memo, r.category || '', r.dateISO,
+         amt, amt, amt, amt,
+         amt, r.dateISO]
       );
       if (existing.length) matches.push({ rowIndex: i, existing });
     } catch(e) { /* skip row on error */ }
@@ -3386,6 +3408,7 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
   if (Array.isArray(replaceIds) && replaceIds.length) {
     for (let k = 0; k < replaceIds.length; k++) {
       const rid = replaceIds[k];
+      if (!rid) continue; // posição sem lançamento a substituir — ver applyDirectReplacements
       try {
         // "Substituir" cobre dois casos: (1) uma provisão de recorrência
         // (recurring_id preenchido) e (2) um lançamento comum já
@@ -3840,9 +3863,19 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
   };
 
   // Pre-aggregate: if same asset name appears multiple times, sum valores and merge movimentações
+  //
+  // O VENCIMENTO entra na chave: em Renda Fixa/Tesouro, alguns extratos
+  // nomeiam o papel pelo TIPO do título, não pelo título específico — a
+  // BTG, por exemplo, emite duas linhas "NTNB-P" para o Tesouro IPCA+ 2029
+  // e o 2040. Agregando só por nome, os dois viravam UM ativo só com os
+  // valores SOMADOS (e o vencimento de quem chegasse primeiro), fazendo o
+  // segundo título simplesmente desaparecer da carteira. Papéis sem
+  // vencimento (ações, fundos, caixa) continuam agregando só por nome,
+  // exatamente como antes. Mesmo critério do casamento por código+
+  // vencimento usado logo abaixo e na pré-visualização (renderer).
   const assetMap = new Map();
   for (const a of (assets || [])) {
-    const key = (a.name||'').toLowerCase().trim();
+    const key = (a.name||'').toLowerCase().trim() + '|' + (a.maturity_month || '');
     if (assetMap.has(key)) {
       const existing = assetMap.get(key);
       existing.valor = (existing.valor || 0) + (a.valor || 0);
@@ -3969,6 +4002,25 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
       }
 
       // Insert movimentações — use flow_type when available for correct tx_type
+      //
+      // Idempotência por CONTAGEM, não por existência. Antes, cada
+      // movimentação consultava "já existe alguma igual neste mês?" e
+      // pulava se sim — o que reimportava o mesmo mês sem duplicar (certo),
+      // mas também DESCARTAVA movimentações legitimamente repetidas dentro
+      // do MESMO extrato (ex.: dois dividendos de valor idêntico no mês, ou
+      // duas parcelas iguais da mesma compra): a primeira entrava e todas as
+      // seguintes eram vistas como cópia dela. Agora conta quantas já
+      // existem de cada (tipo + valor) e só pula essa quantidade — o
+      // excedente é inserido normalmente.
+      const alreadyByKey = new Map();
+      for (const row of all(
+        `SELECT tx_type, total_value FROM inv_transactions
+         WHERE asset_id=? AND month=? AND notes='__broker_import__'`,
+        [assetId, MONTH_ISO]
+      )) {
+        const k = `${row.tx_type}|${Math.round(Math.abs(row.total_value) * 100)}`;
+        alreadyByKey.set(k, (alreadyByKey.get(k) || 0) + 1);
+      }
       for (const mov of (a.movimentacoes || [])) {
         if (!mov.amount || mov.flow_type === 'ignore') continue;
         let txType;
@@ -3982,10 +4034,11 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
           // Legacy fallback (no flow_type): use sign convention
           txType = mov.amount < 0 ? 'compra' : 'dividendo';
         }
-        // Check for existing identical tx this month
-        const dup = first(`SELECT id FROM inv_transactions WHERE asset_id=? AND month=? AND tx_type=? AND ABS(total_value-?)<=0.01 AND notes='__broker_import__'`,
-          [assetId, MONTH_ISO, txType, Math.abs(mov.amount)]);
-        if (dup) { skippedDuplicates++; continue; }
+        // Consome uma das idênticas já existentes (importação anterior do
+        // mesmo mês); só a partir daí insere de fato — ver comentário acima.
+        const movKey = `${txType}|${Math.round(Math.abs(mov.amount) * 100)}`;
+        const alreadyThere = alreadyByKey.get(movKey) || 0;
+        if (alreadyThere > 0) { alreadyByKey.set(movKey, alreadyThere - 1); skippedDuplicates++; continue; }
         db.run(`INSERT INTO inv_transactions (asset_id,month,tx_type,total_value,notes) VALUES (?,?,?,?,?)`,
           [assetId, MONTH_ISO, txType, Math.abs(mov.amount), '__broker_import__']);
         txInserted++;

@@ -12,6 +12,127 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-03 (6) — v4.86.0: auditoria geral dos 3 fluxos de importação — 5 bugs encontrados
+
+### Contexto
+A pedido do usuário ("dê uma olhada geral se está tudo redondo... com foco
+nos mecanismos de identificação de duplicatas, substituição de previsões,
+incorporação de alterações feitas ao longo do fluxo"), fiz uma leitura
+sistemática do caminho completo das 3 importações (extrato, fatura e
+corretora). Nenhum destes 5 foi relatado pelo usuário — todos saíram da
+leitura do código, e 4 deles foram confirmados com simulação.
+
+### Bug 1 — Round 2 de duplicatas deixava efeitos colaterais órfãos (GRAVE)
+`doImportFromTable()` monta 3 conjuntos de vínculos ANTES da 2ª rodada de
+duplicatas (`showMemoDupUI`): movimentações de Bem/Direito (`patLinks`),
+baixa de parcela de dívida pessoal (`debtLinks`) e criação das parcelas
+FUTURAS de uma compra parcelada (`updatedInstallments`). Quando o usuário
+marcava "🚫 Pular" numa linha nessa tela, `confirmMemoDupImport()`
+removia a linha de `rowsToImport` — mas repassava os três conjuntos
+INTACTOS pra frente. Resultado: para um lançamento que o usuário mandou
+pular (justamente por já estar registrado, com esses efeitos já aplicados
+na importação original), o app mesmo assim gravava a movimentação no
+Bem/Direito, marcava a parcela da dívida como paga de novo, e recriava
+todas as parcelas futuras — duplicando-as.
+
+**Correção**: cada vínculo passou a carregar `_frIdx` (o índice da linha
+que o originou dentro de `finalRows`), e `confirmMemoDupImport()` filtra
+os três conjuntos pelo mesmo `skipIdx` que já filtrava as linhas.
+
+### Bug 2 — Dois títulos do Tesouro viravam um só, com os valores somados (GRAVE)
+`broker:save-parsed` pré-agrega os ativos do extrato por NOME
+(`assetMap`), antes de qualquer casamento com o banco. Em Renda
+Fixa/Tesouro a BTG nomeia o papel pelo TIPO do título ("NTNB-P"), não
+pelo título específico — então o Tesouro IPCA+ 2029 e o 2040 chegam com o
+MESMO nome. Os dois eram fundidos num ativo só, com os valores somados
+(R$108.240,66 + R$60.210 = R$168.450,66) e o vencimento de quem chegasse
+primeiro; o outro título simplesmente sumia da carteira. Isso é a MESMA
+família do bug corrigido na v4.85.18 (casamento por código ambíguo), mas
+num ponto anterior do fluxo que passou batido naquela correção — o fix
+anterior só valia se os dois chegassem separados até lá.
+
+**Correção**: a chave de agregação passou a ser `nome|vencimento`. Papéis
+sem vencimento (ações, fundos, caixa) continuam agregando só por nome,
+exatamente como antes.
+
+### Bug 3 — Movimentações legitimamente repetidas eram descartadas
+A inserção de movimentações da corretora perguntava "já existe alguma
+igual (mesmo ativo+mês+tipo+valor) neste mês?" e pulava se sim. Isso dá
+idempotência ao reimportar o mesmo mês (correto), mas também descartava
+movimentações legitimamente repetidas DENTRO DO MESMO extrato: três
+dividendos de R$250,00 no mesmo mês viravam um só — a primeira entrava e
+as outras duas eram vistas como cópia dela.
+
+**Correção**: idempotência por CONTAGEM em vez de existência. Conta
+quantas idênticas já existem de cada (tipo+valor) e pula exatamente essa
+quantidade; o excedente é inserido normalmente. Reimportar o mesmo mês
+continua não duplicando nada.
+
+### Bug 4 — Ativo novo criado sem passar pela tela de revisão
+`willCreateNew()` (a checagem que decide se um ativo entra na tela
+"🆕 Revisar ativos que seriam criados como novos") casava por código
+IGNORANDO o vencimento, enquanto `broker:save-parsed` — desde a
+v4.85.18 — exige código+vencimento. Divergência: para o Tesouro IPCA+
+2040, a revisão dizia "já existe" (por causa do código compartilhado
+"NTNB-P") e não o mostrava, mas o salvamento criava um ativo NOVO. O
+usuário nunca tinha a chance de vinculá-lo ao papel certo.
+
+**Correção**: `willCreateNew()` passou a usar o mesmo critério
+código+vencimento de `main.js`.
+
+### Bug 5 — Round 2 casava valores absurdamente diferentes
+`bank:check-memo-dups` (2ª rodada) casa por memorando+categoria+±7 dias,
+SEM olhar valor nenhum — de propósito, já que a rodada existe justamente
+pra pegar o caso "provisão de recorrência com valor estimado ≠ valor
+real". Mas sem limite algum, um comerciante que aparece muitas vezes no
+período com valores completamente diferentes gera falso positivo puro
+(ex.: pedágio de R$4,50 casando com uma fatura de R$483,54 do mesmo
+nome — ~115x maior). Provável explicação do falso positivo "Conectcar"
+que o usuário relatou (e que ficou sem causa raiz na v4.85.18).
+
+**Correção**: provisão de recorrência não conferida continua casando com
+QUALQUER valor (é o caso que a rodada existe pra cobrir); as demais
+precisam ao menos ter o mesmo sinal e ficar dentro de 3x. Adicionado
+também um `ORDER BY` (provisões primeiro, depois valor mais próximo,
+depois data mais próxima) — antes o `LIMIT 3` pegava 3 linhas
+arbitrárias, e a UI mostra `existing[0]` como "a" correspondência.
+O renderer passou a enviar o `amount` no payload (não enviava).
+
+### Robustez (sem bug observado)
+`applyDirectReplacements()` empilhava `replaceIds` condicionalmente
+(`if (existingId)`) enquanto `rows` era empilhado sempre — mas o backend
+trata os dois como arrays PARALELOS (`replaceIds[k]` ↔ `rows[k]`). Uma
+única linha sem id deslocaria todos os índices seguintes, fazendo o
+backend apagar o lançamento ERRADO. Hoje é inalcançável (a UI só oferece
+"substituir" quando há id), mas o modo de falha é silencioso e destrutivo
+demais pra depender disso. Agora empilha `null` e o backend ignora as
+posições nulas.
+
+### Verificado
+`node --check` nos dois arquivos. Simulação isolada (sql.js, schema real)
+cobrindo os 4 bugs verificáveis: (1) round-2 agora casa pedágio só com
+pedágio e fatura só com fatura, e a provisão de recorrência continua
+casando com valor muito diferente; (2) NTNB-P antes → 1 ativo de
+R$168.450,66, depois → 2 ativos corretos (R$108.240,66 e R$60.210), com
+PETR4 duplicado continuando a agregar normalmente; (3) 3 dividendos
+idênticos → 4 inserções na 1ª importação (antes seriam 2) e 0 na
+reimportação do mesmo mês; (4) filtro dos vínculos por `_frIdx` descarta
+o patLink e as parcelas futuras das linhas puladas, preservando o
+debtLink da linha mantida.
+
+**Nota**: não testei ao vivo na tela (exigiria reproduzir um round-2 real
+com dados que eu não devo gravar no banco do usuário) — vale conferir na
+próxima importação de fatura que passar pela 2ª rodada.
+
+**Arquivos tocados**: `src/renderer.js` (`doImportFromTable` — `_frIdx` em
+patLinks/debtLinks/installments e `amount` no payload do round 2;
+`confirmMemoDupImport` — filtro dos vínculos; `reviewNewAssetsBeforeImport`
+→ `willCreateNew`; `applyDirectReplacements`), `src/main.js`
+(`bank:check-memo-dups`; `bank:import` bloco `replaceIds`;
+`broker:save-parsed` — chave de agregação e dedup de movimentações).
+
+---
+
 ## 2026-08-03 (5) — v4.85.21: feat — "Substituir" duplicata comum (não só provisão de recorrência)
 
 ### Relato do usuário

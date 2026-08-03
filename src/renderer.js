@@ -6191,6 +6191,11 @@ async function doImportFromTable() {
              stripParcel(r.desc||r.memo) === stripParcel(inst.memo);
     });
     if (!match) return inst; // no match found, keep original
+    // Âncora na linha de origem (parcela 1/N) — ver comentário do `_frIdx`
+    // em patLinks: se o Round 2 descartar essa linha por já estar
+    // registrada, as parcelas FUTURAS dela também já foram criadas na
+    // importação anterior, e recriá-las aqui duplicaria todas.
+    const _frIdx = finalRows.indexOf(match);
 
     // Build installment memo: take user memo, replace parcel fraction.
     // inst.memo já tem a numeração certa desta parcela (gerada em
@@ -6209,6 +6214,7 @@ async function doImportFromTable() {
     }
     return {
       ...inst,
+      _frIdx,
       memo:     newMemo,
       category: match.category || inst.category || '',
     };
@@ -6230,9 +6236,16 @@ async function doImportFromTable() {
   const patDebtByIdx  = byDataIdx(G('bank-preview-body')?.querySelectorAll('.import-debt-inp'));
   const patDebtToggleByIdx = byDataIdx(G('bank-preview-body')?.querySelectorAll('.import-debt-toggle'));
 
-  const patLinks = finalRows.map((r) => {
+  // `_frIdx` = índice da linha DENTRO de finalRows. Necessário porque o
+  // Round 2 (showMemoDupUI) pode remover linhas depois que estes vínculos
+  // já foram montados — sem essa âncora não havia como descartar junto o
+  // vínculo da linha que o usuário mandou pular, e o app acabava criando
+  // uma movimentação de Bem/Direito (ou marcando uma parcela de dívida
+  // como paga) para um lançamento que nunca chegou a ser importado.
+  const patLinks = finalRows.map((r, frIdx) => {
     const origIdx = rows.indexOf(r);
     return {
+      _frIdx:   frIdx,
       assetId:  parseInt(patAssetByIdx[origIdx]?.value || '0'),
       txType:   patTypeByIdx[origIdx]?.value || 'aluguel',
       month:    (r.dateISO || '').slice(0, 7),
@@ -6242,9 +6255,10 @@ async function doImportFromTable() {
     };
   }).filter(p => p.assetId && p.month);
 
-  const debtLinks = finalRows.map((r) => {
+  const debtLinks = finalRows.map((r, frIdx) => {
     const origIdx = rows.indexOf(r);
     return {
+      _frIdx: frIdx,
       debtId: patDebtToggleByIdx[origIdx]?.checked ? parseInt(patDebtByIdx[origIdx]?.value || '0') : 0,
       month:  (r.dateISO || '').slice(0, 7),
       amount: Math.abs(r.amount),
@@ -6262,7 +6276,7 @@ async function doImportFromTable() {
       finalRows.forEach((r, gi) => {
         if ((r.accountId ?? accountId) !== accId) return;
         idxMap.push(gi);
-        rowsForCheck.push({ dateISO: r.dateISO, memo: r.memo, category: r.category || '' });
+        rowsForCheck.push({ dateISO: r.dateISO, memo: r.memo, category: r.category || '', amount: r.amount });
       });
       if (!rowsForCheck.length) continue;
       const res = await ff.bankCheckMemoDups({ accountId: accId, rows: rowsForCheck });
@@ -6544,8 +6558,19 @@ async function confirmMemoDupImport() {
   }
 
   const rowsToImport = finalRows.filter((_, i) => !skipIdx.has(i));
+  // Os vínculos (Bem/Direito, dívida pessoal e parcelas futuras) foram
+  // montados ANTES desta tela, sobre a lista completa — descartar só a
+  // linha sem descartar o vínculo dela criava efeito colateral sem
+  // lançamento correspondente: uma movimentação de Bem/Direito registrada,
+  // uma parcela de dívida marcada como paga, ou as parcelas futuras
+  // recriadas — tudo para um lançamento que o usuário mandou PULAR (e que,
+  // por já estar registrado, já tinha esses efeitos aplicados na
+  // importação original). Ver `_frIdx` em doImportFromTable.
+  const keptPatLinks     = (patLinks || []).filter(p => !skipIdx.has(p._frIdx));
+  const keptDebtLinks    = (debtLinks || []).filter(d => !skipIdx.has(d._frIdx));
+  const keptInstallments = (updatedInstallments || []).filter(inst => inst._frIdx == null || !skipIdx.has(inst._frIdx));
   preview._memoDup = null;
-  await finishImportWithPatLinks(rowsToImport, updatedInstallments, accountId, checkDailySaldo, patLinks, debtLinks);
+  await finishImportWithPatLinks(rowsToImport, keptInstallments, accountId, checkDailySaldo, keptPatLinks, keptDebtLinks);
 }
 
 async function doImport(finalRows, parcelInstallments, accountId, checkDailySaldo, replaceIds = []) {
@@ -6924,7 +6949,12 @@ async function applyDirectReplacements(directReplaceRows, accountId, checkDailyS
       category: existingCategory,
       saldo: row.saldo ?? null,
     });
-    if (existingId) g.replaceIds.push(existingId);
+    // SEMPRE empilha (null quando não há id) — `rows` e `replaceIds` são
+    // arrays PARALELOS no backend (replaceIds[k] é o lançamento que rows[k]
+    // substitui). Empilhar condicionalmente deslocava todos os índices
+    // seguintes assim que uma linha viesse sem id, fazendo o backend apagar
+    // o lançamento ERRADO. main.js ignora as posições nulas.
+    g.replaceIds.push(existingId || null);
   }
   // Acumula os casos em que o backend não conseguiu apagar a provisão (já
   // conferida entre o momento em que a duplicata foi detectada e agora) —
@@ -11189,7 +11219,15 @@ async function reviewNewAssetsBeforeImport(parsed) {
     // desnecessário, já que o salvamento nem precisa da confirmação.
     if (asset.code) {
       const nCode = norm(asset.code);
-      if (_invAssetsList.some(a => a.code && norm(a.code) === nCode)) return false;
+      // O VENCIMENTO precisa bater junto quando existe — mesmo critério de
+      // main.js (broker:save-parsed). Sem isso, os dois títulos "NTNB-P" do
+      // Tesouro (2029 e 2040) davam "já existe" por causa do código
+      // compartilhado, esta revisão não os mostrava, e mesmo assim o
+      // salvamento criava um ativo NOVO (lá o vencimento entra na conta) —
+      // um ativo nascia sem o usuário nunca ter tido a chance de vinculá-lo
+      // ao papel certo.
+      if (_invAssetsList.some(a => a.code && norm(a.code) === nCode
+          && (!asset.maturity_month || !a.maturity_month || a.maturity_month === asset.maturity_month))) return false;
     }
     return !_invAssetsList.some(a => norm(a.name) === nName);
   };
