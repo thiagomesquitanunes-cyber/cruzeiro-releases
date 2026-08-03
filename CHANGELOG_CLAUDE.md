@@ -12,6 +12,68 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-03 (5) — v4.85.21: feat — "Substituir" duplicata comum (não só provisão de recorrência)
+
+### Relato do usuário
+Ao importar a fatura BTG, "alguns lançamentos eram parcelas que já
+estavam registradas. Ele identificou como 'duplicatas', mas não deu a
+opção de substituir provisão, só de importar ou pular. Existia uma
+pequena diferença nos centavos, então ou eu importava e excluía a
+anterior, ou teria que corrigir os centavos manualmente."
+
+### Causa
+A tela de resolução de duplicatas (`showDupResolutionUI`) só oferece
+"🔄 Substituir" quando o lançamento já existente é uma **provisão de
+recorrência não conferida** (`ex0.recurring && !ex0.cleared`) — criada
+originalmente pra resolver só esse caso (o motor de recorrências gera
+uma transação com valor/data ESTIMADOS, e "substituir" troca pelo valor
+real do extrato). Uma parcela lançada manualmente ou numa importação
+anterior, com centavos levemente diferentes do extrato atual, é
+detectada como duplicata (`reason: 'exata'` ou
+`'valor-igual-data-proxima'`, casamento de valor com tolerância de até
+R$1 — main.js `bank:import`) mas NÃO passa no `isProvision`, então só
+"Importar" (duplicava) ou "Pular" (mantinha o valor errado) apareciam.
+
+Mesmo se a UI oferecesse a opção, o backend bloquearia: o DELETE em
+`bank:import` (`replaceIds`) era hard-coded pra só apagar
+`recurring_id IS NOT NULL AND cleared=0` — uma parcela comum
+(`recurring_id` nulo) nunca bateria nesse WHERE, e a substituição falharia
+silenciosamente (nem apagava a antiga, nem inseria a nova, pra não duplicar).
+
+### Correção
+- `renderer.js` (`showDupResolutionUI`): nova opção "🔄 Substituir
+  lançamento" pra qualquer duplicata com uma correspondência específica
+  (`ex0` existe), não só provisão — mesmo mecanismo (apaga o antigo,
+  insere o novo com o valor/data do extrato), mas SEM vir pré-marcada
+  (diferente da provisão, que é auto-selecionada): é uma correspondência
+  menos certa, o usuário decide se é o caso.
+- `main.js` (`bank:import`, bloco `replaceIds`): o DELETE deixou de
+  exigir `recurring_id IS NOT NULL` — agora aceita apagar qualquer
+  transação **não conferida** (`cleared=0`), mantendo a MESMA proteção de
+  sempre (nunca apaga algo já conferido). O registro em
+  `recurring_excludes` (pra `syncRecurringTxns` não recriar a provisão)
+  continua condicionado a `recurring_id` estar presente — sem efeito
+  colateral pro caso de lançamento comum.
+- Adicionei também um cuidado que não existia antes em NENHUM dos dois
+  casos: se o lançamento apagado for perna de uma transferência
+  (`transfer_id`), a perna irmã é apagada junto — mesmo padrão que
+  `tx:delete` já usa — evitando uma perna órfã (cenário mais provável
+  agora que "substituir" vale pra qualquer lançamento, não só provisões).
+
+### Verificado
+`node --check` nos dois arquivos. Simulação isolada (sql.js, banco
+sintético com o schema real de `transactions`) cobrindo os 3 casos: (1)
+lançamento comum não conferido → antes bloqueado, agora substituído
+corretamente; (2) lançamento já conferido → continua protegido, nunca
+apagado; (3) perna de transferência → as duas pernas são apagadas juntas,
+sem órfã.
+
+**Arquivos tocados**: `src/renderer.js` (`showDupResolutionUI`,
+`confirmDupAndImport`, `applyDirectReplacements` — mensagens
+generalizadas), `src/main.js` (`bank:import`, bloco `replaceIds`).
+
+---
+
 ## 2026-08-03 (4) — v4.85.20: feat — importador de fatura BTG entende também a "fatura parcial"
 
 ### Pedido do usuário

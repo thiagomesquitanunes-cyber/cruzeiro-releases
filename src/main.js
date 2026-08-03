@@ -3387,40 +3387,53 @@ ipcMain.handle('bank:import', (_, { accountId, rows, checkDailySaldo, skipIds, d
     for (let k = 0; k < replaceIds.length; k++) {
       const rid = replaceIds[k];
       try {
-        // Guarda recurring_id+date ANTES de apagar — precisa pra gravar a
-        // exclusão logo abaixo (mesmo padrão de tx:delete, main.js ~L1008).
-        // Sem isso, o DELETE some com a provisão na hora, mas
-        // syncRecurringTxns (que roda em todo boot/desbloqueio do app,
-        // não só na importação) não tem como saber que aquela ocorrência
-        // já foi atendida pela transação real importada — e recria uma
-        // provisão nova (valor/data estimados) do lado da real na
-        // próxima vez que o app abre, duplicando o lançamento.
-        const provisionRow = first('SELECT recurring_id, date FROM transactions WHERE id=? AND recurring_id IS NOT NULL AND cleared=0', [rid]);
-        db.run('DELETE FROM transactions WHERE id=? AND recurring_id IS NOT NULL AND cleared=0', [rid]);
+        // "Substituir" cobre dois casos: (1) uma provisão de recorrência
+        // (recurring_id preenchido) e (2) um lançamento comum já
+        // registrado que o usuário reconheceu como a mesma transação (ex.:
+        // parcela lançada antes com centavos diferentes do extrato real) —
+        // mesmo mecanismo pros dois, só o tratamento pós-exclusão que
+        // difere (ver abaixo). Guarda recurring_id+date ANTES de apagar —
+        // precisa pra gravar a exclusão logo abaixo (mesmo padrão de
+        // tx:delete, main.js ~L1008) SE for uma provisão: sem isso, o
+        // DELETE some com a provisão na hora, mas syncRecurringTxns (que
+        // roda em todo boot/desbloqueio do app, não só na importação) não
+        // tem como saber que aquela ocorrência já foi atendida pela
+        // transação real importada — e recria uma provisão nova
+        // (valor/data estimados) do lado da real na próxima vez que o app
+        // abre, duplicando o lançamento.
+        const oldRow = first('SELECT recurring_id, date, transfer_id FROM transactions WHERE id=? AND cleared=0', [rid]);
+        // Agora que "substituir" vale pra qualquer lançamento não conferido
+        // (não só provisão de recorrência), a linha apagada PODE ser uma
+        // perna de transferência — sem isso a perna irmã ficaria órfã
+        // (mesmo cuidado que tx:delete já toma, main.js ~L1087).
+        if (oldRow?.transfer_id) {
+          db.run('DELETE FROM transactions WHERE transfer_id=? AND id!=?', [oldRow.transfer_id, rid]);
+        }
+        db.run('DELETE FROM transactions WHERE id=? AND cleared=0', [rid]);
         // getRowsModified() confirma se o DELETE realmente apagou algo —
-        // sem isso, se a provisão já tivesse sido CONFERIDA (cleared=1,
-        // protegida contra exclusão) ou substituída/regenerada com outro
-        // id (ex: syncRecurringTxns rodou de novo entre o dry-run e a
-        // confirmação), o DELETE virava um no-op silencioso (SQLite não
-        // reclama de WHERE sem match) — mas a transação nova era inserida
-        // do mesmo jeito, resultando na provisão antiga (agora órfã) + a
-        // nova, duplicadas. Agora, quando isso acontece, a linha
-        // correspondente NÃO é inserida (a provisão já conferida já
-        // representa o lançamento real — inserir de novo duplicaria).
-        // Captura o resultado AGORA — a próxima instrução (INSERT em
+        // sem isso, se o lançamento antigo já tivesse sido CONFERIDO
+        // (cleared=1, protegido contra exclusão) ou substituído/regenerado
+        // com outro id (ex: syncRecurringTxns rodou de novo entre o
+        // dry-run e a confirmação), o DELETE virava um no-op silencioso
+        // (SQLite não reclama de WHERE sem match) — mas a transação nova
+        // era inserida do mesmo jeito, resultando no lançamento antigo
+        // (agora órfão) + o novo, duplicados. Agora, quando isso acontece,
+        // a linha correspondente NÃO é inserida (o lançamento já conferido
+        // já representa o real — inserir de novo duplicaria). Captura o
+        // resultado AGORA — a próxima instrução (INSERT em
         // recurring_excludes) também roda no mesmo `db`, e getRowsModified()
         // reflete sempre só a ÚLTIMA instrução executada.
         const deleted = db.getRowsModified() > 0;
         if (deleted) {
           replaced++; save();
-          if (provisionRow) {
+          if (oldRow?.recurring_id) {
             try {
               migrateRecurring();
-              run('INSERT OR IGNORE INTO recurring_excludes (recurring_id, date) VALUES (?,?)', [provisionRow.recurring_id, provisionRow.date]);
+              run('INSERT OR IGNORE INTO recurring_excludes (recurring_id, date) VALUES (?,?)', [oldRow.recurring_id, oldRow.date]);
             } catch(e) {}
           }
         } else {
-          console.warn(`[bank:import] "substituir" não encontrou a provisão id=${rid} (já conferida ou removida) — pulando a linha correspondente pra não duplicar`);
+          console.warn(`[bank:import] "substituir" não encontrou o lançamento id=${rid} (já conferido ou removido) — pulando a linha correspondente pra não duplicar`);
           failedReplaceRowIdx.add(k);
         }
       } catch(e) {}

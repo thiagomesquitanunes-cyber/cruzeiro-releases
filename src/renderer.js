@@ -6703,6 +6703,7 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
         <br>🔴 <strong>Vermelho</strong> — mesma data, valor e descrição parecida: quase certeza de duplicata.
         <br>🟡 <strong>Amarelo</strong> — data ou descrição batem só parcialmente: vale conferir com mais atenção antes de confirmar.
         <br>🔄 <strong>Substituir provisão</strong> — o lançamento existente é uma <em>previsão de recorrência</em> (valor/data estimados): importa o valor real e apaga a estimativa. <em>Recomendado nesses casos.</em>
+        <br>🔄 <strong>Substituir lançamento</strong> — mesma ideia, mas pra um lançamento comum já registrado (ex.: uma parcela lançada antes com centavos levemente diferentes do extrato): apaga o antigo e insere este no lugar. Use quando tiver certeza de que é a mesma transação, só com o valor corrigido.
         <br>🚫 <strong>Pular</strong> — é a mesma transação já registrada: não importa de novo.
         <br>✅ <strong>Importar</strong> — são transações diferentes que só se parecem: importa normalmente.
       </div>
@@ -6729,6 +6730,15 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
           const isDup   = !!dupInfo;
           const ex0     = exList?.[0];
           const isProvision = !!ex0?.recurring && !ex0?.cleared;
+          // Substituir também fora do caso de provisão de recorrência —
+          // ex.: uma parcela já lançada manualmente/importada antes, com
+          // um valor levemente diferente (centavos) do que o extrato real
+          // traz. Antes só existia "Importar" (duplicava, exigindo apagar
+          // a antiga na mão) ou "Pular" (mantinha o valor errado). Mesmo
+          // mecanismo de substituição (apaga a antiga + insere a nova),
+          // só que sem vir pré-marcado — é uma correspondência menos
+          // certa que uma provisão, o usuário decide se é o caso.
+          const canReplaceOther = isDup && !isProvision && !!ex0?.id;
           const daysTxt = dupInfo?.daysDiff > 0 ? ` · ${dupInfo.daysDiff} dia(s) de diferença` : '';
           const reasonLabel = (({
             'recorrencia': '🔄 provisão de recorrência (valor/data estimados)',
@@ -6777,6 +6787,10 @@ function showDupResolutionUI(potentialDups, finalRows, parcelInstallments, accou
               ${isProvision ? `
               <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--accent);font-weight:600" title="Importa a transação real e remove a provisão estimada da recorrência">
                 <input type="radio" name="dup-action-${i}" value="replace" data-existing-id="${ex0.id}" checked> 🔄 Substituir provisão
+              </label>` : ''}
+              ${canReplaceOther ? `
+              <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--accent);font-weight:600" title="Apaga o lançamento já existente (ex.: valor com centavos diferentes) e insere este no lugar, no valor/data do extrato">
+                <input type="radio" name="dup-action-${i}" value="replace" data-existing-id="${ex0.id}"> 🔄 Substituir lançamento
               </label>` : ''}
               <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--green);font-weight:500">
                 <input type="radio" name="dup-action-${i}" value="import" ${!isDup ? 'checked' : ''}> ✅ Importar
@@ -6846,30 +6860,30 @@ async function confirmDupAndImport() {
   });
 
   if (directReplaceRows.length) {
-    G('bank-result').innerHTML = `<div class="info-box">⏳ Substituindo ${directReplaceRows.length} provisão(ões) de recorrência…</div>`;
+    G('bank-result').innerHTML = `<div class="info-box">⏳ Substituindo ${directReplaceRows.length} lançamento(s)…</div>`;
     try {
       const { blocked } = await applyDirectReplacements(directReplaceRows, accountId, checkDailySaldo);
       directReplaceRows.forEach(({ row }) => {
         _importAudit?.accounted.push({ gi: row._gi, accountId: row.accountId ?? accountId, amount: row.amount, kind: 'replaced', memo: row.memo, dateISO: row.dateISO });
       });
       const okCount = directReplaceRows.length - (blocked?.length || 0);
-      if (okCount > 0) toast(`🔄 ${okCount} provisão(ões) substituída(s) pelo valor real — nada a revisar nelas.`);
-      // A provisão já estava conferida (ou foi removida/regenerada) entre a
-      // detecção da duplicata e agora — a linha do extrato NÃO foi
+      if (okCount > 0) toast(`🔄 ${okCount} lançamento(s) substituído(s) pelo valor do extrato — nada a revisar nelas.`);
+      // O lançamento antigo já estava conferido (ou foi removido/regenerado)
+      // entre a detecção da duplicata e agora — a linha do extrato NÃO foi
       // inserida de propósito, pra não duplicar. Avisa explicitamente,
       // já que "nada aconteceu" com essas linhas silenciosamente seria
       // confuso (pareceria que a importação "sumiu" com elas).
       if (blocked?.length) {
         showConfirmDialog(
           `${blocked.length} lançamento(s) não foram importados`,
-          `A provisão de recorrência correspondente já estava conferida (ou foi removida) quando a substituição rodou — importar de novo criaria duplicata, então essas linhas foram puladas:<br><br>` +
+          `O lançamento correspondente já estava conferido (ou foi removido) quando a substituição rodou — importar de novo criaria duplicata, então essas linhas foram puladas:<br><br>` +
           blocked.map(b => `• ${esc(fmtDate(b.date))} — ${esc(b.memo || '(sem memo)')} — ${esc(fmtBRL(b.amount))}`).join('<br>') +
           `<br><br>Se algum desses lançamentos realmente falta, confira a conta e o Extrato manualmente.`,
           'Entendi', false, true
         ).catch(() => {});
       }
     } catch(e) {
-      toast('Erro ao substituir provisão: ' + e.message);
+      toast('Erro ao substituir lançamento: ' + e.message);
     }
     G('bank-result').innerHTML = '';
   }
@@ -6891,11 +6905,12 @@ async function confirmDupAndImport() {
   renderImportEditTable(selectedRows);
 }
 
-// Insere diretamente as transações confirmadas como "substituir provisão":
-// apaga a provisão de recorrência e insere a real com o valor/data do
-// extrato, herdando memo e categoria da provisão (é a mesma recorrência,
-// já corretamente categorizada — não faz sentido pedir pro usuário
-// preencher de novo algo que o app já sabia).
+// Insere diretamente as transações confirmadas como "substituir" (provisão
+// de recorrência OU um lançamento comum já registrado, ex.: parcela com
+// centavos diferentes): apaga o lançamento antigo e insere o real com o
+// valor/data do extrato, herdando memo e categoria do antigo (já estava
+// corretamente categorizado — não faz sentido pedir pro usuário preencher
+// de novo algo que o app já sabia).
 async function applyDirectReplacements(directReplaceRows, accountId, checkDailySaldo) {
   const groups = new Map(); // accountId -> { rows: [], replaceIds: [] }
   for (const { row, existingId, existingMemo, existingCategory } of directReplaceRows) {
