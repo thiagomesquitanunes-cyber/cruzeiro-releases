@@ -6727,6 +6727,7 @@ ipcMain.handle('settings:get', () => {
   return {
     hasPassword: !!s.passwordHash || !!s.hasEncryptedDB,
     dataDir: s.dataDir || null,
+    backupDir: s.backupDir || null,
     tourDone: !!s.tourDone,
     currentUserId: _currentUserId,
     benchmarks: s.benchmarks || null,

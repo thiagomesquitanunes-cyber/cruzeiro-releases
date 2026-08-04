@@ -12,6 +12,34 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-03 (8) — v4.86.2: fix — tela de Configurações não mostrava a pasta de backup escolhida
+
+### Relato do usuário
+"Quando mudo a pasta de backup, ele está mudando (os arquivos passam a
+ser gravados onde indiquei), mas continua mostrando: 'mesma pasta dos
+dados (subpasta backups)'."
+
+### Causa
+`settings:get` (main.js) retorna um objeto montado à mão, com uma lista
+fixa de campos — e `backupDir` nunca foi incluído nessa lista, embora
+`settings:set-backup-dir` grave corretamente `s.backupDir` no arquivo de
+configurações. Como `getBackupDir()` (a função que o backup de verdade
+usa pra saber onde gravar) lê o arquivo de configurações diretamente,
+sem passar por essa lista, os arquivos sempre foram pro lugar certo — só
+a TELA, que depende de `settings:get`, nunca recebia o valor de volta.
+
+### Correção
+Adicionado `backupDir: s.backupDir || null` ao objeto retornado por
+`settings:get`.
+
+### Verificado
+`node --check`. Conferido que não existe outro handler `settings:get`
+duplicado no arquivo — era o único ponto faltando.
+
+**Arquivo tocado**: `src/main.js` (`settings:get`).
+
+---
+
 ## 2026-08-03 (7) — v4.86.1: fix CRÍTICO — regressão do fix de vencimento apagava ativos silenciosamente
 
 ### Relato do usuário
