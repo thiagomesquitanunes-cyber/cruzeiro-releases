@@ -3937,11 +3937,27 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
               [a.code, a.broker || '']
             ))
             || (a.code && first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE', [a.code]));
+        // Fallback por NOME — sofre exatamente da mesma ambiguidade do
+        // código quando há vencimento (o nome de Tesouro é o próprio
+        // código, ex. "NTNB"): sem exigir o vencimento aqui também, um
+        // extrato com vários vencimentos do mesmo papel (ex.: 4 títulos
+        // "NTNB" com vencimentos 2035/2045/2050/2060) encontrava, pra
+        // CADA um, o mesmo único ativo "NTNB" pré-existente (cujo
+        // vencimento nunca batia com o do título atual — o tier de código
+        // acima já tinha falhado pelo mesmo motivo) e reescrevia esse
+        // ÚNICO ativo repetidamente — só o último processado sobrevivia,
+        // os outros 3 desapareciam da carteira (bug real reportado pelo
+        // usuário, regressão desta mesma correção de vencimento).
         existing = existing
-          || first(
-            'SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND (broker IS NULL OR lower(broker)=lower(?))',
-            [a.name, a.broker || '']
-          ) || first('SELECT id FROM inv_assets WHERE lower(name)=lower(?)', [a.name]);
+          || (a.maturity_month
+            ? first(
+                'SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND maturity_month=? AND (broker IS NULL OR lower(broker)=lower(?))',
+                [a.name, a.maturity_month, a.broker || '']
+              ) || first('SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND maturity_month=?', [a.name, a.maturity_month])
+            : first(
+                'SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND (broker IS NULL OR lower(broker)=lower(?))',
+                [a.name, a.broker || '']
+              ) || first('SELECT id FROM inv_assets WHERE lower(name)=lower(?)', [a.name]));
       }
 
       let assetId;

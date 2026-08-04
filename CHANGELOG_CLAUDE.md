@@ -12,6 +12,66 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-03 (7) — v4.86.1: fix CRÍTICO — regressão do fix de vencimento apagava ativos silenciosamente
+
+### Relato do usuário
+Print da importação de um extrato de janeiro/26 (BTG): o extrato bruto
+tem 4 títulos "NTNB" (mesmo nome/código, 4 vencimentos diferentes:
+2035-05, 2045-05, 2050-08, 2060-08, somando R$330.977,57), mas a aba
+Patrimônio só mostrava UM "NTNB", com o valor do ÚLTIMO dos 4
+(R$147.038,31) — os outros três (R$183.939,26 no total) tinham
+desaparecido da carteira sem aviso nenhum.
+
+### Causa raiz — regressão da própria correção de ontem (v4.85.18/v4.86.0)
+O fix de ontem (código+vencimento) só cobriu o TIER de casamento por
+CÓDIGO em `broker:save-parsed` — mas logo abaixo dele existe um segundo
+fallback, por NOME, que continuou IGNORANDO o vencimento por completo:
+```js
+existing = existing
+  || first('SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND ...', [a.name, ...])
+```
+Para Tesouro, o nome do ativo É o código (`name: code` na hora do parse).
+Processando os 4 títulos em sequência: o 1º não bate por código+venc
+(nada com aquele vencimento ainda existe) → cai no fallback por nome →
+encontra QUALQUER ativo "NTNB" já cadastrado (de uma importação anterior)
+→ ATUALIZA esse ativo, sobrescrevendo o vencimento dele pro do 1º título.
+O 2º título: não bate por código+venc (o ativo que existia mudou de
+vencimento no passo anterior) → cai no MESMO fallback por nome → encontra
+o MESMO ativo (agora com o vencimento do 1º) → atualiza de novo,
+sobrescrevendo tudo. Isso se repete pros 4 — cada um reescreve o mesmo
+único registro, e só o último sobrevive. `willCreateNew()` (a checagem
+que decide se um ativo aparece na tela "Revisar ativos novos") tinha
+exatamente a mesma falha no próprio fallback por nome, então os 3
+primeiros nem apareciam pra revisão — o problema era 100% silencioso.
+
+### Correção
+Mesmo padrão do fix de ontem, agora aplicado também ao fallback por
+nome (`broker:save-parsed`) e ao fallback por nome de `willCreateNew()`:
+quando o ativo tem vencimento, o nome só "bate" com um ativo já
+cadastrado se o vencimento também bater — senão, cria um ativo novo.
+
+### Verificado
+`node --check` nos dois arquivos. Simulação isolada (sql.js) reproduzindo
+o cenário exato do usuário (1 ativo "NTNB" pré-existente com vencimento
+arbitrário + os 4 títulos do extrato real): comportamento antigo — os 4
+"atualizam" o mesmo id, só o último sobrevive; comportamento novo — 3
+criam ativos novos corretamente, 1 atualiza o que já batia.
+
+### Ação recomendada pro usuário
+**Reimportar o extrato de janeiro/26 (BTG RIC) depois de atualizar** — a
+correção não conserta retroativamente o que já foi sobrescrito; reimportar
+o mesmo arquivo agora vai criar os 3 ativos NTNB que sumiram (o vencimento
+que já bate não duplica, só os 3 que faltam são criados). Vale conferir
+se algum OUTRO extrato com títulos de nome/código repetido (Tesouro,
+principalmente) foi importado entre a v4.85.18 e esta versão e merece o
+mesmo reimport.
+
+**Arquivos tocados**: `src/main.js` (`broker:save-parsed`, fallback por
+nome), `src/renderer.js` (`willCreateNew` dentro de
+`reviewNewAssetsBeforeImport`).
+
+---
+
 ## 2026-08-03 (6) — v4.86.0: auditoria geral dos 3 fluxos de importação — 5 bugs encontrados
 
 ### Contexto

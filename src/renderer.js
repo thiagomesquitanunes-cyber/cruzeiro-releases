@@ -11229,7 +11229,17 @@ async function reviewNewAssetsBeforeImport(parsed) {
       if (_invAssetsList.some(a => a.code && norm(a.code) === nCode
           && (!asset.maturity_month || !a.maturity_month || a.maturity_month === asset.maturity_month))) return false;
     }
-    return !_invAssetsList.some(a => norm(a.name) === nName);
+    // Fallback por nome — mesma ambiguidade do código quando há
+    // vencimento (o nome de Tesouro É o código, ex. "NTNB"): sem exigir o
+    // vencimento aqui também, um extrato com vários vencimentos do mesmo
+    // papel (ex.: 4 títulos "NTNB") dizia "já existe" pra TODOS assim que
+    // qualquer um deles batesse por nome com um ativo já cadastrado —
+    // escondendo da revisão justamente os que precisavam de atenção (e
+    // main.js, com o mesmo problema corrigido agora, os sobrescrevia um
+    // atrás do outro). Ver mesma correção em broker:save-parsed.
+    return asset.maturity_month
+      ? !_invAssetsList.some(a => norm(a.name) === nName && a.maturity_month === asset.maturity_month)
+      : !_invAssetsList.some(a => norm(a.name) === nName);
   };
   const candidates = parsed.assets
     .map((asset, idx) => ({ idx, asset }))
