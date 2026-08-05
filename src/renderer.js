@@ -2282,6 +2282,14 @@ async function loadOverviewSettings() {
 }
 
 async function refreshOverview() {
+  // Sem nenhuma conta ainda (app recém-instalado): mostra a tela de
+  // boas-vindas (#overview-empty-state, CSS em index.html) em vez de uma
+  // Visão Geral com tudo zerado — evita a sensação de "app vazio/quebrado"
+  // no primeiro uso, antes da primeira conta ser criada.
+  const pageOv = G('page-overview');
+  if (pageOv) pageOv.classList.toggle('has-accounts', accounts.length > 0);
+  if (!accounts.length) return;
+
   const monthStr  = overviewMonthStr();
   const fromDate  = `${monthStr}-01`;
   const lastDay   = new Date(_overviewYear, _overviewMonth, 0).getDate();
@@ -6983,8 +6991,18 @@ async function applyDirectReplacements(directReplaceRows, accountId, checkDailyS
 // sozinha o motivo e sugere a correção, sem o usuário precisar caçar a
 // diferença manualmente.
 async function runFaturaBalanceAudit() {
+  // DESATIVADA a pedido do usuário — a informação mostrada por essa
+  // auditoria (linhas "sem destino" ou "contabilizadas mais de uma vez")
+  // tem sido consistentemente errada na prática, gerando alarme falso
+  // depois de importações que na verdade estavam corretas. Mantido o
+  // corpo da função (não removido) caso valha revisitar a lógica no
+  // futuro — por enquanto, só consome a auditoria pendente sem executar
+  // nada nem mostrar nada ao usuário.
+  _importAudit = null;
+  return;
+  // Código original abaixo, preservado mas inalcançável enquanto o
+  // `return` acima existir — remova-o pra reativar a auditoria.
   const audit = _importAudit;
-  _importAudit = null; // consome — cada importação tem sua própria auditoria
   if (!audit || !audit.parsedRows.length) return;
 
   const accountIds = [...new Set(audit.parsedRows.map(r => r.accountId))];
@@ -13692,7 +13710,7 @@ async function saveWizardParser(config) {
 }
 
 
-// ══ FINANCIAL FILE IMPORT (QIF / OFX / QFX / QBO / CSV) ══
+// ══ FINANCIAL FILE IMPORT (QIF / OFX / QFX / QBO / CSV / XLSX / XLS) ══
 async function importFinancialFile() {
   const res = await ff.openFile({
     filters:[{ name:'Arquivo financeiro', extensions:['qif','ofx','qfx','qbo','csv','QIF','OFX','QFX','QBO','CSV'] }]
@@ -13702,23 +13720,95 @@ async function importFinancialFile() {
   const filePath = res.path || '';
   const ext = filePath.split('.').pop().toLowerCase();
   const fileName = filePath.split(/[/\\]/).pop();
+  await _runFinancialImport(text, ext, fileName);
+}
+// Keep importQIF as alias for backward compatibility
+const importQIF = importFinancialFile;
 
+// Planilha (Excel/Google Sheets exportado como .xlsx/.xls) — lida direto no
+// renderer via <input type="file"> (mesmo padrão já usado pela importação
+// de corretora), já que a lib XLSX só está carregada aqui, não no processo
+// principal. Convertida pra um texto CSV equivalente e reaproveita 100% do
+// pipeline de importação/duplicatas/contas já existente pra CSV — sem
+// duplicar lógica nenhuma, então qualquer correção futura no parser de CSV
+// vale igualmente pra planilhas.
+function triggerFinancialXlsxFile() { G('financial-xlsx-input')?.click(); }
+async function onFinancialXlsxSelected(event) {
+  const file = event.target.files[0];
+  event.target.value = ''; // permite selecionar o mesmo arquivo de novo depois
+  if (!file) return;
+  try {
+    const buffer = await file.arrayBuffer();
+    const wb = XLSX.read(buffer, { type: 'array', cellDates: true });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+    const text = _xlsxRowsToCSVText(rows);
+    if (!text) {
+      G('qif-result').innerHTML = '<div class="warn-box">❌ A planilha está vazia ou não tem linhas suficientes.</div>';
+      return;
+    }
+    await _runFinancialImport(text, 'csv', file.name);
+  } catch(e) {
+    G('qif-result').innerHTML = `<div class="warn-box">❌ Erro ao ler a planilha: ${esc(e.message)}</div>`;
+  }
+}
+// Converte as linhas cruas da planilha (array de arrays) num texto CSV que o
+// parser de CSV existente (main.js parseCSVFinancial) entende — datas viram
+// ISO (aceito diretamente) e números viram texto com vírgula decimal SEM
+// separador de milhar (esse parser assume vírgula=decimal, ponto=milhar; um
+// texto só com vírgula evita qualquer ambiguidade). Texto normal (memo,
+// categoria, nome da conta) só precisa do escape de aspas do CSV.
+//
+// Delimitador PONTO-E-VÍRGULA, não vírgula — como o valor decimal usa
+// vírgula (linha acima), usar vírgula como delimitador TAMBÉM faria o
+// próprio parser de CSV quebrar cada valor decimal em duas colunas
+// (ex.: "-350,90" virava as colunas "-350" e "90", deslocando todas as
+// colunas seguintes da linha). `parseCSVFinancial` já detecta automático
+// qual separador foi usado olhando o cabeçalho, então gerar com `;` não
+// exige nenhuma mudança no parser.
+//
+// IMPORTANTE: `parseCSVFinancial` faz um split() ingênuo pelo separador —
+// não entende aspas nem escape nenhum. Por isso, em vez de tentar
+// "escapar" um ";" dentro de um texto (memo/categoria/conta), ele é
+// trocado por um espaço: garante que a linha NUNCA desalinha (o que
+// corromperia data/valor/categoria/conta de toda a linha), ao custo raro
+// de perder uma pontuação dentro do texto em si.
+function _xlsxRowsToCSVText(rows) {
+  if (!rows || rows.length < 2) return '';
+  const cell = v => {
+    if (v == null || v === '') return '';
+    if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}`;
+    if (typeof v === 'number') return String(v).replace('.', ',');
+    return String(v).trim().replace(/[;\r\n]/g, ' ');
+  };
+  return rows.map(r => (r||[]).map(cell).join(';')).join('\n');
+}
+
+// Corpo compartilhado entre o fluxo de arquivo (QIF/OFX/CSV, via diálogo do
+// SO) e o de planilha (XLSX/XLS, já convertida pra CSV acima) — mesma
+// chamada ao backend, mesma mensagem de resultado.
+async function _runFinancialImport(text, ext, fileName) {
   const nameEl = G('qif-file-name');
   if (nameEl) nameEl.textContent = fileName;
 
-  const btn = document.querySelector('[onclick="importFinancialFile()"]');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Processando…'; }
+  const btns = document.querySelectorAll('[onclick="importFinancialFile()"], [onclick="triggerFinancialXlsxFile()"]');
+  btns.forEach(b => { b.disabled = true; b._origText = b._origText || b.textContent; b.textContent = '⏳ Processando…'; });
   G('qif-result').innerHTML = '<div class="info-box">⏳ Processando — aguarde…</div>';
 
   try {
     const result = await ff.financialImport({ text, ext });
-    const fmt = { qif:'QIF', ofx:'OFX', qfx:'QFX', qbo:'QBO', csv:'CSV' }[ext] || ext.toUpperCase();
+    const fmt = { qif:'QIF', ofx:'OFX', qfx:'QFX', qbo:'QBO', csv:'CSV/planilha' }[ext] || ext.toUpperCase();
     let msg = `✅ <strong>${result.count.toLocaleString('pt-BR')} lançamentos importados</strong> (${fmt}).`;
     if (result.duplicates) msg += `<br>⏭ ${result.duplicates} duplicata(s) ignorada(s).`;
     if (result.skipped)    msg += `<br>⚠️ ${result.skipped} lançamento(s) ignorado(s).`;
     if (result.unknownAccounts?.length) {
-      msg += `<br>❓ Conta(s) não encontrada(s): <em>${result.unknownAccounts.join(', ')}</em>`;
-      msg += `<br><span style="font-size:11px;color:var(--text3)">Os nomes das contas devem ser idênticos aos do arquivo de origem.</span>`;
+      // "__default__" é o placeholder interno quando o arquivo não tem
+      // coluna de conta nenhuma — mostrar isso cru só confundiria.
+      const named = result.unknownAccounts.filter(a => a !== '__default__');
+      const hasDefault = result.unknownAccounts.includes('__default__');
+      if (named.length) msg += `<br>❓ Conta(s) não encontrada(s): <em>${named.join(', ')}</em>`;
+      if (hasDefault) msg += `<br>❓ Nenhuma coluna de conta reconhecida no arquivo — nada foi importado.`;
+      msg += `<br><span style="font-size:11px;color:var(--text3)">O nome na coluna "Conta" (ou no arquivo de origem) precisa ser idêntico ao nome da conta aqui no Cruzeiro. Veja "📖 Como formatar minha planilha?".</span>`;
     }
     G('qif-result').innerHTML = `<div class="info-box" style="line-height:1.9">${msg}</div>`;
     await loadAccounts();
@@ -13727,11 +13817,100 @@ async function importFinancialFile() {
   } catch(e) {
     G('qif-result').innerHTML = `<div class="warn-box">❌ Erro: ${esc(e.message)}</div>`;
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '📂 Selecionar arquivo'; }
+    btns.forEach(b => { b.disabled = false; b.textContent = b._origText; });
   }
 }
-// Keep importQIF as alias for backward compatibility
-const importQIF = importFinancialFile;
+
+// ── Guia de formato pro usuário montar a própria planilha (Excel/Sheets) ──
+function showFinancialImportGuide() {
+  G('custom-parser-title').textContent = '📖 Como formatar minha planilha pra importar';
+  G('custom-parser-body').innerHTML = `
+    <div style="font-size:13px;line-height:1.7;color:var(--text2)">
+      <p>Vale tanto pra uma planilha <strong>.xlsx/.xls</strong> (Excel, ou exportada do Google Sheets) quanto pra um <strong>.csv</strong> — a mesma estrutura funciona pros dois.</p>
+
+      <p style="margin-top:12px"><strong>1. A primeira linha precisa ser um cabeçalho</strong> com o nome de cada coluna — o Cruzeiro reconhece a coluna certa pelo NOME (não importa maiúscula/minúscula/acento), então a ordem das colunas não importa, só os nomes.</p>
+
+      <table style="width:100%;border-collapse:collapse;margin:10px 0;font-size:12.5px">
+        <thead><tr style="background:var(--bg3)">
+          <th style="text-align:left;padding:6px 8px;border:1px solid var(--border)">Coluna</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid var(--border)">Obrigatória?</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid var(--border)">Nomes aceitos</th>
+          <th style="text-align:left;padding:6px 8px;border:1px solid var(--border)">Formato</th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td style="padding:6px 8px;border:1px solid var(--border)"><strong>Data</strong></td>
+            <td style="padding:6px 8px;border:1px solid var(--border);color:var(--red)">Sim</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Data, Date, Dt</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">DD/MM/AAAA ou AAAA-MM-DD (numa planilha, pode ser uma célula de data de verdade)</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 8px;border:1px solid var(--border)"><strong>Descrição</strong></td>
+            <td style="padding:6px 8px;border:1px solid var(--border);color:var(--red)">Sim</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Descrição, Memo, Histórico, Lançamento, Payee</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Texto livre</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 8px;border:1px solid var(--border)"><strong>Valor</strong></td>
+            <td style="padding:6px 8px;border:1px solid var(--border);color:var(--red)">Sim</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Valor, Amount, Value, Montante</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)"><strong>Positivo = receita, negativo = despesa.</strong> Vírgula ou ponto como decimal.</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 8px;border:1px solid var(--border)"><strong>Conta</strong></td>
+            <td style="padding:6px 8px;border:1px solid var(--border);color:#d97706">Recomendada</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Conta, Account, Acct</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Precisa ser <strong>idêntico</strong> ao nome de uma conta já cadastrada no Cruzeiro</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Categoria</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Não</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Categoria, Category</td>
+            <td style="padding:6px 8px;border:1px solid var(--border)">Texto livre — se não bater com nenhuma categoria existente, fica sem categoria</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="warn-box" style="margin:12px 0;font-size:12.5px">
+        ⚠️ <strong>Sem a coluna "Conta"</strong>, o Cruzeiro não sabe em qual conta lançar cada linha e <strong>nada é importado</strong> — crie a conta correspondente aqui antes (mesmo nome) e inclua essa coluna na planilha, com o nome repetido em toda linha.
+      </div>
+
+      <p><strong>2. Só pra .csv:</strong> use vírgula ( <code>,</code> ) ou ponto-e-vírgula ( <code>;</code> ) como separador — o Cruzeiro detecta automaticamente qual dos dois você usou pela primeira linha.</p>
+
+      <p style="margin-top:12px"><strong>Exemplo de planilha válida:</strong></p>
+      <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:'DM Mono',monospace">
+        <thead><tr style="background:var(--bg3)">
+          <th style="text-align:left;padding:4px 8px;border:1px solid var(--border)">Data</th>
+          <th style="text-align:left;padding:4px 8px;border:1px solid var(--border)">Descrição</th>
+          <th style="text-align:left;padding:4px 8px;border:1px solid var(--border)">Valor</th>
+          <th style="text-align:left;padding:4px 8px;border:1px solid var(--border)">Categoria</th>
+          <th style="text-align:left;padding:4px 8px;border:1px solid var(--border)">Conta</th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td style="padding:4px 8px;border:1px solid var(--border)">05/08/2026</td>
+            <td style="padding:4px 8px;border:1px solid var(--border)">Supermercado</td>
+            <td style="padding:4px 8px;border:1px solid var(--border)">-350,90</td>
+            <td style="padding:4px 8px;border:1px solid var(--border)">Mercado</td>
+            <td style="padding:4px 8px;border:1px solid var(--border)">Nubank</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 8px;border:1px solid var(--border)">01/08/2026</td>
+            <td style="padding:4px 8px;border:1px solid var(--border)">Salário</td>
+            <td style="padding:4px 8px;border:1px solid var(--border)">8500,00</td>
+            <td style="padding:4px 8px;border:1px solid var(--border)">Salário</td>
+            <td style="padding:4px 8px;border:1px solid var(--border)">Nubank</td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p style="margin-top:14px;font-size:12px;color:var(--text3)">Detectou uma duplicata? Linhas com a mesma conta, data e valor (±R$0,01) de um lançamento já existente são automaticamente ignoradas — pode reimportar o mesmo arquivo sem medo de duplicar.</p>
+    </div>`;
+  G('custom-parser-footer').innerHTML = `<button class="btn primary" onclick="closeModal('modal-custom-parser')">Entendi</button>`;
+  openModal('modal-custom-parser');
+}
 
 // ══ ML ══
 async function refreshML() {
@@ -26771,9 +26950,21 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths
     if (!isCashAsset && a.benchmark && a.benchmark !== 'nenhum' && irrNominal !== null && txMonths.length) {
       const bmkData = a.benchmark === 'ibov' ? _benchmarks.ibov : _benchmarks.cdi;
       const firstCashM = txMonths[0];
-      // Accumulate monthly benchmark rates over the asset's active period
+      // Acumula a taxa do benchmark a partir do mês SEGUINTE à compra —
+      // não do mês da compra em si. `irrNominal` trata o mês de compra
+      // como base (0%, sem tempo investido ainda até ali) — mas aqui o
+      // benchmark aplicava o rendimento do mês INTEIRO da compra mesmo
+      // assim, comparando um TIR que começa do zero contra um CDI que já
+      // "correu o mês todo". Um ativo comprado neste mês, com 0% de
+      // variação (correto — acabou de ser comprado), aparecia com "vs
+      // CDI" negativo mesmo sem nenhum mês completo ainda ter se passado
+      // (bug real reportado pelo usuário). Mesma base de comparação já
+      // usada nos gráficos (renderReturnsChart etc.) — o primeiro mês é
+      // sempre o ponto de partida (0%) pros dois lados.
       const bmkRates = [];
       let bm = firstCashM;
+      const [fy, fmo] = firstCashM.split('-').map(Number);
+      bm = fmo === 12 ? `${fy+1}-01` : `${fy}-${String(fmo+1).padStart(2,'0')}`;
       while (bm <= curM) {
         if (bmkData[bm] != null) bmkRates.push(bmkData[bm]);
         const [y, mo] = bm.split('-').map(Number);

@@ -2089,8 +2089,21 @@ function parseCSVFinancial(text) {
     if (ym) date = rawDate.slice(0,10);
     else if (dm) { const [,a,b,y]=dm; const yr=y.length===2?'20'+y:y; date=`${yr}-${b.padStart(2,'0')}-${a.padStart(2,'0')}`; }
     else continue;
-    const neg = rawAmt.startsWith('-');
-    const num = parseFloat(rawAmt.replace(/[^\d.,-]/g,'').replace('.','').replace(',','.')) * (neg?-1:1);
+    // Bug real (achado testando a importação de planilha): `parseFloat`
+    // sobre uma string tipo "-350,90" JÁ preserva o sinal negativo (o "-"
+    // nunca é removido pela limpeza abaixo) — multiplicar de novo por
+    // -1 quando `neg` é verdadeiro invertia o sinal DUAS vezes,
+    // transformando toda despesa negativa importada via CSV numa receita
+    // positiva. Corrigido: extrai o sinal (incluindo o formato contábil
+    // "(350,90)" pra negativo, que antes virava positivo por engano — os
+    // parênteses eram só descartados na limpeza) e aplica só UMA vez,
+    // sobre o valor absoluto.
+    const trimmedAmt = rawAmt.trim();
+    const isParenNeg = /^\(.*\)$/.test(trimmedAmt); // formato contábil "(350,90)"
+    const numericOnly = trimmedAmt.replace(/[^\d.,-]/g,''); // ex.: "R$ -350,90" -> "-350,90"
+    const neg = isParenNeg || numericOnly.includes('-'); // cobre prefixo de moeda antes do "-" e o formato europeu "350,90-"
+    const absStr = numericOnly.replace('.','').replace(',','.').replace(/-/g,'');
+    const num = (parseFloat(absStr) || 0) * (neg ? -1 : 1);
     const acct = acctCol >= 0 ? (r[acctCol]||'__default__') : '__default__';
     const cat  = catCol  >= 0 ? (r[catCol] ||'') : '';
     if (!byAccount[acct]) byAccount[acct] = [];

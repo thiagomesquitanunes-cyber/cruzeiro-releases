@@ -440,6 +440,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;font-size:var(--font-base);colo
 .page{flex:1;overflow-y:auto;overflow-x:hidden;min-width:0;padding:20px;display:none;}
 .page.active{display:block;}
 
+/* Tela de boas-vindas (sem contas ainda) x conteúdo normal da Visão Geral —
+   ver #overview-empty-state em index.html e refreshOverview() em renderer.js */
+#overview-empty-state{display:none;}
+#page-overview.has-accounts #overview-empty-state{display:none !important;}
+#page-overview:not(.has-accounts) > *:not(#overview-empty-state){display:none !important;}
+#page-overview:not(.has-accounts) #overview-empty-state{display:flex !important;}
+
 /* ── STATS ── */
 .stats-grid{display:flex;flex-wrap:nowrap;gap:8px;margin-bottom:16px;}
 .stat-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-lg);padding:10px 12px;flex:1;min-width:0;}
@@ -923,6 +930,50 @@ select.inp option{background:var(--bg2);}
 
   <!-- OVERVIEW -->
   <div id="page-overview" class="page active">
+    <!-- Tela de boas-vindas: mostrada só na primeira abertura, antes de
+         existir qualquer conta — evita a sensação de "app vazio/cinza"
+         (stats zerados, sem nenhuma explicação) na primeira experiência.
+         Some sozinha (via classe .has-accounts em #page-overview) assim
+         que a primeira conta é criada. -->
+    <div id="overview-empty-state" style="display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;min-height:70vh;padding:32px">
+      <svg viewBox="0 0 120 120" width="96" height="96" xmlns="http://www.w3.org/2000/svg" style="margin-bottom:18px">
+        <defs>
+          <linearGradient id="oe-gold" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#ffd54f"/><stop offset="100%" stop-color="#f9a825"/>
+          </linearGradient>
+          <linearGradient id="oe-gold2" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#fff3c4"/><stop offset="100%" stop-color="#ffd54f"/>
+          </linearGradient>
+          <linearGradient id="oe-grn" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#66bb6a"/><stop offset="100%" stop-color="#a5d6a7"/>
+          </linearGradient>
+        </defs>
+        <g>
+          <rect x="88" y="84" width="7" height="22" rx="3" fill="url(#oe-grn)"/>
+          <rect x="98" y="72" width="7" height="34" rx="3" fill="url(#oe-grn)"/>
+          <rect x="108" y="60" width="7" height="46" rx="3" fill="url(#oe-grn)"/>
+        </g>
+        <g>
+          <circle cx="56" cy="60" r="44" fill="#00695c"/>
+          <circle cx="56" cy="60" r="44" fill="none" stroke="url(#oe-gold)" stroke-width="8"/>
+          <circle cx="56" cy="60" r="33" fill="none" stroke="url(#oe-gold2)" stroke-width="1.5" opacity=".55"/>
+          <circle cx="42" cy="50" r="6" fill="#fff"/>
+          <circle cx="70" cy="50" r="6" fill="#fff"/>
+          <circle cx="44" cy="51" r="3" fill="#1a1a1a"/>
+          <circle cx="72" cy="51" r="3" fill="#1a1a1a"/>
+          <path d="M 42 68 Q 56 80 70 68" fill="none" stroke="url(#oe-gold)" stroke-width="4" stroke-linecap="round"/>
+          <text x="56" y="98" text-anchor="middle" font-family="Georgia,serif" font-size="15" font-weight="700" fill="url(#oe-gold)" opacity=".9">C$</text>
+        </g>
+      </svg>
+      <h2 style="font-size:22px;margin-bottom:8px">Oi, eu sou a Moedinha! 🪙</h2>
+      <p style="max-width:420px;color:var(--text2);font-size:14px;line-height:1.6;margin-bottom:22px">
+        Bem-vindo(a) ao Cruzeiro! Para começar, crie sua primeira conta —
+        pode ser uma conta bancária, cartão de crédito, dinheiro em espécie
+        ou uma carteira de investimentos. Depois disso eu te ajudo com o
+        resto, passo a passo.
+      </p>
+      <button class="btn primary" style="padding:10px 22px;font-size:14px" onclick="openNewAccount()">+ Criar minha primeira conta</button>
+    </div>
     <!-- Stats + month selector — sticky. Usa margens negativas para cobrir
          o padding:20px da .page e não deixar gap acima ao rolar. -->
     <div style="position:sticky;top:-20px;z-index:60;background:var(--bg);
@@ -1324,19 +1375,23 @@ select.inp option{background:var(--bg2);}
     <div class="import-section">
       <h3>Importar histórico de outro programa</h3>
       <div class="info-box" style="margin-bottom:14px;font-size:13px">
-        Importa lançamentos de qualquer programa de finanças pessoais que exporte nos formatos abaixo.
-        Os lançamentos são distribuídos automaticamente pelas contas pelo nome — certifique-se de que os nomes das contas no Cruzeiro são idênticos aos do programa de origem.
-        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+        Importa lançamentos de qualquer programa de finanças pessoais que exporte nos formatos abaixo — inclusive uma planilha Excel/Google Sheets sua, montada na mão.
+        Os lançamentos são distribuídos automaticamente pelas contas pelo nome — certifique-se de que os nomes das contas no Cruzeiro são idênticos aos do programa de origem (ou da coluna "Conta" da planilha).
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
           <span class="badge" style="background:#f1f8e9;color:#2e7d32;border:1px solid #c8e6c9;border-radius:99px;padding:2px 10px;font-size:11px;font-weight:700">QIF</span>
           <span class="badge" style="background:#f1f8e9;color:#2e7d32;border:1px solid #c8e6c9;border-radius:99px;padding:2px 10px;font-size:11px;font-weight:700">QFX</span>
           <span class="badge" style="background:#f1f8e9;color:#2e7d32;border:1px solid #c8e6c9;border-radius:99px;padding:2px 10px;font-size:11px;font-weight:700">OFX</span>
           <span class="badge" style="background:#f1f8e9;color:#2e7d32;border:1px solid #c8e6c9;border-radius:99px;padding:2px 10px;font-size:11px;font-weight:700">QBO</span>
           <span class="badge" style="background:#f1f8e9;color:#2e7d32;border:1px solid #c8e6c9;border-radius:99px;padding:2px 10px;font-size:11px;font-weight:700">CSV</span>
-          <span style="font-size:11px;color:var(--text3);align-self:center">Compatível com: Quicken, Moneyspire, Microsoft Money, Moneydance, YNAB e outros</span>
+          <span class="badge" style="background:#e8f5e9;color:#1b5e20;border:1px solid #a5d6a7;border-radius:99px;padding:2px 10px;font-size:11px;font-weight:700">XLSX / XLS ✨</span>
+          <span style="font-size:11px;color:var(--text3);align-self:center">Compatível com: Quicken, Moneyspire, Microsoft Money, Moneydance, YNAB, planilhas próprias e outros</span>
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <button onclick="importFinancialFile()" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:7px 14px;cursor:pointer;font-size:14px">📂 Selecionar arquivo</button>
+        <button onclick="importFinancialFile()" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:7px 14px;cursor:pointer;font-size:14px">📂 Selecionar arquivo (QIF/OFX/QBO/CSV)</button>
+        <button onclick="triggerFinancialXlsxFile()" style="background:linear-gradient(135deg,#1565c0,#1e88e5);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(21,101,192,.3);padding:7px 14px;cursor:pointer;font-size:14px">📊 Selecionar planilha (Excel/Sheets)</button>
+        <button class="btn" onclick="showFinancialImportGuide()" style="font-size:13px">📖 Como formatar minha planilha?</button>
+        <input type="file" id="financial-xlsx-input" accept=".xlsx,.xls,.XLSX,.XLS" style="display:none" onchange="onFinancialXlsxSelected(event)">
         <span id="qif-file-name" style="font-size:12px;color:var(--text3)"></span>
       </div>
       <div id="qif-result" style="margin-top:10px"></div>

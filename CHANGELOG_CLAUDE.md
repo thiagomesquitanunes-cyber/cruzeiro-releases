@@ -12,6 +12,117 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-05 — v4.87.0: importação (XLS/XLSX + fix conferência de fatura), vs CDI, ícone Windows Store, boas-vindas na primeira abertura
+
+Lote de 4 pedidos do usuário sobre o app Desktop (os 2 pedidos de mobile
+da mesma lista — sync em segundo plano do widget e lançamentos "que viram
+passado" — ficam para uma sessão separada, focada nos repos iOS/Android).
+
+### 1) Desativada a "conferência de fatura" nas importações
+**Relato do usuário**: "desative a função de mostrar a 'conferência de
+fatura' nas importações. Não tem funcionado, a informação tem sido sempre
+errada."
+`runFaturaBalanceAudit()` (renderer.js) recebeu um `return` logo no
+início, antes de qualquer cálculo — a auditoria não roda mais, e nenhuma
+mensagem de conferência é mostrada ao importar fatura. O corpo original
+da função foi preservado abaixo do `return` (inalcançável), comentado
+explicando como reativar se um dia for corrigida.
+**Arquivo**: `src/renderer.js` (`runFaturaBalanceAudit`).
+
+### 2) "vs CDI" não zerava o benchmark no mês de compra do ativo
+**Relato do usuário**: print mostrando um ativo comprado no mesmo mês,
+pelo mesmo valor (0% de variação, correto), mas ainda com "vs CDI"
+negativo — sinal de que o CDI do mês de entrada estava sendo aplicado
+mesmo sem nenhum tempo de investimento ainda.
+Esse padrão (não aplicar o retorno do benchmark no mês-base, pra
+comparação justa) já existia em 3 lugares do código (gráficos de
+retorno). Faltava só no rótulo inline "vs CDI" de cada linha da tabela de
+ativos. Corrigido o loop de acumulação de CDI em `bmkLabel` (dentro de
+`buildInvRows`) pra começar no mês SEGUINTE ao primeiro mês do ativo, e
+não no primeiro mês.
+**Arquivo**: `src/renderer.js` (`buildInvRows` → bloco `bmkLabel`).
+
+### 3) Importação de planilhas Excel/Google Sheets (XLS/XLSX) + manual de formato
+**Relato do usuário**: pedido pra suportar `.xls`/`.xlsx` na importação
+genérica de "outros apps de finanças" (hoje só CSV), e explicar ao
+usuário como organizar a planilha.
+Novo fluxo: botão dedicado abre um `<input type="file">`, lê via
+`file.arrayBuffer()` + `XLSX` (já carregado via CDN no `index.html`),
+converte as linhas pra um CSV interno (separador `;`, datas ISO, números
+com vírgula decimal, texto sanitizado contra o separador) e reaproveita
+o pipeline `financial:import` (CSV) já existente — sem duplicar lógica de
+parsing. Adicionado também um guia visual (`showFinancialImportGuide()`)
+explicando colunas obrigatórias/opcionais e um exemplo, acessível a
+partir da tela de importação.
+**Bug crítico encontrado de brinde**: testando o round-trip do novo
+parser contra `parseCSVFinancial` (main.js), a lógica de sinal do valor
+estava com dupla negação — `parseFloat("-350,90")` já retorna negativo,
+mas o código multiplicava por -1 de novo quando detectava o prefixo "-",
+transformando TODO valor negativo importado via CSV em positivo (ou
+seja, toda despesa virava receita). Bug pré-existente, não introduzido
+nesta sessão, mas ativo em produção até agora. Corrigido e ampliado pra
+também reconhecer negativo com prefixo de moeda ("R$ -350,90") e o
+formato contábil entre parênteses ("(350,90)"). Verificado com 8 casos
+de teste distintos.
+**Arquivos**: `src/main.js` (`parseCSVFinancial`), `src/renderer.js`
+(`importFinancialFile`, `triggerFinancialXlsxFile`,
+`onFinancialXlsxSelected`, `_xlsxRowsToCSVText`, `_runFinancialImport`,
+`showFinancialImportGuide`), `src/index.html` (botões/input da seção de
+importação de outros apps).
+
+### 4) Windows Store: ícone borrado na barra de tarefas + primeira abertura "vazia"
+**Relato do usuário**: "o ícone está com o 'C$' ... com baixa resolução
+(na barra de tarefas). Além disso, ao instalar, a primeira tela é muito
+frustrante, não aparece nada, o app fica todo cinza... Na primeira
+abertura precisaria já mostrar o sidebar completo (ainda que sem
+conteúdo), e uma tela de boas-vindas apresentando o Moedinha."
+
+**Ícone borrado**: `AppxTarget.js` (electron-builder) só roda o
+`makepri.exe` — a etapa que gera o índice de recursos multi-resolução do
+Windows — se pelo menos um asset em `assets/appx/` tiver `.scale-` ou
+`.targetsize-` no nome (`isScaledAssetsProvided()`). Como os 6 assets
+existentes tinham nomes simples (sem sufixo de escala), essa etapa era
+pulada inteiramente, e o Windows upscalava um único bitmap de 44×44 pra
+qualquer contexto de DPI/tamanho maior — daí o borrão na taskbar.
+Gerados via Chromium offscreen (BrowserWindow headless renderizando o
+`assets/icon.svg` original em canvas, um script descartável) 10 novas
+variantes de `Square44x44Logo` (o ícone usado pela taskbar/alt-tab):
+`.scale-100/125/150/200/400.png` e `.targetsize-16/24/32/48/256.png`,
+mantidas junto do `Square44x44Logo.png` original (que continua sendo a
+referência-base no manifest — o índice de recursos que o `makepri.exe`
+agora gera é que resolve pra variante certa em runtime). Os demais
+assets (StoreLogo, tiles) não foram tocados — não foram reportados como
+borrados, e não há o script de geração original de layout deles.
+
+**Primeira abertura "vazia"**: investigado o boot (`(async () => {...})()`
+em renderer.js) — o sidebar de navegação (`renderSidebar()`) já mostra os
+14 itens de menu independente de existir alguma conta (confirmado ao
+vivo via CDP contra uma instância dev com banco zerado). O problema real
+era a página "Visão Geral", que ficava mostrando 3 cards zerados (R$
+0,00 em Receitas/Despesas/Lucro) sem nenhuma explicação — exatamente a
+sensação de "app quebrado" relatada. Criada uma tela de boas-vindas
+(`#overview-empty-state` em index.html, mostrada via CSS
+`#page-overview:not(.has-accounts)` — sem depender de JS terminar de
+carregar pra aparecer) com o mascote Moedinha, uma saudação e um botão
+"+ Criar minha primeira conta". `refreshOverview()` (renderer.js) agora
+alterna a classe `has-accounts` em `#page-overview` e retorna cedo
+quando `accounts.length === 0`, pulando todo o cálculo de stats/gráficos
+que não faria sentido sem nenhuma conta.
+**Verificado ao vivo**: instância dev do Electron rodando contra um
+diretório de dados vazio (via override temporário de `dataDir` em
+`_settings.json`, revertido depois), inspecionado e fotografado via CDP
+— sidebar completo + tela de boas-vindas funcionando como esperado.
+**Arquivos**: `assets/appx/Square44x44Logo.{scale,targetsize}-*.png`
+(novos), `src/index.html` (`#overview-empty-state` + CSS), `src/renderer.js`
+(`refreshOverview`).
+
+**Nota**: o appx que atualiza a Microsoft Store não é gerado neste
+ambiente (sem certificado/assinatura local) — precisa do fluxo manual via
+GitHub Actions (`.github/workflows/build-appx-test.yml`, disparado à
+mão) já documentado nas entradas anteriores.
+
+---
+
 ## 2026-08-03 (8) — v4.86.2: fix — tela de Configurações não mostrava a pasta de backup escolhida
 
 ### Relato do usuário
