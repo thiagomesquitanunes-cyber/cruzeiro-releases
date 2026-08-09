@@ -12,7 +12,7 @@ antes de considerar o trabalho terminado.
 
 ---
 
-## 2026-08-07 — Cards de "limite de cartão usado" (Visão Geral + página da conta): considerar parcelas futuras, excluir recorrências
+## 2026-08-07 — v4.87.1: cards de "limite de cartão usado" (Visão Geral + página da conta) considerando parcelas futuras, excluindo recorrências
 
 **Relato do usuário**: o card "💳 Cartões de crédito" da Visão Geral só
 somava transações até o fim do mês selecionado — parcelas futuras de
