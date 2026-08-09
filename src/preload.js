@@ -66,6 +66,7 @@ const api = {
   getBalance:        (id)    => ipcRenderer.invoke('accounts:balance', id),
   getBalanceBefore:        (opts) => ipcRenderer.invoke('accounts:balance-before', opts),
   getBalanceIncludingFuture: (id)  => ipcRenderer.invoke('accounts:balance-including-future', id),
+  getBalanceCreditUsage:     (id)  => ipcRenderer.invoke('accounts:balance-credit-usage', id),
 
   // transactions
   listTx:         (opts)  => ipcRenderer.invoke('tx:list', opts),

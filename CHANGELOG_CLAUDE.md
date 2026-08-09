@@ -12,6 +12,51 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-07 — Cards de "limite de cartão usado" (Visão Geral + página da conta): considerar parcelas futuras, excluir recorrências
+
+**Relato do usuário**: o card "💳 Cartões de crédito" da Visão Geral só
+somava transações até o fim do mês selecionado — parcelas futuras de
+compras parceladas (que já comprometem o limite do cartão, mesmo antes de
+entrarem na fatura) ficavam de fora, subestimando o uso do limite.
+
+**Primeira tentativa** (superada pela segunda, ver abaixo): troquei o
+cálculo pra somar TODAS as transações da conta, sem filtro de data
+(`getBalanceIncludingFuture`, mesma função já usada no card "Limite
+utilizado" da página da conta). Problema apontado pelo usuário: isso
+também soma **recorrências futuras** (assinaturas etc., geradas a partir
+da tabela `recurring`) — que são previsões, não compras já comprometidas
+contra o limite, e podem mudar/ser canceladas.
+
+**Correção final**: nova função `accounts:balance-credit-usage`
+(`src/main.js`) — soma tudo até hoje (`date <= hoje`) MAIS transações
+futuras que NÃO vieram de uma recorrência (`recurring_id IS NULL`, sem
+limite de tempo futuro — cobre parcelamentos de qualquer duração).
+Exclui especificamente transações futuras COM `recurring_id` preenchido
+(geradas por `syncRecurringTxns` a partir de `recurring`). Usada nos dois
+cards: `renderDashCards` (Visão Geral) e `refreshAccount` (card "Limite
+utilizado" da página da conta), substituindo `getBalanceIncludingFuture`
+nesses dois pontos (que continua existindo/em uso em outros lugares, se
+houver).
+**Arquivos**: `src/main.js` (novo handler IPC `accounts:balance-credit-usage`),
+`src/preload.js` (`getBalanceCreditUsage`), `src/renderer.js`
+(`renderDashCards`, `refreshAccount`).
+
+---
+
+## 2026-08-06 — Card "Cartões de crédito" (Visão Geral): considerar parcelas futuras no limite usado
+
+**Relato do usuário**: o card não considerava lançamentos futuros
+(parcelas) no cálculo do limite usado, já que estes consomem limite do
+cartão. Corrigido trocando o cálculo de `SUM(amount) WHERE date<=fim do
+mês` por `getBalanceIncludingFuture` (soma sem filtro de data), igual ao
+card "Limite utilizado" já existente na página da conta.
+**Nota**: essa abordagem foi revista no dia seguinte (ver entrada acima,
+2026-08-07) — somar tudo sem distinguir recorrências trazia previsões
+incertas pro cálculo.
+**Arquivo**: `src/renderer.js` (`renderDashCards`).
+
+---
+
 ## 2026-08-05 — v4.87.0: importação (XLS/XLSX + fix conferência de fatura), vs CDI, ícone Windows Store, boas-vindas na primeira abertura
 
 Lote de 4 pedidos do usuário sobre o app Desktop (os 2 pedidos de mobile

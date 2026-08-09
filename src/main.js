@@ -988,6 +988,20 @@ ipcMain.handle('accounts:balance-including-future', (_, id) => {
   const row = first('SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=?', [id]);
   return row?.bal ?? 0;
 });
+// Usado pelos cards de "limite de cartão usado" (Visão Geral e página da
+// conta): saldo devedor real (tudo até hoje) + parcelas futuras JÁ
+// lançadas (compras parceladas, importadas ou manuais — recurring_id NULL),
+// sem limite de tempo futuro. EXCLUI recorrências futuras (recurring_id
+// preenchido) — são previsões/projeções (assinaturas etc.), não compras
+// já comprometidas contra o limite, e podem mudar ou ser canceladas.
+ipcMain.handle('accounts:balance-credit-usage', (_, id) => {
+  const today = todayLocal();
+  const row = first(
+    'SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND (date <= ? OR recurring_id IS NULL)',
+    [id, today]
+  );
+  return row?.bal ?? 0;
+});
 ipcMain.handle('accounts:balance-before', (_, { accountId, beforeDate }) => {
   return (first('SELECT COALESCE(SUM(amount),0) as bal FROM transactions WHERE account_id=? AND date < ?', [accountId, beforeDate])?.bal || 0);
 });

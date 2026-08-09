@@ -2224,11 +2224,13 @@ async function renderDashCards(fromDate, toDate) {
 
   const results = [];
   for (const c of cards) {
-    // Saldo devedor REAL: soma de TODAS as transações até a data (gastos,
-    // pagamentos de fatura e estornos). Saldo negativo = valor devido.
-    // Mesma lógica da dívida sincronizada no Patrimônio — os números batem.
-    const txs = await ff.listTx({ accountId: c.id }).catch(() => []);
-    const bal = txs.filter(t => t.date <= toDate).reduce((s,t) => s + t.amount, 0);
+    // Saldo devedor REAL, incluindo parcelas futuras já lançadas (elas
+    // comprometem o limite do cartão mesmo antes de entrarem na fatura —
+    // ex.: compra parcelada em 10x reserva o valor total, não só a
+    // parcela do mês), SEM limite de tempo futuro. Exclui recorrências
+    // futuras (assinaturas etc. geradas por `recurring`) — são previsões,
+    // não compras já comprometidas contra o limite.
+    const bal = await ff.getBalanceCreditUsage(c.id).catch(() => 0);
     const owed = bal < 0 ? -bal : 0;
     results.push({ id: c.id, name: c.name, spent: owed, limit: c.credit_limit, pct: c.credit_limit > 0 ? (owed / c.credit_limit * 100) : 0, account: c });
   }
@@ -2912,7 +2914,10 @@ async function refreshAccount() {
   const expense = all.filter(t=>t.amount<0 && t.date<=today2).reduce((s,t)=>s+t.amount,0);
   let limitCard = '';
   if (acc?.type === 'credit' && acc?.credit_limit > 0) {
-    const balFuture = await ff.getBalanceIncludingFuture(currentAccountId);
+    // Mesma lógica do card "Cartões de crédito" da Visão Geral: soma
+    // parcelas futuras já lançadas (sem limite de tempo), exclui
+    // recorrências futuras (previsões não certas) — ver getBalanceCreditUsage.
+    const balFuture = await ff.getBalanceCreditUsage(currentAccountId);
     const utilized  = -balFuture;
     const utilPct   = Math.min(100, Math.max(0, (utilized / acc.credit_limit) * 100));
     const utilClr   = utilPct >= 90 ? 'var(--red)' : utilPct >= 70 ? 'var(--warn)' : 'var(--green)';
