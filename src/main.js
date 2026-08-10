@@ -3882,7 +3882,7 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
   // caixaValue: number | null (for valor_em_caixa — ADDITIVE)
   
   const MONTH_ISO = month; // e.g. '2026-05'
-  let createdAssets = 0, updatedAssets = 0, txInserted = 0, skippedDuplicates = 0;
+  let createdAssets = 0, updatedAssets = 0, txInserted = 0, skippedDuplicates = 0, fictaCreated = 0;
   const CAT_MAP = {
     fundos: 'fundos', renda_fixa: 'renda_fixa', tesouro: 'tesouro',
     previdencia: 'previdencia', renda_variavel: 'renda_variavel',
@@ -4015,22 +4015,49 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
       }
       if (!assetId) continue;
 
-      // Auto-create initial purchase if asset is NEW and has no external flow transactions this month
-      // This handles the case where user imports mid-history without prior purchase records
+      // Auto-create initial purchase if asset is NEW and there's no purchase
+      // movement of COMPATIBLE VALUE in the statement. Regra (revisada
+      // 2026-08-08 — antes bloqueava com qualquer movimento 'external',
+      // incluindo casos em que o parser classificava errado um rendimento
+      // como 'external' por não reconhecer o texto do extrato): soma só as
+      // SAÍDAS de dinheiro do extrato pro ativo (movimentações com amount
+      // negativo — compra/aporte), ignorando QUALQUER entrada (rendimento,
+      // dividendo, venda, amortização — não são compra, independente de
+      // como o parser classificou o flow_type). Se a soma cobrir o valor da
+      // posição, não cria nada; se cobrir só parte (aporte parcial), cria a
+      // ficta pelo valor RESTANTE.
+      // O renderer roda essa MESMA conta antes de salvar
+      // (broker:preview-ficta-purchases, cópia — manter em sincronia) e
+      // deixa o usuário confirmar/editar/cancelar cada uma; quando isso
+      // acontece a decisão já vem pronta em a._fictaDecision e não é
+      // recalculada aqui. O cálculo abaixo só serve de fallback (chamador
+      // que não passou pela revisão).
       const isNewAsset = !existing;
       if (isNewAsset && a.valor > 0) {
-        const hasExternal = (a.movimentacoes || []).some(m => m.flow_type === 'external' || (!m.flow_type && m.amount < 0));
-        if (!hasExternal) {
-          // Check if asset already has ANY external flow transaction (not just this month)
+        let shouldCreateFicta, fictaValue;
+        if (a._fictaDecision) {
+          shouldCreateFicta = !!a._fictaDecision.create;
+          fictaValue        = a._fictaDecision.value || 0;
+        } else {
+          const outflow = (a.movimentacoes || [])
+            .filter(m => m.flow_type !== 'ignore' && (m.amount || 0) < 0)
+            .reduce((s, m) => s + Math.abs(m.amount), 0);
+          const remaining = Math.round((a.valor - outflow) * 100) / 100;
+          shouldCreateFicta = remaining > 0.01;
+          fictaValue        = remaining;
+        }
+        if (shouldCreateFicta && fictaValue > 0) {
+          // Ativo recém-criado nunca teve nenhuma transação — checagem
+          // defensiva (mesmo espírito da original).
           const anyExternal = first(
             `SELECT id FROM inv_transactions WHERE asset_id=? AND tx_type IN ('compra','aporte','venda','amortizacao')`,
             [assetId]
           );
           if (!anyExternal) {
-            // Create auto-purchase = current value (money out of pocket)
             db.run(`INSERT INTO inv_transactions (asset_id,month,tx_type,total_value,notes) VALUES (?,?,?,?,?)`,
-              [assetId, MONTH_ISO, 'compra', a.valor, '__auto_purchase__']);
+              [assetId, MONTH_ISO, 'compra', fictaValue, '__auto_purchase__']);
             txInserted++;
+            fictaCreated++;
           }
         }
       }
@@ -4138,7 +4165,74 @@ ipcMain.handle('broker:save-parsed', (_, { month, assets, caixaValue, broker }) 
     db.run('COMMIT');
   } catch(e) { db.run('ROLLBACK'); throw e; }
   save();
-  return { createdAssets, updatedAssets, txInserted, skippedDuplicates };
+  return { createdAssets, updatedAssets, txInserted, skippedDuplicates, fictaCreated };
+});
+
+// Pré-visualização (read-only, não grava nada) das "compras fictícias" que
+// broker:save-parsed criaria para ativos NOVOS sem uma compra em valor
+// compatível no extrato — usada pelo renderer pra pedir confirmação do
+// usuário (ver reviewFictaPurchasesBeforeImport) antes de gravar de
+// verdade. A regra de matching de ativo existente é uma CÓPIA da usada em
+// broker:save-parsed (mesma ordem: código+vencimento, código,
+// nome+vencimento, nome) — se um dia mudar lá, mudar aqui também.
+ipcMain.handle('broker:preview-ficta-purchases', (_, { assets }) => {
+  const assetMap = new Map();
+  for (const a of (assets || [])) {
+    const key = (a.name||'').toLowerCase().trim() + '|' + (a.maturity_month || '');
+    if (assetMap.has(key)) {
+      const existing = assetMap.get(key);
+      existing.valor = (existing.valor || 0) + (a.valor || 0);
+      existing.movimentacoes = [...(existing.movimentacoes||[]), ...(a.movimentacoes||[])];
+    } else {
+      assetMap.set(key, { ...a, movimentacoes: [...(a.movimentacoes||[])], _key: key });
+    }
+  }
+
+  const candidates = [];
+  for (const a of assetMap.values()) {
+    if (!(a.valor > 0)) continue;
+    const isCashAsset = a.category === 'valor_em_caixa' || (a.name||'').toLowerCase().trim() === 'valores em caixa';
+    let existing;
+    if (isCashAsset) {
+      existing = first('SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND lower(COALESCE(broker,\'\'))=lower(?)', [a.name, a.broker || '']);
+    } else {
+      existing = a.code && a.maturity_month
+        ? (
+            first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE AND maturity_month=? AND lower(COALESCE(broker,\'\'))=lower(?)', [a.code, a.maturity_month, a.broker || ''])
+            || first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE AND maturity_month=?', [a.code, a.maturity_month])
+          )
+        : (a.code && first(
+            'SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE AND lower(COALESCE(broker,\'\'))=lower(?)',
+            [a.code, a.broker || '']
+          ))
+          || (a.code && first('SELECT id FROM inv_assets WHERE code=? COLLATE NOCASE', [a.code]));
+      existing = existing
+        || (a.maturity_month
+          ? first(
+              'SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND maturity_month=? AND (broker IS NULL OR lower(broker)=lower(?))',
+              [a.name, a.maturity_month, a.broker || '']
+            ) || first('SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND maturity_month=?', [a.name, a.maturity_month])
+          : first(
+              'SELECT id FROM inv_assets WHERE lower(name)=lower(?) AND (broker IS NULL OR lower(broker)=lower(?))',
+              [a.name, a.broker || '']
+            ) || first('SELECT id FROM inv_assets WHERE lower(name)=lower(?)', [a.name]));
+    }
+    if (existing) continue; // não é novo — main.js não cria ficta pra ele
+
+    // Soma só saídas de dinheiro (compra/aporte) — ignora qualquer entrada
+    // (rendimento, dividendo, venda, amortização), que não é compra.
+    const outflow = (a.movimentacoes || [])
+      .filter(m => m.flow_type !== 'ignore' && (m.amount || 0) < 0)
+      .reduce((s, m) => s + Math.abs(m.amount), 0);
+    const remaining = Math.round((a.valor - outflow) * 100) / 100;
+    if (remaining > 0.01) {
+      candidates.push({
+        key: a._key, name: a.name, category: a.category, broker: a.broker || null,
+        value: remaining, positionValue: a.valor, alreadyCovered: outflow,
+      });
+    }
+  }
+  return candidates;
 });
 
 ipcMain.handle('broker:ml-learn', (_, { items }) => {

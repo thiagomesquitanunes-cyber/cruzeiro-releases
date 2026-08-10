@@ -11534,6 +11534,26 @@ async function confirmBrokerImport() {
   const proceedAfterReview = await reviewNewAssetsBeforeImport(parsed);
   if (!proceedAfterReview) return;
 
+  // Compras "fictícias" (implícitas) que seriam criadas pra ativos novos
+  // sem uma compra de valor compatível no extrato — pede confirmação do
+  // usuário (confirmar, editar o valor, ou não criar) antes de gravar.
+  // Ver broker:preview-ficta-purchases (main.js) pra regra completa.
+  const fictaCandidates = await ff.brokerPreviewFictaPurchases({ assets: parsed.assets }).catch(() => []);
+  if (fictaCandidates.length) {
+    const decisions = await reviewFictaPurchasesBeforeImport(fictaCandidates);
+    if (!decisions) return; // usuário cancelou a importação
+    parsed.assets.forEach(a => {
+      const key = (a.name||'').toLowerCase().trim() + '|' + (a.maturity_month || '');
+      const d = decisions.find(x => x.key === key);
+      if (d) a._fictaDecision = { create: d.create, value: d.value };
+    });
+  }
+
+  // Último checkpoint antes de gravar: resumo com totais por categoria,
+  // pra facilitar a conferência de que nada escapou.
+  const summaryOk = await reviewImportSummaryBeforeSave(parsed);
+  if (!summaryOk) return;
+
   const btn = preview.querySelector('.btn.primary');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Importando…'; }
 
@@ -11620,6 +11640,7 @@ async function confirmBrokerImport() {
       ✅ <strong>Importação concluída — ${parsed.broker} · ${fmtMonth(parsed.month)}</strong><br>
       • ${result.createdAssets} ativo(s) criado(s)<br>
       • ${result.updatedAssets} ativo(s) atualizado(s)<br>
+      ${result.fictaCreated ? `• ${result.fictaCreated} compra(s) inicial(is) registrada(s) automaticamente<br>` : ''}
       • ${result.txInserted} transação(ões) registrada(s)${result.skippedDuplicates ? ` · ⏭ ${result.skippedDuplicates} já existente(s), não duplicada(s)` : ''}${nonAssetMsg}${adjMsg}
     </div>`;
     cancelBrokerImport();
@@ -11636,6 +11657,132 @@ async function confirmBrokerImport() {
     G('broker-result').innerHTML = `<div class="warn-box">❌ Erro: ${esc(e.message)}</div>`;
     if (btn) { btn.disabled = false; btn.textContent = '✓ Importar para Patrimônio'; }
   }
+}
+
+// ── Revisão de "compras fictícias" antes de salvar a importação ──
+//
+// broker:preview-ficta-purchases (main.js) já calculou QUAIS ativos novos
+// receberiam uma compra implícita e por QUANTO (valor da posição menos o
+// que já foi coberto por saída de dinheiro no extrato — rendimentos e
+// outras entradas são ignorados nesse cálculo). Aqui só apresenta cada
+// candidato pro usuário confirmar, editar o valor, ou desmarcar "Criar"
+// pra pular. Retorna a lista de decisões, ou null se o usuário cancelou a
+// importação inteira.
+let _fictaReview = null; // { candidates, resolve }
+
+async function reviewFictaPurchasesBeforeImport(candidates) {
+  candidates.forEach(c => { c.create = true; c.editedValue = c.value; });
+  return new Promise(resolve => {
+    _fictaReview = { candidates, resolve };
+    renderFictaReviewModal();
+    openModal('modal-custom-parser');
+  });
+}
+
+function renderFictaReviewModal() {
+  const { candidates } = _fictaReview;
+  G('custom-parser-title').textContent = `🧾 Confirmar ${candidates.length} compra(s) inicial(is) a criar`;
+
+  const rows = candidates.map((c, i) => `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;${c.create ? '' : 'opacity:.55'}">
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline">
+        <div><strong>${esc(c.name)}</strong> <span style="color:var(--text3);font-size:11px">(${esc(INV_CATEGORIES[c.category]?.label || c.category || '')}${c.broker ? ' · ' + esc(c.broker) : ''})</span></div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);cursor:pointer">
+          <input type="checkbox" ${c.create ? 'checked' : ''} onchange="window._ficToggle(${i}, this.checked)"> Criar
+        </label>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;margin-top:8px;flex-wrap:wrap;font-size:11px;color:var(--text3)">
+        <span>Posição no extrato: <strong style="color:var(--text)">${fmtBRL(c.positionValue)}</strong></span>
+        ${c.alreadyCovered > 0 ? `<span>Já coberto por saída de dinheiro: <strong style="color:var(--text)">${fmtBRL(c.alreadyCovered)}</strong></span>` : ''}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+        <span style="font-size:12px;color:var(--text2)">Valor da compra a criar:</span>
+        <input class="inp" id="fic-val-${i}" style="width:140px;font-size:12px" value="${esc(fmtBRL(c.editedValue))}"
+          ${c.create ? '' : 'disabled'} onblur="window._ficEditValue(${i}, this.value)">
+      </div>
+    </div>`).join('');
+
+  G('custom-parser-body').innerHTML = `
+    <p style="font-size:12px;color:var(--text3);margin:0 0 10px">
+      Estes ativos não têm, no extrato deste mês, uma movimentação de compra que cubra o valor da posição —
+      o app cria automaticamente uma "compra inicial" pelo valor restante, pra que o histórico de aportes
+      fique coerente. Rendimentos e outras entradas de dinheiro são ignorados nesse cálculo (não são compra).
+      Revise, edite o valor se precisar, ou desmarque "Criar" pra pular algum.
+    </p>
+    ${rows}`;
+  G('custom-parser-footer').innerHTML = `
+    <button class="btn" onclick="window._ficCancel()">Cancelar importação</button>
+    <button class="btn primary" onclick="window._ficConfirm()">✓ Confirmar e continuar</button>
+  `;
+}
+
+window._ficToggle = (i, checked) => {
+  _fictaReview.candidates[i].create = checked;
+  renderFictaReviewModal();
+};
+window._ficEditValue = (i, raw) => {
+  const v = window._brokerParseBRL(raw);
+  if (v != null && v >= 0) _fictaReview.candidates[i].editedValue = v;
+  renderFictaReviewModal();
+};
+window._ficCancel = () => {
+  closeModal('modal-custom-parser');
+  const resolve = _fictaReview?.resolve;
+  _fictaReview = null;
+  if (resolve) resolve(null);
+};
+window._ficConfirm = () => {
+  const { candidates, resolve } = _fictaReview;
+  const decisions = candidates.map(c => ({ key: c.key, create: c.create, value: c.editedValue }));
+  closeModal('modal-custom-parser');
+  _fictaReview = null;
+  if (resolve) resolve(decisions);
+};
+
+// ── Resumo final antes de concluir a importação ──
+//
+// Último checkpoint antes de gravar de fato: totaliza por categoria (+
+// valores em caixa) o que está prestes a ser importado, pra facilitar a
+// conferência de que nada escapou (ex: um ativo esquecido fora da
+// categoria certa, um total muito diferente do esperado). Retorna true
+// pra seguir com o salvamento, false se o usuário quis voltar e revisar.
+async function reviewImportSummaryBeforeSave(parsed) {
+  const byCategory = {};
+  parsed.assets.forEach(a => {
+    const cat = a.category || 'outros';
+    byCategory[cat] = (byCategory[cat] || 0) + (a.valor || 0);
+  });
+  if (parsed.caixaValue) byCategory['valor_em_caixa'] = (byCategory['valor_em_caixa'] || 0) + parsed.caixaValue;
+
+  const totalGeral = Object.values(byCategory).reduce((s,v) => s+v, 0);
+  const rows = Object.entries(byCategory)
+    .sort((a,b) => b[1]-a[1])
+    .map(([cat, val]) => `
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px">
+        <span>${esc(INV_CATEGORIES[cat]?.label || cat)}</span>
+        <strong style="font-family:'DM Mono',monospace">${fmtBRL(val)}</strong>
+      </div>`).join('');
+  const assetCount = parsed.assets.length;
+
+  return new Promise(resolve => {
+    G('custom-parser-title').textContent = `📋 Resumo da importação — ${esc(parsed.broker)} · ${fmtMonth(parsed.month)}`;
+    G('custom-parser-body').innerHTML = `
+      <p style="font-size:12px;color:var(--text3);margin:0 0 12px">
+        Confira os totais por categoria antes de concluir. Se algo parecer errado, volte e revise o extrato.
+      </p>
+      <div style="margin-bottom:8px">${rows}</div>
+      <div style="display:flex;justify-content:space-between;padding:10px 0;border-top:2px solid var(--border);font-size:15px">
+        <strong>Total geral (${assetCount} ativo${assetCount===1?'':'s'})</strong>
+        <strong style="font-family:'DM Mono',monospace;color:var(--accent)">${fmtBRL(totalGeral)}</strong>
+      </div>`;
+    G('custom-parser-footer').innerHTML = `
+      <button class="btn" onclick="window._sumCancel()">← Voltar e revisar</button>
+      <button class="btn primary" onclick="window._sumConfirm()">✓ Concluir importação</button>
+    `;
+    window._sumCancel  = () => { closeModal('modal-custom-parser'); resolve(false); };
+    window._sumConfirm = () => { closeModal('modal-custom-parser'); resolve(true); };
+    openModal('modal-custom-parser');
+  });
 }
 
 // ── Custom parser: run with config ──
@@ -23100,6 +23247,33 @@ function refreshPatrimonioTable() {
   const { totals: invTotalByMonth, totalsExCash: invTotalExCashByMonth, netCashByMonth: invNetCashByMonth, extFlowByMonth: invExtFlowByMonth, incFlowByMonth: invIncFlowByMonth } = calcInvTotalByMonth(months);
   let totalInv = invTotalByMonth[curM] || 0;
 
+  // Total do FILTRO atual (corretora/categoria/tipo/liquidez) aplicado na
+  // tabela de Investimentos — além do total geral da carteira ("Total
+  // Investimentos" abaixo), mostra numa linha própria quanto esse
+  // subconjunto específico soma.
+  const _invF_broker = G('patf-inv-broker')?.value || '';
+  const _invF_cat    = G('patf-inv-category')?.value || '';
+  const _invF_type   = G('patf-inv-type')?.value || '';
+  const _invF_liq    = G('patf-inv-liquidity')?.value || '';
+  const _hasInvFilter = !!(_invF_broker || _invF_cat || _invF_type || _invF_liq);
+  let invFilteredTotalByMonth = null;
+  if (_hasInvFilter) {
+    const filteredInvAssets = _inv.assets.filter(a => {
+      if (_invF_broker && (a.broker||'') !== _invF_broker) return false;
+      if (_invF_cat && (_isCashAsset(a) ? 'valor_em_caixa' : (a.category||'renda_fixa')) !== _invF_cat) return false;
+      if (_invF_type && (a.inv_type||'') !== _invF_type) return false;
+      if (_invF_liq) {
+        const d = _invLiquidityDays(a);
+        if (_invF_liq === 'immediate' && !(d <= 30)) return false;
+        if (_invF_liq === 'short'     && !(d > 30 && d <= 365)) return false;
+        if (_invF_liq === 'long'      && !(d > 365 && d !== Infinity)) return false;
+        if (_invF_liq === 'undefined' && !(d === Infinity)) return false;
+      }
+      return true;
+    });
+    invFilteredTotalByMonth = calcInvTotalByMonth(months, filteredInvAssets).totals;
+  }
+
   // Total personal debt outstanding as of curM (sum of latest balance_end per debt)
   let totalDebt = 0;
   (_pat.debts || []).forEach(d => {
@@ -23208,6 +23382,18 @@ function refreshPatrimonioTable() {
   </tr>` : ''}
   <tr style="height:4px;background:var(--border2)"><td colspan="${visMonths.length+5}"></td></tr>
   </tbody>`;
+
+  // Total do filtro atual da tabela de Investimentos (corretora/categoria/
+  // tipo/liquidez) — linha extra, só aparece quando algum desses filtros
+  // está ativo, ao lado do total geral (invTotalRow acima).
+  const invFilteredTotalRow = _hasInvFilter ? `<tbody>
+  <tr style="font-weight:700;background:var(--accent-lt);border-top:1px dashed var(--accent)">
+    <td style="position:sticky;z-index:3;background:var(--accent-lt);left:0;min-width:350px;font-size:12px;padding:8px 12px;color:var(--accent)" colspan="4">🔎 Total Investimentos — filtro atual</td>
+    ${visMonths.map(m => `<td class="right" style="font-size:12px;font-family:'DM Mono',monospace;padding:6px 10px;color:var(--accent);background:var(--accent-lt)">${fmtBRL(invFilteredTotalByMonth[m]||0)}</td>`).join('')}
+    <td style="position:sticky;z-index:3;background:var(--accent-lt);right:0;min-width:60px"></td>
+  </tr>
+  <tr style="height:4px;background:var(--border2)"><td colspan="${visMonths.length+5}"></td></tr>
+  </tbody>` : '';
 
   // Extra projection column header
   const projHeader = `<th style="min-width:0;max-width:0;padding:0;border:none;overflow:hidden"></th>`;
@@ -23324,6 +23510,7 @@ function refreshPatrimonioTable() {
         ${invRows || `<tr><td colspan="${visMonths.length+5}" class="empty" style="padding:1.5rem">Nenhum investimento.</td></tr>`}
       </tbody>
       ${invTotalRow}
+      ${invFilteredTotalRow}
       ${spacer}
 
       <!-- 7. TOTAL PATRIMÔNIO -->
@@ -26710,9 +26897,9 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths
   patSelResetOrder('inv', catKeys.flatMap(k => byCategory[k].map(a => a.id)));
 
   // Helper: build a category subtotal row (value + optional cash flow rows)
-  function buildCatSubtotalRow(catKey, catAssets, allMonths, txByAsset2, curM2, STICKY2, COL_W2, stripe2, ipcaCumFn, showReal2, nextM2, visAllMonths2) {
+  function buildCatSubtotalRow(catKey, catAssets, allMonths, txByAsset2, curM2, STICKY2, COL_W2, stripe2, ipcaCumFn, showReal2, nextM2, visAllMonths2, isFilteredVariant) {
     visAllMonths2 = visAllMonths2 || allMonths;
-    const catLabel = INV_CATEGORIES[catKey]?.label || catKey;
+    const catLabel = (isFilteredVariant ? '🔎 Total do filtro — ' : '') + (INV_CATEGORIES[catKey]?.label || catKey);
     const catTotalByMonth = {};
     const catNetCashByMonth = {};
 
@@ -26788,7 +26975,7 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths
       : '';
     const catGanhoColor2 = catGanho2 !== null ? (catGanho2 >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text3)';
 
-    const BG_SUB = 'var(--bg4)';
+    const BG_SUB = isFilteredVariant ? 'var(--accent-lt)' : 'var(--bg4)';
     const valueCells2 = visAllMonths2.map(m2 => {
       const v = catTotalByMonth[m2];
       const isCur = m2 === curM2;
@@ -27099,6 +27286,13 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths
     // Skip subtotal for cash categories
     if (!['caixa','valor_em_caixa'].includes(catKey)) {
       rows += buildCatSubtotalRow(catKey, byCategoryAll[catKey] || catAssets, months, txByAsset, curM, STICKY, COL_W, stripe, ipcaCumulative, showReal, nextM, visMonths);
+      // Total específico do filtro atual (corretora/tipo/liquidez) — só
+      // faz sentido mostrar quando pode DIVERGIR do total da categoria
+      // acima. Filtro de categoria sozinho não muda nada aqui, porque a
+      // linha de cima já é só dessa categoria.
+      if (fBroker || fType || fLiq) {
+        rows += buildCatSubtotalRow(catKey, catAssets, months, txByAsset, curM, STICKY, COL_W, stripe, ipcaCumulative, showReal, nextM, visMonths, true);
+      }
     }
   }); // end catKeys.forEach
 
@@ -27121,7 +27315,8 @@ function patToggleCatCollapse(cgk) {
 }
 
 // ── Total investimentos por mês (returns {totals, totalsExCash, netCashByMonth}) ──
-function calcInvTotalByMonth(months) {
+function calcInvTotalByMonth(months, assetsOverride) {
+  const assetList        = assetsOverride || _inv.assets;
   const totals          = {};
   // Mesmo total, mas sem os ativos de categoria "caixa"/"valor_em_caixa" — usado
   // só para TIR/Ganho-Perda, já que caixa não tem aporte/resgate registrado e
@@ -27140,7 +27335,7 @@ function calcInvTotalByMonth(months) {
     txByAsset[t.asset_id][tm].push(t);
   });
 
-  _inv.assets.forEach(a => {
+  assetList.forEach(a => {
     const txs = txByAsset[a.id] || {};
     const txMonths = [...new Set(Object.keys(txs))].sort();
     if (!txMonths.length) return;

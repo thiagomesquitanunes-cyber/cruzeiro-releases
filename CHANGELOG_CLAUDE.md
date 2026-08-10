@@ -12,6 +12,83 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-08 — v4.87.2: importação de corretora (regra de compra ficta, revisão de confirmação, resumo final); Patrimônio (total do filtro)
+
+Três pedidos do usuário, todos em torno da aba Patrimônio / importação de corretora.
+
+### 1) Regra de "compra ficta" corrigida — não bloqueia mais por causa de rendimentos
+
+**Relato do usuário**: a importação cria automaticamente uma "compra ficta"
+quando identifica um ativo novo sem registro de compra naquele mês, mas
+não estava criando quando havia QUALQUER movimentação pro ativo, mesmo
+um rendimento — que não é uma compra.
+
+Causa raiz: `broker:save-parsed` (main.js) bloqueava a criação com
+`hasExternal = movimentacoes.some(m => m.flow_type==='external' || (!m.flow_type && amount<0))`
+— e o parser da BTG tinha um fallback `flowType || 'external'` que
+classificava qualquer movimentação com texto não reconhecido (variação de
+descrição de rendimento, por exemplo) como `'external'`, bloqueando a
+ficta mesmo sem ser compra de fato.
+
+**Nova regra** (mais robusta — não depende de classificação de texto
+estar 100% correta): soma só as SAÍDAS de dinheiro do extrato pro ativo
+(`amount < 0`), ignorando QUALQUER entrada (rendimento, dividendo, venda,
+amortização — não são compra, seja qual for o `flow_type`). Se a soma
+cobrir o valor da posição, não cria nada; se cobrir só parte (aporte
+parcial), cria a ficta pelo valor RESTANTE (posição − saída já registrada).
+**Arquivo**: `src/main.js` (bloco de auto-criação dentro de `broker:save-parsed`).
+
+### 2) Confirmação do usuário antes de criar a compra ficta
+
+Antes a ficta era criada em silêncio, sem o usuário ver nem poder mudar o
+valor. Agora, antes de salvar: `broker:preview-ficta-purchases` (novo
+handler IPC, read-only — mesma regra do item 1, cópia proposital pra não
+arriscar a lógica já testada de `broker:save-parsed`) calcula os
+candidatos; o renderer mostra um modal (`reviewFictaPurchasesBeforeImport`
+/ `renderFictaReviewModal`, reaproveita `#modal-custom-parser`) listando
+cada ativo com o valor calculado, editável, e um checkbox "Criar" — o
+usuário confirma, edita, ou desmarca por item, ou cancela a importação
+inteira. As decisões vão em `a._fictaDecision = {create, value}` por
+ativo (casado por `nome+vencimento`, mesma chave de agregação usada em
+`broker:save-parsed`) e substituem o recálculo automático no save real.
+**Arquivos**: `src/main.js` (`broker:preview-ficta-purchases`),
+`src/preload.js` (`brokerPreviewFictaPurchases`), `src/renderer.js`
+(`confirmBrokerImport`, `reviewFictaPurchasesBeforeImport`,
+`renderFictaReviewModal`, `window._fic*`).
+
+### 3) Tela de resumo final antes de concluir a importação
+
+Novo checkpoint, depois da revisão de ficta e antes de gravar de verdade:
+`reviewImportSummaryBeforeSave` mostra totais por categoria (+ valor em
+caixa) e o total geral do que está prestes a ser importado, com botões
+"Voltar e revisar" / "Concluir importação". Facilita conferir que nada
+escapou antes do save definitivo.
+**Arquivo**: `src/renderer.js` (`confirmBrokerImport`, `reviewImportSummaryBeforeSave`).
+
+### 4) Patrimônio → Investimentos: total específico do filtro aplicado
+
+**Relato do usuário**: ao filtrar (ex: por corretora), as totalizações
+continuavam mostrando só o total geral da carteira/categoria, sem
+mostrar quanto o subconjunto filtrado especificamente soma.
+
+Causa: as linhas de subtotal por categoria e o "Total Investimentos"
+geral sempre somavam TODOS os ativos (`byCategoryAll`/`_inv.assets`),
+ignorando os filtros de corretora/tipo/liquidez da tabela — só as LINHAS
+individuais dos ativos respeitavam o filtro.
+
+**Correção**: quando corretora, tipo ou liquidez estão filtrados (filtro
+de categoria sozinho não muda nada aqui — a linha de categoria já é só
+daquela categoria), adiciona uma linha extra "🔎 Total do filtro" por
+categoria (`buildCatSubtotalRow` ganhou um parâmetro `isFilteredVariant`)
+e uma linha "🔎 Total Investimentos — filtro atual" abaixo do total geral
+(`calcInvTotalByMonth` ganhou um parâmetro opcional `assetsOverride`).
+**Escopo**: só a seção Investimentos (onde o exemplo do usuário —
+corretora — se aplica); não estendido a "Bens e Direitos" (tem lógica de
+financiamento/dívida bem mais arriscada de tocar sem uma sessão dedicada).
+**Arquivo**: `src/renderer.js` (`calcInvTotalByMonth`, `buildCatSubtotalRow`, `refreshPatrimonioTable`).
+
+---
+
 ## 2026-08-07 — v4.87.1: cards de "limite de cartão usado" (Visão Geral + página da conta) considerando parcelas futuras, excluindo recorrências
 
 **Relato do usuário**: o card "💳 Cartões de crédito" da Visão Geral só
