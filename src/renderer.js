@@ -5408,9 +5408,10 @@ function onReportImportFileSelected(event) {
 }
 
 async function submitImportIssueReport() {
-  const bankName    = G('report-import-bank').value.trim();
-  const userEmail   = G('report-import-email').value.trim();
-  const description = G('report-import-desc').value.trim();
+  const bankName     = G('report-import-bank').value.trim();
+  const userEmail    = G('report-import-email').value.trim();
+  const filePassword = G('report-import-file-pw').value; // sem trim — senha pode ter espaço de propósito
+  const description  = G('report-import-desc').value.trim();
   if (!description) { toast('Descreva o que aconteceu antes de enviar.'); return; }
   if (userEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) { toast('Email inválido.'); return; }
 
@@ -5421,6 +5422,7 @@ async function submitImportIssueReport() {
     const res = await ff.reportImportIssue({
       bankName,
       userEmail: userEmail || null,
+      filePassword: filePassword || null,
       description,
       fileName:     _reportImportFile?.name || null,
       fileMimeType: _reportImportFile?.mime || null,
@@ -5430,6 +5432,7 @@ async function submitImportIssueReport() {
       G('report-import-result').innerHTML = '<div class="info-box">✅ Relato enviado — obrigado! Costumamos responder em até 48 horas.</div>';
       G('report-import-bank').value = '';
       G('report-import-email').value = '';
+      G('report-import-file-pw').value = '';
       G('report-import-desc').value = '';
       G('report-import-file-name').textContent = '';
       _reportImportFile = null;

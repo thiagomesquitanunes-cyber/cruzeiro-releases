@@ -1557,6 +1557,12 @@ select.inp option{background:var(--bg2);}
         <button class="btn" onclick="triggerReportImportFile()">📎 Anexar arquivo (opcional, até 3MB)</button>
         <input type="file" id="report-import-file-input" style="display:none" onchange="onReportImportFileSelected(event)">
         <span id="report-import-file-name" style="font-size:12px;color:var(--text3)"></span>
+      </div>
+      <div class="field" style="max-width:640px">
+        <label class="lbl">Senha do arquivo (opcional — só se o arquivo tiver senha de abertura)</label>
+        <input class="inp" type="password" id="report-import-file-pw" placeholder="Deixe vazio se o arquivo não tiver senha" autocomplete="off">
+      </div>
+      <div style="display:flex;align-items:center;margin-top:8px;max-width:640px">
         <span style="flex:1"></span>
         <button class="btn primary" onclick="submitImportIssueReport()">Enviar relato</button>
       </div>

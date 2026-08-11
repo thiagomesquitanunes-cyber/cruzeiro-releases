@@ -12,6 +12,23 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-11 — v4.88.1: campo de senha do arquivo no reporte de problema na importação
+
+**Pedido**: faltou um campo pro usuário informar a senha de abertura do
+arquivo anexado no formulário de reporte de problema (v4.88.0) — alguns
+extratos/faturas vêm protegidos por senha (ex: fatura BTG), e sem a senha
+o suporte não consegue nem abrir o arquivo pra investigar.
+
+**Implementação**: novo campo `type="password"` (`#report-import-file-pw`)
+logo abaixo do anexo, opcional. Passa por `renderer.js` →
+`ff.reportImportIssue` → handler `import:report-issue` em `main.js` →
+POST pro site → `api/report-import-issue.js`, que inclui a senha no corpo
+do email (destacada em laranja, separada da descrição) quando informada.
+Mesmo caminho ponta a ponta do resto do formulário — nenhuma peça nova de
+infraestrutura, só um campo a mais passado adiante.
+
+---
+
 ## 2026-08-11 — v4.88.0: avisos na abertura do app + reporte de problema na importação
 
 Dois pedidos novos do usuário.

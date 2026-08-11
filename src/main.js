@@ -7207,7 +7207,7 @@ ipcMain.handle('app:open-external', (_, url) => {
 // acima: fetch no renderer cairia nas regras de CORS do Chromium, e o
 // endpoint do site não define nenhum header de CORS (mesmo padrão já usado
 // pelo app iOS chamando /api/verify-apple-purchase).
-ipcMain.handle('import:report-issue', async (_, { bankName, userEmail, description, fileName, fileMimeType, fileBase64 } = {}) => {
+ipcMain.handle('import:report-issue', async (_, { bankName, userEmail, filePassword, description, fileName, fileMimeType, fileBase64 } = {}) => {
   try {
     const res = await fetch('https://www.cruzeiroapp.com.br/api/report-import-issue', {
       method: 'POST',
@@ -7215,6 +7215,7 @@ ipcMain.handle('import:report-issue', async (_, { bankName, userEmail, descripti
       body: JSON.stringify({
         bankName: bankName || null,
         userEmail: userEmail || null,
+        filePassword: filePassword || null,
         description,
         fileName: fileName || null,
         fileMimeType: fileMimeType || null,
