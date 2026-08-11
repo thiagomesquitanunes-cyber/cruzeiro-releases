@@ -1534,6 +1534,35 @@ select.inp option{background:var(--bg2);}
       <div id="broker-result" style="margin-top:10px"></div>
     </div>
 
+    <!-- Reporte de problema na importação -->
+    <div class="import-section">
+      <h3>🐞 Encontrou um problema na importação?</h3>
+      <div class="info-box" style="margin-bottom:14px;font-size:13px">
+        Estamos sempre querendo evoluir o Cruzeiro. Se o seu banco ou cartão não está na lista, ou algo deu errado ao importar um extrato/fatura, conta pra gente — anexe o arquivo (opcional) e descreva o que aconteceu.
+        A correção é feita sem qualquer acesso ou uso dos seus dados pessoais além do necessário pra reproduzir o problema, e o prazo médio de resposta é de 48 horas.
+      </div>
+      <div class="field" style="max-width:640px">
+        <label class="lbl">Banco ou cartão (opcional)</label>
+        <input class="inp" id="report-import-bank" placeholder="Ex: Banco Inter, Nubank...">
+      </div>
+      <div class="field" style="max-width:640px">
+        <label class="lbl">Seu e-mail (opcional — pra você receber a resposta)</label>
+        <input class="inp" id="report-import-email" type="email" placeholder="seu@email.com">
+      </div>
+      <div class="field" style="max-width:640px">
+        <label class="lbl">O que aconteceu?</label>
+        <textarea class="inp" id="report-import-desc" rows="4" placeholder="Ex: &quot;esse banco não está na lista&quot;, &quot;a importação não reconheceu nenhuma transação&quot;, &quot;os valores vieram errados&quot;..."></textarea>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;max-width:640px">
+        <button class="btn" onclick="triggerReportImportFile()">📎 Anexar arquivo (opcional, até 3MB)</button>
+        <input type="file" id="report-import-file-input" style="display:none" onchange="onReportImportFileSelected(event)">
+        <span id="report-import-file-name" style="font-size:12px;color:var(--text3)"></span>
+        <span style="flex:1"></span>
+        <button class="btn primary" onclick="submitImportIssueReport()">Enviar relato</button>
+      </div>
+      <div id="report-import-result" style="margin-top:10px"></div>
+    </div>
+
   </div>
 
   <!-- CATEGORIAS -->

@@ -6855,6 +6855,7 @@ ipcMain.handle('settings:get', () => {
     hasRecoveryEmail: !!s.recoveryEmail,
     recoveryEmailMasked: s.recoveryEmail ? s.recoveryEmail.replace(/(.{2}).*(@.*)/, '$1***$2') : null,
     termsAcceptedVersion: s.termsAcceptedVersion || null,
+    dismissedAnnouncements: Array.isArray(s.dismissedAnnouncements) ? s.dismissedAnnouncements : [],
   };
 });
 
@@ -7198,6 +7199,36 @@ ipcMain.handle('app:open-external', (_, url) => {
     }
     return { ok: false };
   } catch(e) { return { ok: false }; }
+});
+
+// Relato de problema na importação (aba Importar → "Encontrou um problema?")
+// — envia pro backend do site (que repassa por email pro suporte), a partir
+// do processo main (não do renderer) pelo mesmo motivo dos provedores de IA
+// acima: fetch no renderer cairia nas regras de CORS do Chromium, e o
+// endpoint do site não define nenhum header de CORS (mesmo padrão já usado
+// pelo app iOS chamando /api/verify-apple-purchase).
+ipcMain.handle('import:report-issue', async (_, { bankName, userEmail, description, fileName, fileMimeType, fileBase64 } = {}) => {
+  try {
+    const res = await fetch('https://www.cruzeiroapp.com.br/api/report-import-issue', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        bankName: bankName || null,
+        userEmail: userEmail || null,
+        description,
+        fileName: fileName || null,
+        fileMimeType: fileMimeType || null,
+        fileBase64: fileBase64 || null,
+        appVersion: app.getVersion(),
+        platform: process.platform,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, error: data.error || `Erro ${res.status}` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
 ipcMain.handle('settings:save-data', (_, data) => {
   const s = loadSettings();

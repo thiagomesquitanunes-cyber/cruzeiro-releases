@@ -5378,6 +5378,71 @@ async function processBankFile(file) {
   }
 }
 
+// ── Reporte de problema na importação ─────────────────────────────────────
+// Anexo opcional (até 3MB — folga pro limite de corpo de requisição do
+// Vercel, já contando a inflação de ~33% do base64) + relato em texto,
+// enviados pro backend do site (api/report-import-issue), que encaminha por
+// email pro suporte. Guardado em memória só até o envio — nunca persistido.
+const REPORT_IMPORT_MAX_BYTES = 3 * 1024 * 1024;
+let _reportImportFile = null; // { name, mime, base64 }
+
+function triggerReportImportFile() {
+  G('report-import-file-input').click();
+}
+
+function onReportImportFileSelected(event) {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+  if (file.size > REPORT_IMPORT_MAX_BYTES) {
+    toast('Arquivo maior que 3MB — descreva o problema sem anexar, ou tente um arquivo menor.');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    _reportImportFile = { name: file.name, mime: file.type || 'application/octet-stream', base64: reader.result.split(',')[1] };
+    G('report-import-file-name').textContent = `📎 ${file.name}`;
+  };
+  reader.onerror = () => toast('Não foi possível ler esse arquivo.');
+  reader.readAsDataURL(file);
+}
+
+async function submitImportIssueReport() {
+  const bankName    = G('report-import-bank').value.trim();
+  const userEmail   = G('report-import-email').value.trim();
+  const description = G('report-import-desc').value.trim();
+  if (!description) { toast('Descreva o que aconteceu antes de enviar.'); return; }
+  if (userEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) { toast('Email inválido.'); return; }
+
+  const btn = document.querySelector('button[onclick="submitImportIssueReport()"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Enviando…'; }
+  G('report-import-result').innerHTML = '';
+  try {
+    const res = await ff.reportImportIssue({
+      bankName,
+      userEmail: userEmail || null,
+      description,
+      fileName:     _reportImportFile?.name || null,
+      fileMimeType: _reportImportFile?.mime || null,
+      fileBase64:   _reportImportFile?.base64 || null,
+    });
+    if (res?.ok) {
+      G('report-import-result').innerHTML = '<div class="info-box">✅ Relato enviado — obrigado! Costumamos responder em até 48 horas.</div>';
+      G('report-import-bank').value = '';
+      G('report-import-email').value = '';
+      G('report-import-desc').value = '';
+      G('report-import-file-name').textContent = '';
+      _reportImportFile = null;
+    } else {
+      G('report-import-result').innerHTML = `<div class="warn-box">❌ ${esc(res?.error || 'Não foi possível enviar agora. Tente novamente em instantes.')}</div>`;
+    }
+  } catch (e) {
+    G('report-import-result').innerHTML = `<div class="warn-box">❌ ${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Enviar relato'; }
+  }
+}
+
 async function parseBankFile(buffer) {
   if (selBank === 'xp') return parseBankXP(buffer);
   if (selBank === 'btg') return parseBankBTG(buffer);
@@ -5469,30 +5534,35 @@ function renderBankPreview(rows) {
   const preview = G('bank-preview');
   if (!preview) return;
 
-  // Restore original table structure in case it was replaced by edit table
-  const tbl = preview.querySelector('table.ledger');
-  if (tbl) {
-    const thead = tbl.querySelector('thead tr');
-    if (thead) thead.innerHTML = '<th>Data</th><th>Descrição</th><th class="right">Valor</th>';
-  }
-  const tblOuter = preview.querySelector('.tbl-outer');
-  if (tblOuter) tblOuter.style.maxHeight = '200px';
-
-  const titleEl = G('bank-preview-title');
-  const countEl = G('bank-preview-count');
-  const bodyEl  = G('bank-preview-body');
-  if (titleEl) titleEl.textContent = `Prévia — ${filtered.length} transações`;
-  if (countEl) countEl.textContent = `${filtered.length} de ${rows.length} transações${dateFrom ? ` (filtrado a partir de ${fmtDate(dateFrom)})` : ''}`;
-  if (bodyEl) bodyEl.innerHTML = filtered.slice(0, 50).map(r =>
+  const bodyRows = filtered.slice(0, 50).map(r =>
     `<tr><td>${fmtDate(r.date)}</td><td>${esc(r.memo||r.desc||'')}</td><td class="${r.amount<0?'amt-exp':'amt-inc'} right">${fmtBRL(r.amount)}</td></tr>`
   ).join('');
 
-  // Restore footer buttons
-  const footer = preview.querySelector('div[style*="margin-top:10px"], .import-footer');
-  if (footer) footer.innerHTML = `
-    <button class="btn primary" onclick="confirmBankImport()">✓ Confirmar importação</button>
-    <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
-    <span id="bank-preview-count" style="font-size:12px;color:var(--text3)"></span>`;
+  // Reconstrói TODO o innerHTML de #bank-preview do zero — este container é
+  // reaproveitado por 3 telas bem diferentes (esta prévia simples, a tabela
+  // de edição de renderImportEditTable, e a revisão de duplicatas), e as
+  // outras duas substituem o innerHTML inteiro por uma estrutura própria.
+  // Remendar pedaços via querySelector/id (como antes) assumia que a
+  // estrutura original ainda estava lá — depois de uma importação anterior
+  // passar pela tabela de edição, o container ficava com aquela estrutura
+  // (9 colunas, ids reaproveitados), e os remendos aqui podiam misturar
+  // pedaços novos com pedaços antigos de forma inconsistente. Reconstruir
+  // do zero, como renderImportEditTable já faz, elimina essa dependência.
+  preview.innerHTML = `
+    <div class="tbl-card">
+      <div class="tbl-header"><h3 id="bank-preview-title">Prévia — ${filtered.length} transações</h3></div>
+      <div class="tbl-outer" style="max-height:200px">
+        <table class="ledger">
+          <thead><tr><th>Data</th><th>Descrição</th><th class="right">Valor</th></tr></thead>
+          <tbody id="bank-preview-body">${bodyRows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="import-footer" style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn primary" onclick="confirmBankImport()">✓ Confirmar importação</button>
+      <button class="btn" onclick="cancelBankImport()">🗑️ Descartar importação</button>
+      <span id="bank-preview-count" style="font-size:12px;color:var(--text3)">${filtered.length} de ${rows.length} transações${dateFrom ? ` (filtrado a partir de ${fmtDate(dateFrom)})` : ''}</span>
+    </div>`;
 
   preview.style.display = 'block';
   if (G('bank-result')) G('bank-result').innerHTML = '';
@@ -15955,12 +16025,16 @@ async function checkFirstRun() {
     if (!s.tourDone) {
       // Primeira abertura: banner de boas-vindas (modal grande, visual) em
       // vez do tour em etapas antigo ou do balão pequeno da Moedinha —
-      // ensina os passos iniciais de configuração de uma vez só.
+      // ensina os passos iniciais de configuração de uma vez só. Avisos
+      // (ver checkAnnouncements) ficam de fora da primeira abertura de
+      // propósito — não empilhar dois modais grandes na cara de quem
+      // acabou de instalar o app; eles aparecem a partir da 2ª abertura.
       showWelcomeBanner();
       guideInit(); // Moedinha já fica disponível minimizada no canto por trás do banner
       await ff.settingsSave({ ...s, tourDone: true });
     } else {
       guideInit(); // aparece minimizado no canto, sem incomodar
+      checkAnnouncements(s);
     }
   } catch(e) {}
 }
@@ -15973,6 +16047,67 @@ function showWelcomeBanner() {
 function closeWelcomeBanner() {
   const el = G('welcome-banner');
   if (el) el.style.display = 'none';
+}
+
+// ── Avisos ao abrir o app ──────────────────────────────────────────────
+// Lista de avisos pontuais mostrados na abertura do app (ex: "novidade
+// disponível") — cada um só aparece até o usuário marcar "Não mostrar
+// novamente" (persistido em settings.dismissedAnnouncements, uma lista de
+// ids). Novos avisos entram nesta lista; nenhum código de exibição precisa
+// mudar. Só o PRIMEIRO aviso ainda não dispensado é mostrado por sessão —
+// evita empilhar vários modais na cara do usuário de uma vez.
+const ANNOUNCEMENTS = [
+  {
+    id: 'android-beta-2026-08',
+    title: '📱 O app Android já está em teste!',
+    bodyHtml: `
+      <div style="padding:20px">
+        <p style="font-size:13px;color:var(--text2);line-height:1.6;margin:0 0 14px">
+          O Cruzeiro para Android entrou em teste fechado no Google Play. Se você (ou alguém que conhece) usa Android e quer experimentar antes do lançamento oficial, é só entrar na fila de testadores.
+        </p>
+        <p style="font-size:13px;color:var(--text2);line-height:1.6;margin:0 0 18px">
+          O passo a passo (entrar no grupo + aceitar o teste) está na página de download do site.
+        </p>
+        <a href="#" onclick="ff.openExternal('https://www.cruzeiroapp.com.br/download');return false;"
+          style="display:inline-block;background:var(--accent);color:#fff;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:600;text-decoration:none">
+          Ver como participar →
+        </a>
+      </div>`,
+  },
+];
+
+async function checkAnnouncements(preloadedSettings) {
+  try {
+    const s = preloadedSettings || await ff.settingsGet();
+    const dismissed = new Set(s.dismissedAnnouncements || []);
+    const next = ANNOUNCEMENTS.find(a => !dismissed.has(a.id));
+    if (next) showAnnouncementModal(next);
+  } catch(e) {}
+}
+
+function showAnnouncementModal(ann) {
+  const footerHtml = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-top:1px solid var(--border)">
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text3);cursor:pointer">
+        <input type="checkbox" id="announcement-dont-show"> Não mostrar novamente
+      </label>
+      <button class="btn primary" onclick="dismissAnnouncement('${ann.id}')">Fechar</button>
+    </div>`;
+  showInfoModal(ann.title, ann.bodyHtml + footerHtml, 480);
+}
+
+function dismissAnnouncement(id) {
+  const dontShow = G('announcement-dont-show')?.checked;
+  closeInfoModal();
+  if (!dontShow) return; // fecha sem marcar como visto — reaparece na próxima abertura
+  (async () => {
+    try {
+      const s = await ff.settingsGet();
+      const dismissed = new Set(s.dismissedAnnouncements || []);
+      dismissed.add(id);
+      await ff.settingsSave({ ...s, dismissedAnnouncements: [...dismissed] });
+    } catch(e) {}
+  })();
 }
 
 // ═══════════════════════════════════════════════════════════════════════

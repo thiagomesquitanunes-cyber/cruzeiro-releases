@@ -42,6 +42,7 @@ const api = {
   importSavePending:  (state) => ipcRenderer.invoke('import:save-pending', state),
   importLoadPending:  ()      => ipcRenderer.invoke('import:load-pending'),
   importClearPending: ()      => ipcRenderer.invoke('import:clear-pending'),
+  reportImportIssue:  (data)  => ipcRenderer.invoke('import:report-issue', data),
   goalList:           ()   => ipcRenderer.invoke('goal:list'),
   goalSave:           (d)  => ipcRenderer.invoke('goal:save', d),
   goalDelete:         (d)  => ipcRenderer.invoke('goal:delete', d),

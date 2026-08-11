@@ -12,6 +12,124 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-11 — v4.88.0: avisos na abertura do app + reporte de problema na importação
+
+Dois pedidos novos do usuário.
+
+### 1) Sistema de avisos ao abrir o app
+
+**Pedido**: uma janela que apareça na abertura do app com informações
+úteis (ex: "o app Android já está em teste"), com opção de "não mostrar
+novamente".
+
+**Implementação**: sistema genérico em `src/renderer.js` — um array
+`ANNOUNCEMENTS` (cada item com `id`, `title`, `bodyHtml`), checado em
+`checkAnnouncements()` contra `settings.dismissedAnnouncements` (lista de
+ids persistida via `ff.settingsSave`/`ff.settingsGet`, novo campo
+adicionado ao whitelist do handler `settings:get` em `main.js` — esse
+handler filtra os campos retornados explicitamente, então um campo novo
+não aparece no renderer sem ser adicionado ali). Só o primeiro aviso ainda
+não dispensado é mostrado por sessão, pra não empilhar modais. Reaproveita
+o modal genérico já existente (`showInfoModal`/`openModal`/`#modal-info`)
+em vez de criar HTML/CSS novo — diferente do banner de boas-vindas
+(`#welcome-banner`), que é hardcoded pra uma única mensagem e não foi
+tocado. Checado só a partir da 2ª abertura do app (`checkFirstRun`, ramo
+`else`) — na primeira abertura já aparece o banner de boas-vindas, e
+empilhar os dois de cara seria demais.
+
+Primeiro aviso cadastrado: `android-beta-2026-08`, avisando que o teste
+fechado do Android está disponível, com link (`ff.openExternal`) pra
+`cruzeiroapp.com.br/download`.
+
+**Para cadastrar um aviso novo no futuro**: só adicionar um item novo ao
+array `ANNOUNCEMENTS` em `renderer.js` — nenhum outro código precisa
+mudar.
+
+### 2) Reporte de problema na importação
+
+**Pedido**: campo na aba Importar convidando o usuário a reportar bancos
+faltando ou erros de importação, com upload do arquivo problemático e
+relato em texto, enviados por email pro suporte — deixando claro que a
+correção não usa dados pessoais e que o prazo médio de resposta é 48h.
+Pedido seguinte, mesma sessão: acrescentar um campo opcional de email do
+usuário no formulário, pra ele poder receber a resposta — vira `replyTo`
+no email enviado (responder direto no Gmail já vai pro usuário, sem
+precisar copiar o email do corpo da mensagem).
+
+**Implementação, 2 repositórios**:
+- **Cruzeiro Site** (`api/report-import-issue.js`, novo): recebe
+  `{bankName, userEmail, description, fileName, fileMimeType, fileBase64,
+  appVersion, platform}` via POST e envia por email pro suporte
+  (`cruzeiroapp@gmail.com`) usando o Resend, mesmo padrão SDK já usado em
+  `api/_lib/helpers.js` (`sendLicenseEmail`). Anexo via
+  `attachments: [{filename, content: base64}]` da API do Resend. Limite de
+  ~4MB em base64 (arquivo original de até ~3MB) — folga pro limite de
+  corpo de requisição das Vercel Functions (~4.5MB); sem isso o envio
+  falharia silenciosamente pra arquivos maiores. Sem headers de CORS —
+  desnecessário porque quem chama é o processo main do Electron, não uma
+  página de navegador (ver abaixo).
+- **Cruzeiro Desktop**: nova seção na aba Importar (`index.html`, dentro de
+  `#page-import`) com campo de banco/cartão (opcional), textarea de
+  descrição e input de arquivo (limite de 3MB verificado no cliente antes
+  de tentar enviar). `renderer.js` lê o arquivo via `FileReader.
+  readAsDataURL` (mesma técnica usada em outros lugares do app) e chama
+  `ff.reportImportIssue(...)`. O IPC handler correspondente
+  (`import:report-issue` em `main.js`) é quem de fato faz o `fetch` pro
+  endpoint do site — **de propósito no processo main, não no renderer**:
+  o renderer roda como uma página Chromium de verdade (contextIsolation
+  ativado), então um `fetch` de lá cairia nas regras de CORS do navegador
+  contra um endpoint que não define esses headers; o processo main não tem
+  essa restrição (mesmo padrão já usado pelos provedores de IA — Gemini,
+  OpenAI etc. — mais acima em `main.js`).
+
+**Não testado de ponta a ponta** (não tenho como validar o envio real do
+email sem uma `RESEND_API_KEY` de produção nem visualizar a janela do
+Electron diretamente) — validado apenas: sintaxe de todos os arquivos
+tocados, carregamento do módulo do novo endpoint, HTML balanceado, e boot
+limpo do app (sem erros no log). Recomendo o usuário testar o fluxo
+completo (enviar um relato de teste) antes de considerar resolvido.
+
+---
+
+## 2026-08-10 — v4.87.3: fix — "fantasma" de importação anterior aparecendo na prévia de uma nova importação
+
+**Relato do usuário**: importou uma fatura de cartão, e ao importar um
+extrato bancário logo em seguida (mesma sessão do app, sem fechar/reabrir),
+a tela de prévia ("Prévia — X transações", antes de qualquer seleção ou
+detecção de duplicata) mostrava alguns lançamentos que eram da fatura
+anterior, não do extrato novo. "Algo fica na memória" — só fechar e reabrir
+o app "resolvia" (temporariamente).
+
+**Causa raiz**: o container `#bank-preview` é reaproveitado por 3 telas
+bem diferentes do fluxo de importação: a prévia simples inicial
+(`renderBankPreview`), a tabela de edição pós-confirmação
+(`renderImportEditTable`) e a revisão de duplicatas (`showDupResolutionUI`/
+`showMemoDupUI`). As duas últimas SUBSTITUEM `preview.innerHTML` inteiro
+por uma estrutura própria (a tabela de edição, por exemplo, tem 9 colunas
+com inputs, reaproveitando por acaso os mesmos ids `bank-preview-title` e
+`bank-preview-body` da prévia simples). `renderBankPreview`, porém, não
+reconstruía nada — só tentava "remendar" pedaços via
+`querySelector`/`getElementById` (`table.ledger`, `.tbl-outer`,
+`bank-preview-title`, `bank-preview-count`, `bank-preview-body`, e um
+seletor frágil pro rodapé: `div[style*="margin-top:10px"]`), assumindo
+que a estrutura original ainda estava lá. Se a fatura anterior tivesse
+deixado o container na forma da tabela de edição (ex: o usuário nunca
+chegou a clicar em "Descartar importação" pra voltar ao estado limpo —
+só navegou pra longe), a prévia da importação seguinte remendava pedaços
+NOVOS (título, corpo da tabela) por cima de uma estrutura ANTIGA
+(cabeçalho de 9 colunas, rodapé de outra tela) de forma inconsistente —
+o resultado dependia exatamente do que tinha sobrado ali.
+
+**Fix**: `renderBankPreview` (`src/renderer.js`) agora reconstrói TODO o
+`innerHTML` de `#bank-preview` do zero a cada chamada — título, tabela e
+rodapé — em vez de remendar pedaços. Mesmo padrão que
+`renderImportEditTable` já usava (comentário lá já dizia "safe after dup
+UI replaced it", mas só cobria aquela tela). Agora as 3 telas do fluxo de
+importação são igualmente auto-suficientes: não importa qual delas rodou
+por último, a próxima sempre monta sua própria estrutura completa.
+
+---
+
 ## 2026-08-08 — v4.87.2: importação de corretora (regra de compra ficta, revisão de confirmação, resumo final); Patrimônio (total do filtro)
 
 Três pedidos do usuário, todos em torno da aba Patrimônio / importação de corretora.
