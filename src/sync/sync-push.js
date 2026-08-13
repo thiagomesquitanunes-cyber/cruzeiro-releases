@@ -1074,24 +1074,39 @@ async function pushEvolution(all, userId, getDbPath, fs) {
     byMonthParent[key].expenses += r.expenses || 0;
   }
 
-  const byMonth    = {}; // month -> { income, expenses }
-  const catByMonth = {}; // month -> { categoriaMae: valorCents } (receita OU despesa, magnitude)
+  const byMonth = {}; // month -> { income, expenses }
   Object.values(byMonthParent).forEach(g => {
     const net = g.income - g.expenses;
     const m = byMonth[g.month] || (byMonth[g.month] = { income: 0, expenses: 0 });
     if (net > 0) m.income += net;
     else if (net < 0) m.expenses += -net;
-
-    // Ao contrário da versão anterior (que só guardava categorias com
-    // net<0, ou seja, só despesa), agora guarda QUALQUER categoria-mãe
-    // com movimento — incluindo receitas (Salário, Juros recebidos
-    // etc.), que antes nunca apareciam na aba Evolução > Por categoria
-    // do mobile.
-    if (net !== 0) {
-      if (!catByMonth[g.month]) catByMonth[g.month] = {};
-      catByMonth[g.month][g.parent] = toCents(Math.abs(net));
-    }
   });
+
+  // by_category: valor POR SUBCATEGORIA (não por mãe) — o mobile (aba
+  // Evolução > Por categoria, evolucao.js) reconstrói o total da
+  // categoria-mãe somando todas as chaves "Mãe:Sub" com esse prefixo.
+  // Calculado direto de catRows (por subcategoria), e DELIBERADAMENTE
+  // não de byMonthParent (usado só pra classificar income/expenses no
+  // nível mês — ver comentário grande no topo da função). Misturar os
+  // dois níveis na mesma estrutura causaria contagem duplicada no
+  // mobile (ele soma tanto a chave exata quanto qualquer "Mãe:"
+  // prefixada). Antes de 2026-07-14 isso já funcionava por
+  // subcategoria; a correção daquela data trocou pra agrupar por mãe
+  // aqui também, o que consertou o total de receitas/despesas mas
+  // como efeito colateral fez a Evolução > Por categoria do mobile só
+  // mostrar categorias-mãe (by_category nunca mais tinha uma chave
+  // com ":").
+  const catByMonth = {}; // month -> { "Mãe" ou "Mãe:Sub": valorCents }
+  for (const r of catRows) {
+    const mode = modeOf[r.category];
+    if (mode === 'excluded') continue;
+    if (catConfigActive && mode === undefined) continue;
+
+    const net = (r.income || 0) - (r.expenses || 0);
+    if (net === 0) continue;
+    if (!catByMonth[r.month]) catByMonth[r.month] = {};
+    catByMonth[r.month][r.category] = toCents(Math.abs(net));
+  }
 
   let months = Object.keys(byMonth).sort();
   if (!months.length) {

@@ -12,6 +12,37 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-12 — v4.88.2: fix Evolução mobile só mostrava categorias-mãe (by_category sem subcategoria)
+
+**Pedido**: usuário reportou que a aba Evolução no mobile (iOS/Android)
+parou de mostrar subcategorias no seletor "Por categoria", só
+categorias-mãe.
+
+**Causa**: a correção de 2026-07-14/15 (fix de receita/despesa
+inflando por classificar cada subcategoria separadamente em vez de
+agrupar por mãe) mudou `pushEvolution()` (`src/sync/sync-push.js`) pra
+gravar `by_category` só com chaves de categoria-mãe (`catByMonth[g.month][g.parent]`,
+derivado de `byMonthParent`). Isso corrigiu o total de
+receitas/despesas, mas como efeito colateral eliminou toda chave
+`"Mãe:Sub"` do payload — o mobile (`evolucao.js`) já sabe separar
+parent/sub pelo `:`, mas nunca mais recebia uma chave com esse
+caractere.
+
+**Fix**: `by_category` desacoplado da classificação por mãe — agora
+calculado direto de `catRows` (linhas por mês+subcategoria, já
+excluídas/filtradas por `ev_catConfig`), guardando
+`toCents(Math.abs(income-expenses))` por subcategoria completa
+(`r.category`, com o `:` original). A classificação de
+income/expenses no nível mês (`byMonth`, usada pros campos `income`/
+`expenses`/`income_ma`/`expenses_ma` das linhas enviadas) continua
+vindo de `byMonthParent` exatamente como antes — nenhuma mudança na
+lógica que corrigiu a inflação de julho, só a estrutura de
+`by_category` foi recalculada separadamente. Mobile já reconstrói o
+total da mãe somando as chaves prefixadas (`evolucao.js`), então não
+precisou de nenhuma mudança do lado mobile.
+
+---
+
 ## 2026-08-11 — v4.88.1: campo de senha do arquivo no reporte de problema na importação
 
 **Pedido**: faltou um campo pro usuário informar a senha de abertura do
