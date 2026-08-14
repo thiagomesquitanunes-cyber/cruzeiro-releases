@@ -12,6 +12,49 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-12 (2) — v4.88.3: fix ícone borrado nos demais tiles da Microsoft Store
+
+**Relato do usuário**: mesmo depois do fix de 2026-08-05 (que só cobriu
+`Square44x44Logo`, o ícone da taskbar/app-list) e de a versão já
+publicada na Store estar em v4.87.2 (posterior àquele fix), o ícone
+ainda aparecia com baixa resolução em outro lugar do app da Microsoft
+Store no Windows.
+
+**Causa**: o fix de 05/08 só gerou variantes `.scale-*`/`.targetsize-*`
+pra `Square44x44Logo` — os outros 5 assets do pacote
+(`Square150x150Logo`, `LargeTile`/Square310x310Logo, `SmallTile`/
+Square71x71Logo, `Wide310x150Logo`, `StoreLogo`) continuaram como um
+único bitmap cada, na resolução base (150×150, 310×310, 71×71,
+310×150, 50×50). O Windows precisa fazer upscale desse único bitmap em
+telas de alto DPI (125%/150%/200%/400%, comuns em laptops modernos) —
+mesmo mecanismo de borrão já diagnosticado antes pra o ícone da
+taskbar, só que ainda não corrigido pros tiles do Menu Iniciar e pro
+ícone da própria listagem da Store.
+
+**Fix**: gerados os mesmos conjuntos de variantes de escala
+(100/125/150/200/400%) pros 5 assets restantes, renderizando
+`assets/icon.svg` via Chromium headless (mesma técnica usada antes) —
+ícones "square" (`Square150x150Logo`, `LargeTile`, `SmallTile`,
+`StoreLogo`) renderizados full-bleed a partir do SVG (que já inclui
+fundo `#004d40` com cantos arredondados); `Wide310x150Logo` composto
+com o ícone centrado (largura = altura do tile) sobre fundo sólido
+`#0d3b2e` (cor de marca, mesma do `appx.backgroundColor`), replicando
+a composição já usada no asset base existente. Cada composição foi
+validada visualmente contra o asset base já publicado antes de gravar,
+pra garantir que as novas variantes de escala são fiéis ao design
+original, só em resoluções maiores.
+
+**Arquivos**: `assets/appx/{Square150x150Logo,LargeTile,SmallTile,
+Wide310x150Logo,StoreLogo}.scale-{100,125,150,200,400}.png` (25 novos
+arquivos).
+
+**Nota**: como antes, o `.appx` que atualiza a Microsoft Store não é
+gerado nem publicado automaticamente por este publish — precisa do
+fluxo manual via GitHub Actions (`build-appx-test.yml`) + reenvio ao
+Partner Center.
+
+---
+
 ## 2026-08-12 — v4.88.2: fix Evolução mobile só mostrava categorias-mãe (by_category sem subcategoria)
 
 **Pedido**: usuário reportou que a aba Evolução no mobile (iOS/Android)
