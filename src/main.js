@@ -7376,12 +7376,30 @@ async function callLLM(systemPrompt, userPrompt) {
     }
 
     if (provider === 'openrouter') {
-      // OpenRouter: API gratuita compatível com OpenAI, com modelos :free sem custo
+      // OpenRouter: API gratuita compatível com OpenAI, com modelos :free sem custo.
+      //
+      // Antes usava model: 'openrouter/free' (roteador automático) — ele
+      // escolhe um modelo gratuito diferente a cada chamada, às vezes lento,
+      // às vezes um que não segue direito a instrução de "responda só com
+      // JSON", causando tanto lentidão quanto texto cru de moderação
+      // vazando pro usuário. O mobile já tinha abandonado isso em favor de
+      // um modelo fixo (ver src/lib/ai.js dos repos iOS/Android) — só
+      // faltava espelhar aqui.
+      //
+      // models: (lista) em vez de model: (string única) também resolve um
+      // segundo problema: modelos :free dividem um limite de taxa baixo
+      // entre TODOS os usuários da plataforma, não só os nossos — é comum
+      // ficar temporariamente indisponível em horário de pico. O
+      // OpenRouter tenta cada modelo da lista em ordem e só falha se todos
+      // estiverem indisponíveis, em vez de derrubar o recurso inteiro na
+      // primeira falha. gpt-oss-20b:free é o preferido (confiável em
+      // seguir formato JSON estrito); os outros dois são fallback,
+      // confirmados disponíveis via GET /api/v1/models.
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'authorization': `Bearer ${key}` },
         body: JSON.stringify({
-          model: 'openrouter/free', // roteador automático para modelos gratuitos disponíveis
+          models: ['openai/gpt-oss-20b:free', 'google/gemma-4-31b-it:free', 'z-ai/glm-5.2:free'],
           messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
           temperature: 0.2, max_tokens: 1024,
         }),

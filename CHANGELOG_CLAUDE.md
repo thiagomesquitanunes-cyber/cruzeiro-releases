@@ -12,6 +12,32 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-17 — v4.88.4: fix OpenRouter usava roteador automático em vez de modelos fixos com fallback
+
+**Motivação**: e-mail do próprio OpenRouter alertando sobre o parâmetro
+`models` (lista, com fallback automático em rate limit/indisponibilidade)
+em vez de `model` (string única). Ao investigar, `callLLM()` (branch
+`openrouter`) ainda usava `model: 'openrouter/free'` — o roteador
+automático que os repos mobile (iOS/Android, `src/lib/ai.js`) já tinham
+abandonado antes por escolher um modelo gratuito diferente a cada
+chamada, às vezes lento, às vezes sem seguir a instrução de "responda só
+com JSON", causando lentidão e texto cru de moderação vazando pro
+usuário. O Desktop nunca tinha recebido essa correção.
+
+**Fix**: `model: 'openrouter/free'` → `models: ['openai/gpt-oss-20b:free',
+'google/gemma-4-31b-it:free', 'z-ai/glm-5.2:free']` — mesmos 3 modelos
+usados no mobile, confirmados disponíveis via `GET /api/v1/models` antes
+de escolher. Resolve dois problemas de uma vez: sai do roteador
+automático problemático, e ganha fallback automático (o OpenRouter tenta
+cada modelo em ordem, só falha se todos estiverem indisponíveis) — antes
+uma única falha (rate limit é comum em modelos `:free`, compartilhado
+entre todos os usuários da plataforma) derrubava o recurso de "lançar por
+voz/texto com IA" inteiro.
+
+**Arquivos**: `src/main.js` (`callLLM`, branch `provider === 'openrouter'`).
+
+---
+
 ## 2026-08-12 (2) — v4.88.3: fix ícone borrado nos demais tiles da Microsoft Store
 
 **Relato do usuário**: mesmo depois do fix de 2026-08-05 (que só cobriu
