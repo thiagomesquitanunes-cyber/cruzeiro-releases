@@ -27916,7 +27916,24 @@ async function getCurrentMA12LucroLive() {
 // mensal necessária = aporte externo + rendimento do patrimônio).
 async function syncRetirementGoal({ metaPatrimonio, retYear, needPMT, patAtual, rateReal }) {
   const yieldMonthlyCur = patAtual * rateReal / 12;
-  const monthlyTarget = needPMT + yieldMonthlyCur;
+
+  // Reposição inflacionária do patrimônio financeiro. yieldMonthlyCur é
+  // rendimento REAL (rateReal já é descontado de inflação), mas o
+  // "realizado" com que a meta é comparada na aba Metas (getCurrentMA12LucroLive,
+  // MA12 do lucro do mês corrente) é NOMINAL — o mês mais recente da MA12
+  // não sofre correção do IPCA (ver inflateMonth). Comparar rendimento
+  // real com lucro nominal subestimava a meta sistematicamente. Somamos
+  // aqui o quanto os investimentos financeiros (aba Patrimônio — não o
+  // patrimônio total: bens e contas não rendem juros pra repor) precisam
+  // só para não perder valor real, usando o IPCA do último mês disponível.
+  const now = new Date();
+  const curM = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  const invFinanceiro = (window._invTotalByMonth || {})[curM] || 0;
+  const ipcaRefMonth = getIpcaRefMonth();
+  const ipcaRateCur = ipcaRefMonth ? (_ev.ipca[ipcaRefMonth] || 0) : 0;
+  const inflationReplenish = invFinanceiro * ipcaRateCur;
+
+  const monthlyTarget = needPMT + yieldMonthlyCur + inflationReplenish;
   const deadline = `${retYear}-12-31`;
 
   const allGoals = await ff.goalList().catch(() => []);

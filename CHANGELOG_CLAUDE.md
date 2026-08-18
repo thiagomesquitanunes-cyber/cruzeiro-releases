@@ -12,6 +12,45 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-18 — v4.88.5: fix meta de aposentadoria (curto prazo) comparava renda real com nominal + login social (Google/Apple) no sync mobile
+
+**Bug relatado pelo usuário**: na aba Metas, o gauge "Curto prazo —
+Poupança mensal" compara a meta de poupança mensal com o realizado
+(`getCurrentMA12LucroLive`, MA12 do lucro do mês corrente). O realizado é
+NOMINAL (o mês mais recente da MA12 não sofre correção de IPCA — ver
+`inflateMonth`), mas a meta (`monthly_amount`, calculada em
+`syncRetirementGoal`) era `needPMT + yieldMonthlyCur` — aporte externo
+mensal + rendimento do patrimônio, e `yieldMonthlyCur = patAtual *
+rateReal / 12` usa `rateReal`, que é um retorno REAL (já descontado de
+inflação, input do usuário na aba Aposentadoria). Comparar uma meta real
+com um realizado nominal subestimava sistematicamente a meta.
+
+**Fix** (`src/renderer.js`, `syncRetirementGoal`): somado um terceiro
+componente, a reposição inflacionária do patrimônio financeiro — IPCA do
+último mês disponível (`getIpcaRefMonth()` + `_ev.ipca`) aplicado sobre o
+total de investimentos financeiros do mês corrente (`window
+._invTotalByMonth[curM]`, aba Patrimônio — não o patrimônio total: bens e
+contas não rendem juros pra repor). `monthlyTarget = needPMT +
+yieldMonthlyCur + inflationReplenish`. O KPI da própria aba Aposentadoria
+("Aporte mensal necessário") continua mostrando só `needPMT` isolado —
+correto, não precisou mudar. A correção propaga pro mobile (iOS/Android)
+automaticamente na próxima sincronização, já que eles só leem
+`goal.monthly_amount` sincronizado, sem replicar a fórmula.
+
+## 2026-08-18 (mesma versão) — login social (Google/Apple) no painel "App Mobile"
+
+Ver commit `e09dd62` — botões "Continuar com Google/Apple" no painel de
+sincronização com o mobile (Configurações), via fluxo OAuth PKCE manual
+(`src/sync/oauth-flow.js`, servidor HTTP local temporário +
+`shell.openExternal`). Contas sociais não passam por
+`initEncryptionKey` (sem senha pra embrulhar a chave de dados na nuvem —
+decisão explícita do usuário; ficam protegidas só por RLS). **Os botões
+ainda não funcionam de verdade** — dependem de Google/Apple serem
+habilitados no Supabase Auth, pendente de credenciais externas que o
+usuário está providenciando. Clicar neles hoje abre o navegador e mostra
+"provider not enabled" da própria Supabase — não quebra nada, login por
+e-mail/senha continua funcionando normalmente ao lado.
+
 ## 2026-08-17 — v4.88.4: fix OpenRouter usava roteador automático em vez de modelos fixos com fallback
 
 **Motivação**: e-mail do próprio OpenRouter alertando sobre o parâmetro
