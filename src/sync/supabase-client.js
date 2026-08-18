@@ -156,6 +156,32 @@ async function login(email, password) {
   return { ok: true, user: data.user, refresh_token: data.refresh_token };
 }
 
+// Login social (Google/Apple) via PKCE — troca o `code` devolvido pelo
+// navegador do sistema (ver openOAuthAndWaitForCode em main.js) por uma
+// sessão, do mesmo jeito que o supabase-js faz no navegador. Não existe
+// senha nesse fluxo (ver decisão do usuário: contas sociais no Desktop
+// não têm a camada extra de "chave de dados" embrulhada por senha — só
+// RLS protege, como para qualquer outra tabela).
+async function loginWithOAuthCode(authCode, codeVerifier) {
+  const data = await _auth('/token?grant_type=pkce', {
+    method: 'POST',
+    body: { auth_code: authCode, code_verifier: codeVerifier },
+  });
+  _session = data;
+  return { ok: true, user: data.user, refresh_token: data.refresh_token };
+}
+
+function authorizeUrl(provider, redirectTo, codeChallenge) {
+  const qs = new URLSearchParams({
+    provider,
+    redirect_to: redirectTo,
+    flow_type: 'pkce',
+    code_challenge: codeChallenge,
+    code_challenge_method: 's256',
+  });
+  return `${SUPABASE_URL}/auth/v1/authorize?${qs.toString()}`;
+}
+
 async function logout() {
   if (_session?.access_token) {
     await _auth('/logout', {
@@ -254,7 +280,7 @@ async function pruneNotIn(table, userId, column, currentValues) {
 }
 
 module.exports = {
-  login, logout, refreshSession, clearSession,
+  login, loginWithOAuthCode, authorizeUrl, logout, refreshSession, clearSession,
   getSession, getUserId, isLoggedIn,
   upsert, select, update, remove, pruneNotIn, removeOlderThan,
   setEgressLogPath, printEgressSummary,

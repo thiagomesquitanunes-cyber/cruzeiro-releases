@@ -19477,6 +19477,40 @@ async function syncDoLogin() {
   });
 }
 
+// Abre o navegador padrão do sistema pro login OAuth (Google/Apple) — ver
+// sync:login-oauth em main.js. A janela do app fica travada em "conectando"
+// até o usuário voltar do navegador (ou o timeout de 5min estourar lá).
+async function syncDoOAuth(provider) {
+  const errEl = G('sync-oauth-error');
+  const btnId = provider === 'google' ? 'sync-oauth-google-btn' : 'sync-oauth-apple-btn';
+  const btn   = G(btnId);
+  const otherBtn = G(provider === 'google' ? 'sync-oauth-apple-btn' : 'sync-oauth-google-btn');
+
+  if (errEl) errEl.textContent = '';
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+  if (otherBtn) otherBtn.disabled = true;
+  toast('🌐 Abrindo o navegador para conectar…');
+
+  const result = await ff.syncLoginOAuth(provider).catch(e => ({ ok: false, error: e.message }));
+
+  if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+  if (otherBtn) otherBtn.disabled = false;
+
+  if (!result.ok) {
+    if (errEl) errEl.textContent = '❌ ' + (result.error || 'Erro ao conectar');
+    return;
+  }
+
+  toast('✅ Conectado! Sincronizando dados…');
+  refreshSyncStatus();
+  ff.onSyncCompleted(r => {
+    const el = G('sync-last-result');
+    if (el) el.textContent = r.ok
+      ? `Último sync: ${new Date(r.at).toLocaleString('pt-BR')} ✅`
+      : `Erro no sync: ${r.error}`;
+  });
+}
+
 async function syncDoLogout() {
   await ff.syncLogout().catch(() => {});
   toast('Desconectado do app mobile');

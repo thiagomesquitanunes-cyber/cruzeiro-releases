@@ -253,6 +253,7 @@ const api = {
 
   // sync mobile (Supabase)
   syncLogin:      (email, password) => ipcRenderer.invoke('sync:login',   { email, password }),
+  syncLoginOAuth: (provider)        => ipcRenderer.invoke('sync:login-oauth', { provider }),
   syncLogout:     ()                => ipcRenderer.invoke('sync:logout'),
   syncStatus:     ()                => ipcRenderer.invoke('sync:status'),
   syncRunNow:     ()                => ipcRenderer.invoke('sync:run-now'),

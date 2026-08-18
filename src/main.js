@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, shell } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 const crypto = require('crypto');
@@ -30,6 +30,7 @@ if (!app.requestSingleInstanceLock()) {
 const sb          = require('./sync/supabase-client');
 const syncPush    = require('./sync/sync-push');
 const syncPull    = require('./sync/sync-pull');
+const oauthFlow   = require('./sync/oauth-flow');
 const cryptoUtils = require('./sync/crypto-utils');
 
 // Estado do sync (em memória)
@@ -8506,6 +8507,43 @@ ipcMain.handle('sync:login', async (_, { email, password }) => {
     runMobileSync('login').catch(() => {});
     return { ok: true, email: result.user.email };
   } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// ── IPC: Login social (Google/Apple) via PKCE ────────────────
+// Sem senha nesse fluxo — por decisão explícita, contas logadas via
+// Google/Apple no Desktop não têm a camada extra de "chave de dados"
+// embrulhada por senha (initEncryptionKey); dependem só das políticas de
+// RLS do Supabase, como o resto do sistema.
+ipcMain.handle('sync:login-oauth', async (_, { provider }) => {
+  let callbackServer;
+  try {
+    const { verifier, challenge } = oauthFlow.generatePKCE();
+    callbackServer = await oauthFlow.startCallbackServer();
+
+    const url = sb.authorizeUrl(provider, callbackServer.redirectTo, challenge);
+    shell.openExternal(url);
+
+    const code = await callbackServer.waitForCode();
+    const result = await sb.loginWithOAuthCode(code, verifier);
+
+    const s = loadSettings();
+    // Sem safeStorage.encryptString(password) aqui — não existe senha a
+    // guardar. A sessão é restaurada via refresh_token nas próximas
+    // aberturas do app, igual ao fluxo de e-mail/senha.
+    s.supabaseEmail        = result.user.email;
+    s.supabaseRefreshToken = result.refresh_token;
+    saveSettings(s);
+
+    if (s.termsAcceptedVersion) {
+      _recordTermsAcceptance(s.termsAcceptedVersion, s.termsAcceptedAt).catch(() => {});
+    }
+
+    runMobileSync('login').catch(() => {});
+    return { ok: true, email: result.user.email };
+  } catch (e) {
+    callbackServer?.close();
     return { ok: false, error: e.message };
   }
 });
