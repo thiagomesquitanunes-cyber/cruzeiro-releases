@@ -12,6 +12,50 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-18 — Login social (Google/Apple) concluído ponta a ponta (configuração no Supabase, sem mudança de código)
+
+Continuação da entrada abaixo ("login social no painel App Mobile") — na
+sessão anterior os botões existiam mas o Supabase Auth ainda não tinha
+Google/Apple habilitados de verdade. Concluído nesta sessão, só no lado
+Supabase (projeto `nfpjxmwrtwogctocqtxp`), nenhum arquivo de código
+mudou:
+
+- **Google**: projeto no Google Cloud Console criado, tela de
+  consentimento OAuth publicada em produção (não fica preso a
+  "Testando"), Client ID/Secret corretos gerados e salvos no provider
+  Google do Supabase (havia um valor errado vazado de outro projeto do
+  usuário — `escudeiro` — que foi substituído).
+- **Apple**: Services ID `com.nunesthiago.cruzeiro.web` configurado como
+  "Sign in with Apple" (dependeu de habilitar a capability no App ID
+  nativo `com.nunesthiago.cruzeiromobile` primeiro — isso invalida
+  provisioning profiles existentes, mas o EAS regenera automaticamente no
+  próximo build, sem afetar builds já enviados). Chave privada `.p8`
+  gerada (Key ID `6NCNC89Y3J`, Team ID `5LRFP45LW2`). O painel do Supabase
+  pede um único campo "Secret Key (for OAuth)" — não aceita Team
+  ID/Key ID/chave privada separados — então o JWT (ES256, `iss`=Team ID,
+  `sub`=Services ID, `aud`=https://appleid.apple.com, `kid`=Key ID,
+  validade 180 dias) foi gerado manualmente com um script Node
+  descartável usando só `crypto` nativo (`dsaEncoding: 'ieee-p1363'` pra
+  já sair no formato raw r||s que JWS exige, sem lib externa) e colado
+  nesse campo. **Esse secret expira em ~180 dias — precisa ser
+  regenerado** (Team ID, Key ID e a chave privada continuam os mesmos; só
+  reexecutar a assinatura do JWT com novo `iat`/`exp`) ou o login Apple
+  para de funcionar no web.
+
+Testado end-to-end no site em produção
+(`https://cruzeiroapp.com.br/entrar`): o botão "Continuar com a Apple"
+redireciona corretamente para `appleid.apple.com/auth/authorize` com
+`client_id=com.nunesthiago.cruzeiro.web` e `redirect_uri` apontando pro
+callback do Supabase — fluxo correto confirmado sem completar o login
+real (não é apropriado autorizar OAuth em nome do usuário sem cada ação
+confirmada por ele). Google já tinha sido validado do mesmo jeito.
+Desktop usa o mesmo backend Supabase — nenhuma mudança adicional
+necessária lá, app reiniciado e sobe sem erros.
+
+Pendente, fora do escopo desta tarefa: repetir esse trabalho no iOS
+(explicitamente adiado pelo usuário até a Apple aprovar a build atual em
+revisão) e Android.
+
 ## 2026-08-18 — v4.88.5: fix meta de aposentadoria (curto prazo) comparava renda real com nominal + login social (Google/Apple) no sync mobile
 
 **Bug relatado pelo usuário**: na aba Metas, o gauge "Curto prazo —
