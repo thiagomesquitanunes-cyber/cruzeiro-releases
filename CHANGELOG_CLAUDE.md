@@ -12,6 +12,25 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-25 — v4.88.6: fix card "Total Patrimônio" com fonte maior que os demais
+
+**Bug relatado pelo usuário**: na aba Patrimônio, os 5 cards de resumo
+(Bens e Direitos, Contas, Investimentos, Cartões e Dívidas, Total
+Patrimônio) deveriam ter o mesmo tamanho de fonte — mas o "Total
+Patrimônio" sempre aparecia maior que os outros, independente da largura
+da janela.
+
+**Causa** (`src/renderer.js`, função `renderPatCards`/atualização dos
+cards, ~linhas 22843-22847 e 23470-23473): os 4 primeiros cards usam a
+classe `.stat-val` sem overrides (16px, definido em `index.html`), mas o
+card do total tinha `style="font-size:22px"` fixo no HTML gerado — tanto
+na renderização inicial (placeholder) quanto na atualização com o valor
+real. Um resquício de destaque intencional que nunca foi alinhado ao
+resto do grid.
+
+**Fix**: removido o `style="font-size:22px"` das duas ocorrências —
+agora os 5 cards usam o mesmo `.stat-val` (16px), consistentes entre si.
+
 ## 2026-08-18 — Login social (Google/Apple) concluído ponta a ponta (configuração no Supabase, sem mudança de código)
 
 Continuação da entrada abaixo ("login social no painel App Mobile") — na

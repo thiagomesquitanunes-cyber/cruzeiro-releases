@@ -22844,7 +22844,7 @@ function refreshPatrimonioTable() {
     <div class="stat-card"><div class="stat-lbl">🏦 Contas</div><div class="stat-val green">${fmtBRL(totalAccounts)}</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card" id="pat-card-inv"><div class="stat-lbl">📈 Investimentos</div><div class="stat-val green">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
     <div class="stat-card" id="pat-card-debt"><div class="stat-lbl">💳 Cartões e Dívidas</div><div class="stat-val red">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>
-    <div class="stat-card" id="pat-card-total"><div class="stat-lbl">📊 Total Patrimônio</div><div class="stat-val accent" style="font-size:22px">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>`;
+    <div class="stat-card" id="pat-card-total"><div class="stat-lbl">📊 Total Patrimônio</div><div class="stat-val accent">…</div><div class="stat-sub">${fmtMonth(curM)}</div></div>`;
 
   // Shared month header
   const monthHeader = visMonths.map(m =>
@@ -23470,7 +23470,7 @@ function refreshPatrimonioTable() {
   if (G('pat-card-assets')) G('pat-card-assets').innerHTML = `<div class="stat-lbl">🏠 Bens e Direitos</div><div class="stat-val green">${fmtBRL(netAssets)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
   if (G('pat-card-inv'))   G('pat-card-inv').innerHTML   = `<div class="stat-lbl">📈 Investimentos</div><div class="stat-val green">${fmtBRL(totalInv)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
   if (G('pat-card-debt'))  G('pat-card-debt').innerHTML  = `<div class="stat-lbl">💳 Cartões e Dívidas</div><div class="stat-val red">${fmtBRL(-totalDebt)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
-  if (G('pat-card-total')) G('pat-card-total').innerHTML = `<div class="stat-lbl">📊 Total Patrimônio</div><div class="stat-val accent" style="font-size:22px">${fmtBRL(grandTotal)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
+  if (G('pat-card-total')) G('pat-card-total').innerHTML = `<div class="stat-lbl">📊 Total Patrimônio</div><div class="stat-val accent">${fmtBRL(grandTotal)}</div><div class="stat-sub">${fmtMonth(curM)}</div>`;
 
   // Store for use by overview
   window._patGrandTotal = { value: grandTotal, month: curM };
