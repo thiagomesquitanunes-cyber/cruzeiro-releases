@@ -12,6 +12,52 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-08-31 — v4.88.7: pedido de avaliação na Microsoft Store (in-app)
+
+**Motivação**: usuário pediu melhorias de crescimento (tráfego do site +
+conversão) depois de ver 41 instalações no app, taxa de conversão do
+site baixa (~7%) e a ficha da Microsoft Store sem nenhuma avaliação.
+Terceira frente pedida (as outras duas — instrumentação de funil no site
+e vídeos na Store — foram feitas/investigadas em `Cruzeiro Site`; vídeos
+acabaram bloqueados, ver nota abaixo): pedir avaliação dentro do próprio
+app Desktop.
+
+**Implementação** (`src/renderer.js`): reaproveitado o sistema de
+"Avisos" que já existia (`ANNOUNCEMENTS` + `checkAnnouncements()` +
+`settings.dismissedAnnouncements`, usado antes só pro aviso do beta
+Android) — adicionado um novo item `review-request-winstore-2026-08`
+com uma função `condition(s)` nova (o array antes não tinha condição
+nenhuma, todo aviso não-dispensado aparecia sempre): só mostra em
+Windows (`ff.platform === 'win32'`) e só depois de 10+ dias desde
+`s.firstRun` (o mesmo campo que já controla o período de trial em
+`main.js`, sem precisar de um campo novo de "data de instalação"). CTA
+"⭐ Avaliar na Microsoft Store" chama `reviewPromptRate()` (novo), que
+abre `ms-windows-store://review/?ProductId=9P0JHTVM816H` via
+`ff.openExternal` e já marca o aviso como dispensado (não teria sentido
+perguntar nova depois que a pessoa já foi avaliar). `dismissAnnouncement()`
+foi refatorado pra extrair `_markAnnouncementDismissed(id)`, reusado
+pelos dois fluxos.
+
+**Suporte necessário**:
+- `src/preload.js`: novo `platform: process.platform` exposto em `ff`
+  (a renderer roda com `contextIsolation:true`/`nodeIntegration:false`,
+  não tem acesso direto a `process`).
+- `src/main.js`: `settings:get` agora também retorna `firstRun` (antes
+  só existia no objeto de settings bruto usado internamente pelo
+  cálculo de trial, nunca tinha sido exposto pro renderer).
+- `src/main.js`: `app:open-external` tinha uma whitelist de regex só
+  pra `https?://` — ampliada pra também aceitar `ms-windows-store://`
+  (protocolo nativo que abre a página de avaliação do app na Store já
+  instalada, sem navegador). Continua rejeitando qualquer outro esquema.
+
+**Vídeos na Microsoft Store — bloqueado, não é código**: a ficha do
+Cruzeiro no Partner Center (verificado direto na UI de edição da
+listagem) só aceita `.png` na seção de mídia ("Accepted file types:
+.png", abas só "Desktop"/"Xbox", sem aba ou upload de trailer em lugar
+nenhum do fluxo) — não há como subir os vídeos do site (`Cruzeiro
+Site/public/videos/*.mp4`) pra essa ficha hoje. Nenhuma mudança de
+código associada a isso.
+
 ## 2026-08-25 — v4.88.6: fix card "Total Patrimônio" com fonte maior que os demais
 
 **Bug relatado pelo usuário**: na aba Patrimônio, os 5 cards de resumo

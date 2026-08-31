@@ -16059,6 +16059,14 @@ function closeWelcomeBanner() {
 // ids). Novos avisos entram nesta lista; nenhum código de exibição precisa
 // mudar. Só o PRIMEIRO aviso ainda não dispensado é mostrado por sessão —
 // evita empilhar vários modais na cara do usuário de uma vez.
+// review-request: só em Windows (a única loja com link de avaliação hoje)
+// e só depois de ~10 dias de uso — pedir na primeira abertura pega gente
+// que ainda não formou opinião sobre o app. Usa o mesmo `firstRun` que já
+// controla o período de trial (ver FREE_MONTHS em main.js), então não
+// precisa de um novo campo de "data de instalação".
+const REVIEW_REQUEST_MIN_DAYS = 10;
+const WINDOWS_STORE_REVIEW_URL = 'ms-windows-store://review/?ProductId=9P0JHTVM816H';
+
 const ANNOUNCEMENTS = [
   {
     id: 'android-beta-2026-08',
@@ -16077,13 +16085,32 @@ const ANNOUNCEMENTS = [
         </a>
       </div>`,
   },
+  {
+    id: 'review-request-winstore-2026-08',
+    condition: (s) => {
+      if (ff.platform !== 'win32' || !s.firstRun) return false;
+      const days = Math.floor((Date.now() - new Date(s.firstRun)) / 86400000);
+      return days >= REVIEW_REQUEST_MIN_DAYS;
+    },
+    title: '⭐ Curtindo o Cruzeiro?',
+    bodyHtml: `
+      <div style="padding:20px">
+        <p style="font-size:13px;color:var(--text2);line-height:1.6;margin:0 0 18px">
+          Se o Cruzeiro está te ajudando a organizar as finanças, uma avaliação rápida na Microsoft Store ajuda muito outras pessoas a encontrar o app — leva menos de um minuto.
+        </p>
+        <a href="#" onclick="reviewPromptRate('review-request-winstore-2026-08','${WINDOWS_STORE_REVIEW_URL}');return false;"
+          style="display:inline-block;background:var(--accent);color:#fff;border-radius:8px;padding:9px 16px;font-size:13px;font-weight:600;text-decoration:none">
+          ⭐ Avaliar na Microsoft Store
+        </a>
+      </div>`,
+  },
 ];
 
 async function checkAnnouncements(preloadedSettings) {
   try {
     const s = preloadedSettings || await ff.settingsGet();
     const dismissed = new Set(s.dismissedAnnouncements || []);
-    const next = ANNOUNCEMENTS.find(a => !dismissed.has(a.id));
+    const next = ANNOUNCEMENTS.find(a => !dismissed.has(a.id) && (!a.condition || a.condition(s)));
     if (next) showAnnouncementModal(next);
   } catch(e) {}
 }
@@ -16103,14 +16130,25 @@ function dismissAnnouncement(id) {
   const dontShow = G('announcement-dont-show')?.checked;
   closeInfoModal();
   if (!dontShow) return; // fecha sem marcar como visto — reaparece na próxima abertura
-  (async () => {
-    try {
-      const s = await ff.settingsGet();
-      const dismissed = new Set(s.dismissedAnnouncements || []);
-      dismissed.add(id);
-      await ff.settingsSave({ ...s, dismissedAnnouncements: [...dismissed] });
-    } catch(e) {}
-  })();
+  _markAnnouncementDismissed(id);
+}
+
+async function _markAnnouncementDismissed(id) {
+  try {
+    const s = await ff.settingsGet();
+    const dismissed = new Set(s.dismissedAnnouncements || []);
+    dismissed.add(id);
+    await ff.settingsSave({ ...s, dismissedAnnouncements: [...dismissed] });
+  } catch(e) {}
+}
+
+// CTA de "Avaliar agora" dentro de um anúncio: abre o link externo e já
+// marca como dispensado — se a pessoa clicou pra avaliar, não faz sentido
+// perguntar de novo depois.
+function reviewPromptRate(id, url) {
+  ff.openExternal(url);
+  closeInfoModal();
+  _markAnnouncementDismissed(id);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

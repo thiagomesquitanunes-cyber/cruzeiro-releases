@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const api = {
+  platform: process.platform,
   // accounts
   listAccounts:   ()      => ipcRenderer.invoke('accounts:list'),
   createAccount:  (data)  => ipcRenderer.invoke('accounts:create', data),

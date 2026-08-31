@@ -6857,6 +6857,7 @@ ipcMain.handle('settings:get', () => {
     recoveryEmailMasked: s.recoveryEmail ? s.recoveryEmail.replace(/(.{2}).*(@.*)/, '$1***$2') : null,
     termsAcceptedVersion: s.termsAcceptedVersion || null,
     dismissedAnnouncements: Array.isArray(s.dismissedAnnouncements) ? s.dismissedAnnouncements : [],
+    firstRun: s.firstRun || null,
   };
 });
 
@@ -7192,9 +7193,12 @@ ipcMain.handle('import:clear-pending', () => {
   } catch(e) { return { ok: false }; }
 });
 
+// Whitelist de esquemas: http(s) para links normais, e o protocolo nativo
+// da Microsoft Store (usado pelo pedido de avaliação — abre a página de
+// avaliação do app na Store instalada, sem precisar de navegador).
 ipcMain.handle('app:open-external', (_, url) => {
   try {
-    if (typeof url === 'string' && /^https?:\/\//.test(url)) {
+    if (typeof url === 'string' && /^(https?:\/\/|ms-windows-store:\/\/)/.test(url)) {
       require('electron').shell.openExternal(url);
       return { ok: true };
     }
