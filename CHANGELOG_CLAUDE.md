@@ -12,6 +12,51 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-03 — v4.88.8: fatura Itaú em XLSX (novo formato)
+
+**Motivação**: usuário forneceu um arquivo real de fatura fechada do Itaú
+em `.xlsx` (`fatura-fechada-final 3940-setembro2026.xlsx`) — formato mais
+novo, exportado do app/site do banco. O importador de fatura Itaú
+(`itau_card`) só aceitava CSV ou PDF até então.
+
+**Formato da planilha**: uma única aba (`Fatura NN-AA`) com DUAS
+mini-tabelas — um resumo do cartão no topo (colunas "Cartão"/"Valor"/
+"Vencimento") e, mais abaixo, a tabela real de "Lançamentos" (colunas
+"Data"/"Lançamento"/"Parcelamento"/"Valor"/"Titularidade"/"Nome"/"Tipo do
+cartão"/"Número do cartão") — cada uma com "Valor" em posições diferentes
+da planilha, então a busca de cabeçalho exige "Data"+"Lançamento"+"Valor"
+juntos na mesma linha. Valores vêm como texto `"R$ -500.00"`/`"R$ 50.00"`
+(ponto decimal, não vírgula) — `pVal()` já lida com isso (só remove o
+prefixo "R$" e cai no `parseFloat` direto quando não há vírgula).
+
+**Implementação** (`src/renderer.js`):
+- `parseItauFaturaCsvOrPdf()`: detecção por magic bytes ampliada — além de
+  `%PDF`, agora reconhece `PK` (assinatura ZIP de `.xlsx`) e despacha pra
+  `parseItauFaturaXLSX()` (nova). CSV continua sendo o fallback (nem PDF
+  nem ZIP).
+- `parseItauFaturaXLSX()` (nova): lê a aba com `XLSX.sheet_to_json(header:1)`
+  (lib já carregada globalmente no renderer), acha a tabela de
+  "Lançamentos" pelo cabeçalho (não pela posição), aplica a MESMA lista de
+  `SKIP_NORMS` do parser CSV (`parseBankItauCard`) — em especial
+  `'pagamento efetuado'`, que não vira lançamento (já é registrado como
+  transferência/lançamento separado na conta corrente) — e a MESMA
+  convenção de sinal (positivo no arquivo = despesa → invertido pra
+  negativo). Quando a coluna "Parcelamento" vem preenchida, anexa ao
+  `desc` entre parênteses.
+- `BUILTIN_BANKS`: `itau_card.fileType` atualizado de `'CSV/PDF'` pra
+  `'CSV/PDF/XLSX'`.
+
+**Teste**: rodei o parser (lógica idêntica, fora do Electron) contra o
+arquivo real do usuário — 9 lançamentos extraídos, soma batendo
+exatamente com o "Valor" do resumo do cartão (R$ 823,08) após excluir o
+"Pagamento Efetuado" da fatura anterior, igual ao comportamento já
+validado do parser CSV/PDF.
+
+**Arquivos**: `src/renderer.js` (`parseItauFaturaCsvOrPdf`,
+`parseItauFaturaXLSX` nova, `BUILTIN_BANKS`).
+
+---
+
 ## 2026-08-31 — v4.88.7: pedido de avaliação na Microsoft Store (in-app)
 
 **Motivação**: usuário pediu melhorias de crescimento (tráfego do site +
