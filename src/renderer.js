@@ -20279,6 +20279,92 @@ async function exportReportPDF() {
   else if (!result?.canceled) toast('❌ Erro ao exportar PDF: ' + (result?.error || ''));
 }
 
+// ══ EXTRATO DA CONTA EM PDF ══
+function openAccountPdfModal() {
+  if (!currentAccountId) return;
+  // Padrão: mês atual até hoje — ajustável pelo usuário antes de gerar.
+  const now = new Date();
+  G('acct-pdf-from').value = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10);
+  G('acct-pdf-to').value = todayStr();
+  openModal('modal-account-pdf');
+}
+
+async function generateAccountPdf() {
+  if (!currentAccountId) return;
+  const acc = accounts.find(a => a.id === currentAccountId);
+  if (!acc) return;
+  const from = G('acct-pdf-from').value || null;
+  const to   = G('acct-pdf-to').value || null;
+  if (from && to && from > to) { toast('A data inicial precisa ser antes da data final.'); return; }
+
+  const btn = G('btn-gen-account-pdf');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Gerando…'; }
+  try {
+    // Busca todo o histórico (sem fromDate no IPC, que teria a regra
+    // especial de "sempre incluir até +90 dias futuros") e filtra pelo
+    // período escolhido no cliente — mais simples que criar uma variante
+    // nova do endpoint só pra isso.
+    const all = await ff.listTx({ accountId: currentAccountId, sortBy: 'date', order: 'asc' });
+    const txs = all.filter(t => (!from || t.date >= from) && (!to || t.date <= to));
+    if (!txs.length) { toast('Nenhum lançamento no período selecionado.'); return; }
+
+    const startingBalance = await ff.getBalanceBefore({ accountId: currentAccountId, beforeDate: from || '1900-01-01' });
+
+    let running = startingBalance, totalIn = 0, totalOut = 0;
+    const rows = txs.map(t => {
+      running += t.amount;
+      if (t.amount >= 0) totalIn += t.amount; else totalOut += t.amount;
+      return `<tr>
+        <td>${fmtDate(t.date)}</td>
+        <td>${esc(t.memo || '')}</td>
+        <td>${esc(t.category || '')}</td>
+        <td class="right ${t.amount>=0?'green':'red'}">${fmtBRL(t.amount)}</td>
+        <td class="right">${fmtBRL(running)}</td>
+      </tr>`;
+    }).join('');
+
+    const periodLabel = (from || to) ? `${from ? fmtDate(from) : 'Início'} até ${to ? fmtDate(to) : 'hoje'}` : 'Período completo';
+
+    const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8">
+    <title>Cruzeiro — Extrato</title>
+    <style>
+      body{font-family:'Segoe UI',Arial,sans-serif;font-size:12px;color:#1a2332;margin:28px 36px}
+      h1{font-size:16px;text-align:center;text-decoration:underline;margin-bottom:4px}
+      .sub{text-align:center;font-size:12px;color:#666;margin-bottom:18px}
+      table{width:100%;border-collapse:collapse}
+      th{font-size:10px;color:#666;text-transform:uppercase;padding:6px 10px;border-bottom:1px solid #ccc;text-align:left}
+      td{padding:5px 10px;border-bottom:1px solid #eee}
+      .right{text-align:right}
+      .green{color:#16a34a}.red{color:#dc2626}
+      .opening td{font-style:italic;color:#666}
+      .summary{margin-top:18px;display:flex;justify-content:flex-end;gap:28px;font-size:12px;text-align:right}
+      .summary strong{display:block;font-size:14px;margin-top:2px}
+    </style></head><body>
+    <h1>Extrato — ${esc(acc.name)}</h1>
+    <div class="sub">${periodLabel}</div>
+    <table>
+      <thead><tr><th>Data</th><th>Descrição</th><th>Categoria</th><th class="right">Valor</th><th class="right">Saldo</th></tr></thead>
+      <tbody>
+        <tr class="opening"><td colspan="4">Saldo inicial</td><td class="right">${fmtBRL(startingBalance)}</td></tr>
+        ${rows}
+      </tbody>
+    </table>
+    <div class="summary">
+      <div>Entradas<strong class="green">${fmtBRL(totalIn)}</strong></div>
+      <div>Saídas<strong class="red">${fmtBRL(Math.abs(totalOut))}</strong></div>
+      <div>Saldo final<strong>${fmtBRL(running)}</strong></div>
+    </div>
+    </body></html>`;
+
+    const suggestedName = `extrato_${acc.name.replace(/[^\w\-]+/g,'_')}_${from||'inicio'}_a_${to||'hoje'}.pdf`;
+    const result = await ff.reportExportPdf({ html, suggestedName }).catch(e => ({ ok:false, error: e.message }));
+    if (result?.ok) { toast('✅ PDF salvo'); closeModal('modal-account-pdf'); }
+    else if (!result?.canceled) toast('❌ Erro ao exportar PDF: ' + (result?.error || ''));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Gerar PDF'; }
+  }
+}
+
 // ══ EVOLUÇÃO ══
 let _ev = {
   ipca: {},

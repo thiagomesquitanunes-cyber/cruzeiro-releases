@@ -12,6 +12,48 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-03 (2) — v4.88.9: exportar extrato da conta em PDF
+
+**Motivação**: usuário pediu um botão na tela da conta pra gerar um PDF
+do extrato, com um formulário pra escolher o período que entra no PDF.
+
+**Implementação**:
+- `src/index.html`: novo botão "📄 PDF" na barra de ferramentas da conta
+  (`#page-account`, ao lado de "⇄ Transferência"), chamando
+  `openAccountPdfModal()`. Novo modal `#modal-account-pdf` (mesmo padrão
+  visual dos outros modais pequenos do app — `.overlay`/`.modal`/
+  `.modal-hdr`/`.modal-body`/`.modal-footer`) com dois campos de data
+  (`#acct-pdf-from`/`#acct-pdf-to`) — vazios os dois = todo o histórico.
+- `src/renderer.js`:
+  - `openAccountPdfModal()`: abre o modal com padrão "mês atual até
+    hoje" (ajustável).
+  - `generateAccountPdf()` (nova): busca todo o histórico de lançamentos
+    da conta via `ff.listTx` (sem `fromDate` — esse parâmetro no IPC tem
+    a regra especial de sempre incluir até +90 dias futuros, que não é o
+    que se quer aqui) e filtra pelo período escolhido no cliente. Saldo
+    inicial via `ff.getBalanceBefore({accountId, beforeDate: from})`,
+    saldo corrente calculado linha a linha. Monta um HTML autocontido
+    (tabela Data/Descrição/Categoria/Valor/Saldo + resumo de
+    entradas/saídas/saldo final) e reaproveita o mesmo pipeline de
+    exportação já existente (`ff.reportExportPdf` → `report:export-pdf`
+    no main.js, que já sabia renderizar HTML pra PDF via BrowserWindow
+    offscreen + `printToPDF` — usado até então só pelos Relatórios/IRPF).
+    Cores usam hex fixo (`#16a34a`/`#dc2626`), não `var(--green)`/
+    `var(--red)`, porque o HTML final é carregado standalone numa janela
+    sem as variáveis CSS do `:root` do app.
+  - Nenhuma mudança no `main.js` — o handler `report:export-pdf` já era
+    genérico o bastante pra qualquer HTML.
+
+**Teste**: `node --check` no `renderer.js` (sintaxe válida) e boot limpo
+do app sem erros no log. Não consegui clicar o botão/modal/gerar o PDF
+de fato — não tenho automação de UI pra janelas Electron nativas (só
+pra navegador). Pedir pro usuário confirmar visualmente na primeira vez
+que usar.
+
+**Arquivos**: `src/index.html`, `src/renderer.js`.
+
+---
+
 ## 2026-09-03 — v4.88.8: fatura Itaú em XLSX (novo formato)
 
 **Motivação**: usuário forneceu um arquivo real de fatura fechada do Itaú

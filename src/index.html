@@ -1258,6 +1258,7 @@ select.inp option{background:var(--bg2);}
           <button class="btn sm" onclick="openAiEntry()" title="Lançar por linguagem natural" style="background:linear-gradient(135deg,#7c3aed,#a855f7);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(124,58,237,.3)">✨ Lançar com IA</button>
     <button class="btn sm" onclick="openTxModal()" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3)">+ Lançamento</button>
     <button class="btn sm" onclick="openTransferModal(currentAccountId)" style="background:linear-gradient(135deg,#1d4ed8,#3b82f6);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(59,130,246,.3)">⇄ Transferência</button>
+    <button class="btn sm" onclick="openAccountPdfModal()" title="Exportar extrato desta conta em PDF" style="background:linear-gradient(135deg,#455a64,#607d8b);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(69,90,100,.3)">📄 PDF</button>
         </div>
       </div>
       <!-- Table view -->
@@ -2193,6 +2194,30 @@ select.inp option{background:var(--bg2);}
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('modal-budget')">Cancelar</button>
         <button onclick="saveBudget()" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:7px 14px;cursor:pointer;font-size:14px">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="modal-account-pdf" style="z-index:8000">
+    <div class="modal" style="max-width:420px;width:96%" onkeydown="if(event.key==='Enter'&&event.target.tagName!=='BUTTON'){event.preventDefault();generateAccountPdf();}">
+      <div class="modal-hdr">
+        <h3>📄 Exportar extrato em PDF</h3>
+        <button class="btn-icon" onclick="closeModal('modal-account-pdf')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label class="lbl">De</label>
+          <input class="inp" id="acct-pdf-from" type="date">
+        </div>
+        <div class="field">
+          <label class="lbl">Até</label>
+          <input class="inp" id="acct-pdf-to" type="date">
+        </div>
+        <div style="font-size:11px;color:var(--text3);margin-top:-4px">Deixe os dois campos em branco para incluir todo o histórico da conta.</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-account-pdf')">Cancelar</button>
+        <button onclick="generateAccountPdf()" id="btn-gen-account-pdf" style="background:linear-gradient(135deg,#2e7d32,#43a047);color:#fff;border:none;border-radius:10px;font-weight:700;box-shadow:0 2px 6px rgba(56,142,60,.3);padding:7px 14px;cursor:pointer;font-size:14px">Gerar PDF</button>
       </div>
     </div>
   </div>
