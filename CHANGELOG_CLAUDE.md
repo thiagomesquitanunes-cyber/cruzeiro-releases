@@ -12,6 +12,56 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-04 — v4.88.10: fix crítico — "Restaurar backup" não fazia nada
+
+**Relato do usuário**: "Tentei restaurar um backup no cruzeiro desktop e
+não restaurou. Aparece o botão para confirmar, mas depois nada
+acontece. Só restaurou substituindo o arquivo [manualmente]."
+
+**Causa raiz**: o botão "⬆ Restaurar" de cada backup (`renderer.js`,
+lista em Configurações) embutia o caminho do arquivo (`b.path`, um
+caminho Windows com `\`) dentro do atributo `onclick="restoreBackup('...')"`
+usando `esc()` — a função de escape de HTML (`&`,`<`,`>`,`"`,`'`), que
+NÃO escapa barra invertida. Como esse atributo é reinterpretado como
+código JS pelo navegador (Chromium/Electron), cada `\X` do caminho virava
+uma sequência de escape JS: a maioria das barras somem silenciosamente
+(`\U`, `\A`, `\R`, `\c`… não são escapes reconhecidos, então só a barra
+cai fora) e um `\t` literalmente virava um caractere de TAB de verdade.
+O caminho reconstruído (`C:Userstmnunes<TAB>AppDataRoaming...`) não batia
+com nenhum arquivo real. Reproduzi isso isoladamente com um script Node
+simulando o parsing do navegador — confirma exatamente esse resultado.
+
+Como o handler `backup:restore` no `main.js` não tinha `try/catch` em
+volta do `fs.readFileSync`/restore, essa falha (arquivo não encontrado)
+rejeitava a Promise do IPC sem nenhum tratamento — e como
+`restoreBackup()` no renderer também não tinha `try/catch`, a rejeição
+ficava silenciosa: o diálogo nativo de confirmação aparecia normalmente
+(por isso "aparece o botão"), mas depois de confirmar, nada visível
+acontecia. O app já tem uma função pronta pra esse exato cenário —
+`esc2()` (escapa `\` e `'` pra uso dentro de literais de string JS em
+atributos `onclick`) — usada em vários outros lugares do código
+(categorias, bancos, etc.), só não tinha sido usada aqui.
+
+**Fix**:
+- `src/renderer.js`: botão trocado pra `esc2(b.path)` (era `esc(b.path)`).
+  `restoreBackup()` ganhou `try/catch` com toast de erro visível em vez
+  de falhar em silêncio; removido o `.replace(/&#39;/g,"'")` que só fazia
+  sentido com o escaping antigo (HTML), não com `esc2`.
+- `src/main.js`: handler `backup:restore` — `doBackup()`/leitura do
+  arquivo/`save()` agora dentro de `try/catch`, retornando
+  `{ok:false, error}` em vez de deixar a exceção estourar sem tratamento.
+
+**Teste**: reproduzi a corrupção do caminho isoladamente (script Node
+fora do app, simulando o parsing de `onclick` pelo navegador) —
+confirma que `esc()` corrompe o caminho e `esc2()` preserva
+corretamente. `node --check` nos dois arquivos e boot limpo do app sem
+erros relacionados.
+
+**Arquivos**: `src/renderer.js` (botão de restaurar, `restoreBackup()`),
+`src/main.js` (handler `backup:restore`).
+
+---
+
 ## 2026-09-03 (2) — v4.88.9: exportar extrato da conta em PDF
 
 **Motivação**: usuário pediu um botão na tela da conta pra gerar um PDF

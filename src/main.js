@@ -2277,11 +2277,15 @@ ipcMain.handle('backup:restore', async (_, backupPath) => {
     message: 'Isso substituirá TODOS os dados atuais pelo backup selecionado. Continuar?'
   });
   if (res.response !== 0) return { ok: false };
-  doBackup(); // backup current before restore
-  const buf = fs.readFileSync(backupPath);
-  db = new SQL.Database(buf);
-  save();
-  return { ok: true };
+  try {
+    doBackup(); // backup current before restore
+    const buf = fs.readFileSync(backupPath);
+    db = new SQL.Database(buf);
+    save();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
 ipcMain.handle('backup:open-folder', () => {
   const bdir = getBackupDir();

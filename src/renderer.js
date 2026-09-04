@@ -19784,7 +19784,7 @@ async function refreshBackup() {
       <td style="font-size:13px;font-family:'DM Mono',monospace">${esc(label)}</td>
       <td class="right" style="font-size:12px;color:var(--text3)">${size}</td>
       <td class="center">
-        <button class="btn xs danger" onclick="restoreBackup('${esc(b.path)}')">⬆ Restaurar</button>
+        <button class="btn xs danger" onclick="restoreBackup('${esc2(b.path)}')">⬆ Restaurar</button>
       </td>
     </tr>`;
   }).join('');
@@ -19875,10 +19875,17 @@ async function doManualBackup() {
 }
 
 async function restoreBackup(backupPath) {
-  const result = await ff.backupRestore(backupPath.replace(/&#39;/g,"'"));
-  if (!result.ok) return;
-  toast('✅ Backup restaurado! Recarregando…');
-  setTimeout(() => location.reload(), 1500);
+  try {
+    const result = await ff.backupRestore(backupPath);
+    if (!result.ok) {
+      if (result.error) toast('❌ Erro ao restaurar backup: ' + result.error);
+      return; // usuário cancelou o diálogo de confirmação — nada a fazer
+    }
+    toast('✅ Backup restaurado! Recarregando…');
+    setTimeout(() => location.reload(), 1500);
+  } catch(e) {
+    toast('❌ Erro ao restaurar backup: ' + e.message);
+  }
 }
 
 async function openBackupFolder() {
