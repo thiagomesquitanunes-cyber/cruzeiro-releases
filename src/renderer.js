@@ -21689,6 +21689,235 @@ function patLegendHtml(datasets) {
   ).join('');
 }
 
+// Calcula TWR (Modified Dietz) mês a mês de UM ativo — cópia top-level de
+// buildAssetTWR (a original segue existindo, sem mudanças, aninhada dentro
+// de refreshPatrimonioChart(), que a usa só pro gráfico geral). Esta versão
+// é usada por refreshPatrimonioTable()/buildCatSubtotalRow() pras linhas de
+// "Rentabilidade (méd.móv.12m) vs. benchmarks" da TABELA — inclusive
+// por categoria, o que a versão do gráfico não precisa fazer. Duplicada de
+// propósito em vez de compartilhada: evita qualquer risco de regressão no
+// gráfico já em produção só pra "economizar" ~130 linhas idênticas. `curM`
+// vem como parâmetro (a original fecha sobre a variável local do closure).
+function buildAssetTWR(assetId, curM) {
+  const valByM = {};
+  _inv.txAll.filter(t => t.asset_id === assetId && t.tx_type === 'atualizacao')
+    .forEach(t => {
+      const m = t.month.slice(0,7);
+      // Include zeroed valuations (e.g. 'Zeragem na venda') — value=0 is a valid endpoint
+      valByM[m] = t.total_value;
+    });
+
+  // Separate inflows (compra/aporte) from outflows (venda/amortizacao)
+  // This is critical for Modified Dietz: outflows must be ADDED to ending value,
+  // not subtracted. Combining them into cashIn was the source of the bug.
+  const inflowByM  = {}; // money invested (compra/aporte) — positive
+  const outflowByM = {}; // proceeds received (venda/amortizacao) — positive
+  _inv.txAll.filter(t => t.asset_id === assetId
+      && (t.tx_type in INV_TX_EXTERNAL)
+      && t.notes !== '__auto_purchase__')
+    .forEach(t => {
+      const m = t.month.slice(0,7);
+      if (t.tx_type === 'compra' || t.tx_type === 'aporte') {
+        inflowByM[m]  = (inflowByM[m]  || 0) + t.total_value;
+      } else { // venda, amortizacao
+        outflowByM[m] = (outflowByM[m] || 0) + t.total_value;
+      }
+    });
+
+  // Income flows — dividendo, juros, jcp, cupom, taxa
+  const incomeByM = {};
+  _inv.txAll.filter(t => t.asset_id === assetId && (t.tx_type in INV_TX_INCOME))
+    .forEach(t => {
+      const m = t.month.slice(0,7);
+      const sign = INV_TX_INCOME[t.tx_type]?.sign ?? 1;
+      incomeByM[m] = (incomeByM[m] || 0) + sign * t.total_value;
+    });
+
+  // Modified Dietz sub-period return.
+  // For gaps (no intermediate atualizacao), interpolate values using compound growth
+  // between the two known endpoints. This handles illiquid/closed-end funds that only
+  // have a purchase price and a final sale/mark — e.g. private equity, closed funds.
+  const factors = {};
+  const valuesByMonth = {};
+  const valMonths = Object.keys(valByM).sort();
+
+  // Helper: expand a segment [prevM → curM] with intermediate interpolated values
+  // accounting for any inflows/outflows in the intermediate months
+  function expandSegment(prevM, curM2, vPrevKnown, vCurKnown) {
+    // Collect all months in this segment
+    const segMonths = [];
+    let m = prevM;
+    while (m <= curM2) {
+      segMonths.push(m);
+      const [y, mo] = m.split('-').map(Number);
+      m = mo === 12 ? `${y+1}-01` : `${y}-${String(mo+1).padStart(2,'0')}`;
+    }
+    if (segMonths.length < 2) return;
+
+    const n = segMonths.length - 1; // number of sub-periods
+    // Compound monthly growth rate assuming no flows in between
+    // Adjusted: if there are inflows/outflows in intermediate months, apply them
+    // but approximate by distributing the residual growth equally
+    const totalInflow  = segMonths.slice(1).reduce((s, m) => s + (inflowByM[m]  || 0), 0);
+    const totalOutflow = segMonths.slice(1).reduce((s, m) => s + (outflowByM[m] || 0), 0);
+    const totalIncome  = segMonths.slice(1).reduce((s, m) => s + (incomeByM[m]  || 0), 0);
+
+    // Net return over the segment (Modified Dietz de ponto médio no nível
+    // do segmento): fluxos assumidos na metade do período agregado.
+    const adjEnd = vCurKnown + totalOutflow + totalIncome - totalInflow;
+    const segDenom = vPrevKnown + 0.5 * totalInflow - 0.5 * totalOutflow;
+    const segReturn = segDenom > 0 ? adjEnd / vPrevKnown - 1 : 0;
+
+    // Monthly compound rate for the segment (guard against base <= 0 → NaN)
+    const monthlyRate = (n > 0 && (1 + segReturn) > 0) ? Math.pow(1 + segReturn, 1/n) - 1 : 0;
+
+    // Generate interpolated values and compute per-month factors
+    let runVal = vPrevKnown;
+    for (let i = 1; i <= n; i++) {
+      const mCur  = segMonths[i];
+      const mPrev = segMonths[i-1];
+      // Interpolated value (compound growth, adjusted for any flows this month)
+      const inflow  = inflowByM[mCur]  ?? 0;
+      const outflow = outflowByM[mCur] ?? 0;
+      const income  = incomeByM[mCur]  ?? 0;
+      // If this is the final known month, use the actual value
+      const vCur = (mCur === curM2) ? vCurKnown : runVal * (1 + monthlyRate) + inflow - outflow;
+      // Modified Dietz padrão com convenção de ponto médio (w=0,5):
+      // sem a data exata do fluxo dentro do mês, assume-se que aportes e
+      // resgates ocorrem na metade do período — capital médio investido.
+      const denom = runVal + 0.5 * inflow - 0.5 * outflow;
+      if (denom > 0) {
+        const r = (vCur + outflow + income - runVal - inflow) / denom;
+        if (isFinite(r) && Math.abs(r) < 5) {
+          factors[mCur] = r;
+          // Valor do ativo entrando nesse sub-período — usado para ponderar
+          // a média da carteira (sem isso, ativos com histórico esparso de
+          // atualização ficariam com peso quase nulo em todo mês interpolado).
+          valuesByMonth[mCur] = denom;
+        }
+      }
+      runVal = vCur;
+    }
+  }
+
+  for (let i = 1; i < valMonths.length; i++) {
+    const m    = valMonths[i];
+    const prev = valMonths[i-1];
+    const [py, pmo] = prev.split('-').map(Number);
+    const expNext = pmo === 12 ? `${py+1}-01` : `${py}-${String(pmo+1).padStart(2,'0')}`;
+
+    if (m === expNext) {
+      // Consecutive months — Modified Dietz padrão, ponto médio (w=0,5)
+      const vPrev   = valByM[prev];
+      const vCur    = valByM[m];
+      const inflow  = inflowByM[m]  ?? 0;
+      const outflow = outflowByM[m] ?? 0;
+      const income  = incomeByM[m]  ?? 0;
+      const denom   = vPrev + 0.5 * inflow - 0.5 * outflow;
+      if (denom > 0) {
+        const r = (vCur + outflow + income - vPrev - inflow) / denom;
+        if (isFinite(r) && Math.abs(r) < 5) {
+          factors[m] = r;
+          valuesByMonth[m] = denom;
+        }
+      }
+    } else {
+      // Gap — interpolate compound growth across the missing months
+      // Only interpolate if both endpoints have positive values
+      const vPrev = valByM[prev];
+      const vCur  = valByM[m];
+      if (vPrev > 0 && (vCur > 0 || outflowByM[m])) {
+        expandSegment(prev, m, vPrev, vCur);
+      }
+    }
+  }
+  return { factors, valuesByMonth };
+}
+
+// Agrega os fatores mensais (TWR) de uma lista de ativos numa única série
+// ponderada { mês -> retorno médio ponderado } — mesma lógica de agregação
+// já usada pelo gráfico "Investimentos vs benchmarks" (peso = valor do
+// ativo entrando no sub-período; ativo de caixa sempre excluído, já que
+// não tem "rentabilidade" no sentido de TWR). Usada tanto pro total geral
+// quanto por categoria nas linhas de comparação com benchmarks da tabela.
+function buildAggregateTWRFactors(assets, curM) {
+  const allFactors = {};
+  assets.forEach(a => {
+    if (_isCashAsset(a)) return;
+    const { factors, valuesByMonth } = buildAssetTWR(a.id, curM);
+    Object.entries(factors).forEach(([m, r]) => {
+      let weight = valuesByMonth[m];
+      if (!(weight > 0)) {
+        const prevM = (() => {
+          const [y, mo] = m.split('-').map(Number);
+          return mo === 1 ? `${y-1}-12` : `${y}-${String(mo-1).padStart(2,'0')}`;
+        })();
+        const aVal = _inv.txAll.filter(t => t.asset_id === a.id && t.tx_type === 'atualizacao'
+          && t.month.slice(0,7) === prevM).reduce((s,t) => s + t.total_value, 0);
+        weight = aVal > 0 ? aVal : 1;
+      }
+      if (!allFactors[m]) allFactors[m] = { sumRW: 0, sumW: 0 };
+      allFactors[m].sumRW += r * weight;
+      allFactors[m].sumW  += weight;
+    });
+  });
+  const wAvgByMonth = {};
+  Object.entries(allFactors).forEach(([m, d]) => { wAvgByMonth[m] = d.sumW > 0 ? d.sumRW / d.sumW : 0; });
+  return wAvgByMonth;
+}
+
+// IPCA+4% a.a. real, composto: (1+IPCA do mês) × (1+4%a.a. convertido pro
+// mês) − 1 — mesma convenção de "IPCA+X%" usada em metas de previdência/
+// atuarial no Brasil (não é IPCA + 4%/12 somado direto).
+const IPCA_PLUS4_MONTHLY_PREMIUM = Math.pow(1.04, 1/12) - 1;
+function ipcaPlus4Monthly(ipcaMonthlyMap, m) {
+  const ipcaM = ipcaMonthlyMap[m];
+  if (ipcaM == null) return null;
+  return (1 + ipcaM) * (1 + IPCA_PLUS4_MONTHLY_PREMIUM) - 1;
+}
+
+// Linhas "Rentabilidade (méd.móv.12m) vs. benchmarks" — 5 linhas (ativos,
+// IPCA, CDI, Ibovespa, IPCA+4%), cada uma com a média móvel de 12 meses do
+// retorno MENSAL daquela série, mês a mês — mesmo conceito de "méd.móv.12m"
+// já usado na aba Evolução (movAvg12), só que aplicado a uma série de TAXAS
+// (retorno %) em vez de uma série de valores (R$). Usada tanto no subtotal
+// de cada categoria de investimento quanto no total geral — `assets` já
+// vem filtrado pra categoria (ou `_inv.assets` inteiro, pro total geral).
+// `allMonths` precisa ser o HISTÓRICO COMPLETO (não só a janela visível):
+// a média móvel do primeiro mês exibido depende de até 11 meses ANTES dele.
+function buildBenchmarkCompareRows(assets, allMonths, visMonths2, curM, STICKY2, bg) {
+  const wAvg = buildAggregateTWRFactors(assets, curM);
+  const monthIndex = {};
+  allMonths.forEach((m, i) => { monthIndex[m] = i; });
+
+  const series = [
+    { icon: '🎯', label: 'Rentabilidade dos ativos', arr: allMonths.map(m => wAvg[m] ?? 0) },
+    { icon: '📐', label: 'IPCA',                     arr: allMonths.map(m => _pat.ipcaMonthly[m] ?? 0) },
+    { icon: '📐', label: 'CDI',                      arr: allMonths.map(m => _benchmarks.cdi[m] ?? 0) },
+    { icon: '📐', label: 'Ibovespa',                 arr: allMonths.map(m => _benchmarks.ibov[m] ?? 0) },
+    { icon: '📐', label: 'IPCA+4% a.a.',             arr: allMonths.map(m => ipcaPlus4Monthly(_pat.ipcaMonthly, m) ?? 0) },
+  ];
+
+  const projEmpty = `<td style="min-width:0;max-width:0;padding:0;border:none;overflow:hidden"></td>`;
+  const editEmpty = `<td style="${STICKY2};right:0;min-width:60px;background:${bg}"></td>`;
+
+  return series.map(({ icon, label, arr }) => {
+    const cells = visMonths2.map(m => {
+      const i = monthIndex[m];
+      const v = movAvg12(arr, i);
+      const isCur = m === curM;
+      const cellBg = isCur ? 'var(--accent-lt)' : bg;
+      if (!v) return `<td class="right" style="font-size:10px;padding:3px 8px;background:${cellBg};color:var(--text3)">—</td>`;
+      const cls = v >= 0 ? 'amt-inc' : 'amt-exp';
+      return `<td class="${cls} right" style="font-size:10px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace">${(v*100).toFixed(2)}%</td>`;
+    }).join('');
+    return `<tr style="background:${bg}">
+      <td style="${STICKY2};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${bg}" colspan="4">${icon} ${esc(label)} (méd.móv.12m)</td>
+      ${cells}${projEmpty}${editEmpty}
+    </tr>`;
+  }).join('');
+}
+
 function refreshPatrimonioChart() {
   if (typeof Chart === 'undefined') return;
   patDestroyCharts();
@@ -23761,6 +23990,7 @@ function refreshPatrimonioTable() {
     <td style="min-width:0;max-width:0;padding:0;border:none;overflow:hidden"></td>
     <td style="${STICKY4};right:0;min-width:60px;background:var(--bg4)"></td>
   </tr>` : ''}
+  ${_inv.showBenchmarkRows ? buildBenchmarkCompareRows(_inv.assets, months, visMonths, curM, STICKY4, 'var(--bg4)') : ''}
   <tr style="height:4px;background:var(--border2)"><td colspan="${visMonths.length+5}"></td></tr>
   </tbody>`;
 
@@ -23781,6 +24011,7 @@ function refreshPatrimonioTable() {
 
   // Real flow toggle button
   const realFlowToggle = `<button class="btn xs" onclick="_inv.showRealFlow=!_inv.showRealFlow;refreshPatrimonioTable()" style="font-size:10px;margin-left:8px">${_inv.showRealFlow?'▲ Ocultar':'▼ Fluxo real'} IPCA</button>`;
+  const benchmarkRowsToggle = `<button class="btn xs" onclick="_inv.showBenchmarkRows=!_inv.showBenchmarkRows;refreshPatrimonioTable()" style="font-size:10px;margin-left:8px">${_inv.showBenchmarkRows?'▲ Ocultar rentabilidade vs. benchmarks':'▼ Rentabilidade vs. benchmarks'}</button>`;
   const assetFlowToggle = `<button class="btn xs" onclick="_pat.showAssetFlow=!_pat.showAssetFlow;refreshPatrimonioTable()" style="font-size:10px;margin-left:8px">${_pat.showAssetFlow?'▲ Ocultar':'▼ Fluxo'} nominal/real</button>`;
   const debtInstallToggle = `<button class="btn xs" onclick="_pat.showDebtInstallments=!_pat.showDebtInstallments;refreshPatrimonioTable()" style="font-size:10px;margin-left:8px">${_pat.showDebtInstallments?'▲ Ocultar':'▼ Parcelas'}</button>`;
 
@@ -23881,7 +24112,7 @@ function refreshPatrimonioTable() {
       <tbody>
         <tr style="background:var(--bg3)">
           <td style="${STICKY3};left:0;min-width:400px;font-weight:700;padding:10px 12px;font-size:13px" colspan="4">
-            📈 Investimentos Financeiros ${realFlowToggle}
+            📈 Investimentos Financeiros ${realFlowToggle}${benchmarkRowsToggle}
           </td>
           ${visMonths.map(m=>`<td style="min-width:${COL_W}px${m===curM?';background:var(--accent-lt)':''}"></td>`).join('')}
           <td style="${STICKY3};right:0;min-width:60px;text-align:right">
@@ -26342,7 +26573,7 @@ const INV_TX_VALUATION = {
 // Combined for display/detail
 const INV_TX_TYPES = { ...INV_TX_CASH, ...INV_TX_VALUATION };
 
-let _inv = { assets: [], txAll: [], showRealFlow: false };
+let _inv = { assets: [], txAll: [], showRealFlow: false, showBenchmarkRows: true };
 
 async function refreshInvestimentos() {
   _inv.assets = await ff.invAssetsList();
@@ -27410,7 +27641,8 @@ function buildInvRows(months, curM, STICKY, COL_W, stripe, showHidden, visMonths
       ${showReal2 ? `<tr style="background:${BG_SUB}">
         <td style="${STICKY2};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${BG_SUB}" colspan="4">📈 Fluxo real (IPCA)</td>
         ${realFlowCells2}${projReal2}${editEmpty}
-      </tr>` : ''}`;
+      </tr>` : ''}
+      ${_inv.showBenchmarkRows ? buildBenchmarkCompareRows(catAssets, allMonths, visAllMonths2, curM2, STICKY2, BG_SUB) : ''}`;
   }
 
   let rows = '';

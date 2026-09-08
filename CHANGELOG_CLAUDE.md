@@ -12,6 +12,88 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-08 (4) — v4.88.14: rentabilidade vs. benchmarks na aba Patrimônio
+
+**Pedido do usuário**: melhores comparações de resultado dos investimentos
+vs. benchmarks — em cada totalização de categoria de investimento, e no
+total geral, linhas mês a mês comparando a média móvel de 12 meses da
+performance dos ativos vs. IPCA, vs. CDI, vs. Ibovespa, e vs. IPCA+4%.
+Confirmado com o usuário: (1) uma linha por série (valor bruto de cada
+uma, não diferença) — mesmo padrão da linha "IPCA mensal" que já existia;
+(2) IPCA+4% como juro real composto: `(1+IPCA do mês) × (1+4%a.a. convertido
+pro mês) − 1`, convenção padrão de metas de previdência/atuarial no Brasil
+(não somado direto).
+
+**Implementação** (`src/renderer.js`):
+- `buildAssetTWR(assetId, curM)` (nova, top-level): cópia da função de
+  mesmo nome já existente — e mantida sem alterações — dentro de
+  `refreshPatrimonioChart()` (calcula TWR/Modified Dietz mês a mês de UM
+  ativo). Duplicada de propósito em vez de extraída/compartilhada: a
+  original já está em produção alimentando o gráfico "Investimentos vs
+  benchmarks", e evitar mexer nela elimina qualquer risco de regressão
+  ali só para eliminar ~130 linhas repetidas.
+- `buildAggregateTWRFactors(assets, curM)` (nova): agrega o TWR de uma
+  lista de ativos numa série ponderada por mês (mesma lógica de
+  agregação do gráfico — peso = valor entrando no sub-período, caixa
+  sempre excluído) — reaproveitável tanto por categoria quanto para o
+  total geral.
+- `ipcaPlus4Monthly(ipcaMonthlyMap, m)` (nova): IPCA+4% real composto.
+- `buildBenchmarkCompareRows(assets, allMonths, visMonths, curM, STICKY,
+  bg)` (nova): monta as 5 linhas ("🎯 Rentabilidade dos ativos", "📐
+  IPCA", "📐 CDI", "📐 Ibovespa", "📐 IPCA+4% a.a.", todas "méd.móv.12m"),
+  reaproveitando `movAvg12` (mesma função já usada na aba Evolução) sobre
+  a série de retornos MENSAIS de cada benchmark — não sobre valores em
+  R$.
+- `buildCatSubtotalRow()`: chama `buildBenchmarkCompareRows` com os
+  ativos daquela categoria, logo depois da linha "Fluxo real (IPCA)".
+- Bloco do total geral (`invTotalRow`): mesma chamada, com `_inv.assets`
+  (todos os ativos).
+- Novo toggle "▼ Rentabilidade vs. benchmarks" ao lado do já existente
+  "▼ Fluxo real IPCA" (mesmo padrão — `_inv.showBenchmarkRows`, novo
+  campo em `_inv`, default `true`), pra esconder as linhas se a tabela
+  ficar densa demais.
+
+**Verificação** (com o `cruzeiro_data.db` real do usuário, deixado em
+`Projeto Cruzeiro/` pra este fim):
+1. Rodei a lógica isolada (Node, fora do app) pro total geral e por
+   categoria — números plausíveis: IPCA ~0,41-0,43%/mês, CDI
+   ~1,14-1,15%/mês, IPCA+4% consistentemente acima do IPCA puro, Renda
+   Fixa abaixo do CDI, Renda Variável mais alta/volátil, caixa em 0%
+   (corretamente excluído do cálculo de rentabilidade).
+2. A pedido do usuário, verificação extra de que aportes/resgates/
+   dividendos não contaminam o retorno — testado com 3 casos reais dos
+   dados do usuário (ativos que EXISTEM hoje em `inv_assets`, ids
+   49-124), cada um conferido por cálculo manual independente da
+   fórmula de Modified Dietz:
+   - Aporte de R$3.495,58 (VGHF11, id=88, jun/2022): retorno calculado
+     +3,13% (bate com a conta manual).
+   - Dividendo de R$154,80 (mesmo fundo, jul/2022): retorno calculado
+     +1,45% (bate).
+   - Resgate parcial de R$17.614,66 (LFT/Tesouro Selic, id=61,
+     mar/2022): retorno calculado +0,84% (bate).
+   Não é lógica nova — é a mesma fórmula já em produção no gráfico
+   "Investimentos vs benchmarks" e no TIR por ativo; a verificação
+   confirma que reaproveitá-la aqui não introduziu nenhuma contaminação.
+   **Nota**: a primeira tentativa de verificação usou por engano um
+   `asset_id` de `inv_transactions` que não existe mais em `inv_assets`
+   (ids 1-48 e outros — todos órfãos, sobras de ativos já excluídos que
+   nunca tiveram as transações limpas junto) e deu um resultado confuso
+   (-98% num mês). Não era bug de sinal — era teste contra dado morto
+   que o app de verdade nunca processa (tudo parte da lista de ativos
+   existentes, nunca lê `inv_transactions` direto). As linhas órfãs não
+   afetam nada da funcionalidade nova nem do resto do app, mas ficam
+   registradas aqui como um achado de limpeza de dados pendente, não
+   endereçado nesta tarefa (excluir um investimento não limpa suas
+   transações).
+3. `node --check` no `renderer.js` e boot do app sem erros.
+
+**Arquivos**: `src/renderer.js` (`buildAssetTWR` nova cópia top-level,
+`buildAggregateTWRFactors`, `ipcaPlus4Monthly`, `IPCA_PLUS4_MONTHLY_PREMIUM`,
+`buildBenchmarkCompareRows`, `buildCatSubtotalRow`, bloco `invTotalRow`,
+`_inv.showBenchmarkRows`).
+
+---
+
 ## 2026-09-08 (3) — v4.88.13: fix — modal de receita/despesa da Evolução não batia com a tabela
 
 **Relato do usuário**: em agosto, a aba Evolução (e a Visão Geral) mostra
