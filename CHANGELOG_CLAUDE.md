@@ -12,6 +12,20 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-08 (7) — v4.88.17: remove botão "Verificar quedas suspeitas na rentabilidade"
+
+**Pedido do usuário**: "pode retirar o botão de 'verificar quedas
+suspeitas na rentabilidade'. Não está funcionando direito." Removido
+como pedido, sem investigar a causa (usuário não pediu conserto, só
+remoção).
+
+**Arquivos**: `src/index.html` (botão + `<div id="pat-twr-anomalies-result">`
+removidos), `src/renderer.js` (função `patCheckTwrAnomalies()` removida
+inteira — confirmado sem nenhuma outra referência no código antes de
+apagar).
+
+---
+
 ## 2026-09-08 (6) — v4.88.16: IPCA/IPCA+4% no gráfico + benchmarks selecionáveis
 
 **Pedido do usuário**: no gráfico "Investimentos Financeiros" (aba

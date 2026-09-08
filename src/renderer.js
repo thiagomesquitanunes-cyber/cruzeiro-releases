@@ -22459,64 +22459,6 @@ function refreshPatrimonioChart() {
   patRenderInvChart();
 }
 
-// Procura quedas de valor entre meses consecutivos que não têm uma saída
-// (venda/amortização/resgate) registrada cobrindo a diferença — esse é
-// exatamente o padrão de dado que faz o cálculo de TIR/TWR (Modified Dietz)
-// entender como uma perda real e enorme num único mês, e essa perda fica
-// "presa" no gráfico acumulado pra sempre (cada mês seguinte multiplica a
-// partir desse novo nível mais baixo, daí o platô reto que nunca recupera).
-function patCheckTwrAnomalies() {
-  const out = G('pat-twr-anomalies-result');
-  if (!out) return;
-  const issues = [];
-  _inv.assets.forEach(a => {
-    if (_isCashAsset(a)) return; // caixa já é excluído do cálculo de rentabilidade — não é uma anomalia
-    const txs = _inv.txAll.filter(t => t.asset_id === a.id);
-    const valByM = {};
-    txs.filter(t => t.tx_type === 'atualizacao').forEach(t => { valByM[t.month.slice(0,7)] = t.total_value; });
-    const outflowByM = {};
-    txs.filter(t => t.tx_type === 'venda' || t.tx_type === 'amortizacao')
-      .forEach(t => { const m = t.month.slice(0,7); outflowByM[m] = (outflowByM[m]||0) + t.total_value; });
-    const inflowByM = {};
-    txs.filter(t => t.tx_type === 'compra' || t.tx_type === 'aporte')
-      .forEach(t => { const m = t.month.slice(0,7); inflowByM[m] = (inflowByM[m]||0) + t.total_value; });
-    // "Rendimento/custo" (dividendo/juros/jcp/cupom/taxa) também entra na
-    // fórmula real (Modified Dietz) com o mesmo papel de uma saída — sem
-    // contar isso aqui, qualquer resgate lançado como "dividendo" (em vez de
-    // "amortização") aparece como falsa anomalia.
-    const incomeByM = {};
-    txs.filter(t => t.tx_type in INV_TX_INCOME)
-      .forEach(t => { const m = t.month.slice(0,7); const sign = INV_TX_INCOME[t.tx_type]?.sign ?? 1; incomeByM[m] = (incomeByM[m]||0) + sign*t.total_value; });
-    const months = Object.keys(valByM).sort();
-    for (let i = 1; i < months.length; i++) {
-      const prev = months[i-1], cur = months[i];
-      const vPrev = valByM[prev], vCur = valByM[cur];
-      if (vPrev > 0) {
-        const outflow = outflowByM[cur] || 0;
-        const inflow  = inflowByM[cur]  || 0;
-        const income  = incomeByM[cur]  || 0;
-        const adjustedReturn = (vCur + outflow + income - vPrev - inflow) / vPrev;
-        if (adjustedReturn < -0.4) {
-          issues.push({ asset: a.name, from: prev, to: cur, vPrev, vCur, outflow, inflow, income, drop: adjustedReturn });
-        }
-      }
-    }
-  });
-
-  if (!issues.length) {
-    out.innerHTML = `<div style="color:var(--green)">✅ Nenhuma queda suspeita encontrada (limite: -40% em um mês sem saída/rendimento registrado cobrindo a diferença).</div>`;
-    return;
-  }
-  out.innerHTML = `<div style="color:var(--red);font-weight:600;margin-bottom:6px">⚠️ ${issues.length} queda(s) suspeita(s) encontrada(s):</div>` +
-    issues.map(i => `
-      <div style="padding:6px 10px;background:var(--bg3);border-radius:6px;margin-bottom:4px">
-        <strong>${esc(i.asset)}</strong> — ${fmtMonth(i.from)} → ${fmtMonth(i.to)}:
-        de ${fmtBRL(i.vPrev)} para ${fmtBRL(i.vCur)}
-        (${i.outflow ? 'saída: ' + fmtBRL(i.outflow) + ', ' : ''}${i.income ? 'rendimento/custo: ' + fmtBRL(i.income) + ', ' : ''}${!i.outflow && !i.income ? 'sem saída nem rendimento registrado, ' : ''}
-        queda ajustada: ${(i.drop*100).toFixed(1)}%)
-      </div>`).join('');
-}
-
 function patPopulateAssetSel() {
   const sel = G('pat-chart-asset-sel');
   if (!sel) return;
