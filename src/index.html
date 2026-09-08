@@ -2436,6 +2436,23 @@ select.inp option{background:var(--bg2);}
             </div>
           </div>
         </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px;font-size:11px">
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#3b82f6">
+            <input type="checkbox" id="pat-chart-inv-show-inv" checked onchange="patToggleInvSeries('inv',this.checked)"> Investimentos
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#43a047">
+            <input type="checkbox" id="pat-chart-inv-show-cdi" checked onchange="patToggleInvSeries('cdi',this.checked)"> CDI
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#f59e0b">
+            <input type="checkbox" id="pat-chart-inv-show-ibov" checked onchange="patToggleInvSeries('ibov',this.checked)"> IBOVESPA
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#8b5cf6">
+            <input type="checkbox" id="pat-chart-inv-show-ipca" checked onchange="patToggleInvSeries('ipca',this.checked)"> IPCA
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;color:#ec4899">
+            <input type="checkbox" id="pat-chart-inv-show-ipca4" checked onchange="patToggleInvSeries('ipca4',this.checked)"> IPCA+4% a.a.
+          </label>
+        </div>
         <div style="position:relative;height:240px"><canvas id="pat-chart-inv"></canvas></div>
         <div id="pat-chart-inv-legend" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px"></div>
         <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px">

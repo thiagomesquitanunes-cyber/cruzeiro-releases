@@ -22582,30 +22582,47 @@ function patRenderInvChart() {
   // For period-sliced charts, reset cumulative returns to 1.0 at the start of the period
   // by finding the cumulative factor up to effectiveFrom and dividing subsequent months
   // Simpler: just accumulate from effectiveFrom treating it as base=0%
-  let cumInv = 1, cumCDI = 1, cumIBOV = 1;
-  const invRetSeries = [], cdiSeries = [], ibovSeries = [];
+  let cumInv = 1, cumCDI = 1, cumIBOV = 1, cumIPCA = 1, cumIPCA4 = 1;
+  const invRetSeries = [], cdiSeries = [], ibovSeries = [], ipcaSeries = [], ipca4Series = [];
 
   chartMonths.forEach(m => {
     if (m > effectiveFrom && allFactors[m] && allFactors[m].sumW > 0) {
       cumInv *= (1 + allFactors[m].sumRW / allFactors[m].sumW);
     }
     if (m > effectiveFrom) {
-      cumCDI  *= (1 + ((_benchmarks||{}).cdi?.[m]  ?? 0));
-      cumIBOV *= (1 + ((_benchmarks||{}).ibov?.[m] ?? 0));
+      cumCDI   *= (1 + ((_benchmarks||{}).cdi?.[m]  ?? 0));
+      cumIBOV  *= (1 + ((_benchmarks||{}).ibov?.[m] ?? 0));
+      cumIPCA  *= (1 + (_pat.ipcaMonthly[m] ?? 0));
+      cumIPCA4 *= (1 + (ipcaPlus4Monthly(_pat.ipcaMonthly, m) ?? 0));
     }
-    invRetSeries.push(parseFloat(((cumInv  - 1) * 100).toFixed(2)));
-    cdiSeries.push   (parseFloat(((cumCDI  - 1) * 100).toFixed(2)));
-    ibovSeries.push  (parseFloat(((cumIBOV - 1) * 100).toFixed(2)));
+    invRetSeries.push (parseFloat(((cumInv   - 1) * 100).toFixed(2)));
+    cdiSeries.push    (parseFloat(((cumCDI   - 1) * 100).toFixed(2)));
+    ibovSeries.push   (parseFloat(((cumIBOV  - 1) * 100).toFixed(2)));
+    ipcaSeries.push   (parseFloat(((cumIPCA  - 1) * 100).toFixed(2)));
+    ipca4Series.push  (parseFloat(((cumIPCA4 - 1) * 100).toFixed(2)));
   });
 
-  const invDs = [
-    { label: 'Investimentos', data: invRetSeries, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.08)', borderWidth: 2.5, pointRadius: 0, tension: 0.3, fill: false },
-    { label: 'CDI',           data: cdiSeries,    borderColor: '#43a047', borderWidth: 2, borderDash: [5,4], pointRadius: 0, tension: 0.1, fill: false },
-    { label: 'IBOVESPA',      data: ibovSeries,   borderColor: '#f59e0b', borderWidth: 2, borderDash: [3,3], pointRadius: 0, tension: 0.1, fill: false },
+  // Cada série só entra no gráfico se o checkbox correspondente estiver
+  // marcado (_pat.chartInvVisible) — usuário pode isolar só um benchmark
+  // ou combinar qualquer subconjunto.
+  const allDs = [
+    { key: 'inv',   label: 'Investimentos', data: invRetSeries,  borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.08)', borderWidth: 2.5, pointRadius: 0, tension: 0.3, fill: false },
+    { key: 'cdi',   label: 'CDI',           data: cdiSeries,     borderColor: '#43a047', borderWidth: 2, borderDash: [5,4], pointRadius: 0, tension: 0.1, fill: false },
+    { key: 'ibov',  label: 'IBOVESPA',      data: ibovSeries,    borderColor: '#f59e0b', borderWidth: 2, borderDash: [3,3], pointRadius: 0, tension: 0.1, fill: false },
+    { key: 'ipca',  label: 'IPCA',          data: ipcaSeries,    borderColor: '#8b5cf6', borderWidth: 2, borderDash: [2,3], pointRadius: 0, tension: 0.1, fill: false },
+    { key: 'ipca4', label: 'IPCA+4% a.a.',  data: ipca4Series,   borderColor: '#ec4899', borderWidth: 2, borderDash: [6,2], pointRadius: 0, tension: 0.1, fill: false },
   ];
+  const invDs = allDs.filter(d => _pat.chartInvVisible[d.key]);
   _patCharts.inv = patMakeChart('pat-chart-inv', invDs, chartMonths, 'PCT');
   const leg = G('pat-chart-inv-legend');
   if (leg) leg.innerHTML = patLegendHtml(invDs);
+}
+
+// Liga/desliga uma série do gráfico "Investimentos Financeiros" (checkbox
+// de benchmark) e re-renderiza.
+function patToggleInvSeries(key, checked) {
+  _pat.chartInvVisible[key] = checked;
+  patRenderInvChart();
 }
 
 function patRenderAssetChart() {
@@ -22774,6 +22791,9 @@ let _pat = {
   currentMonth: '',
   showAssetFlow: false,   // Fluxo nominal/real dos bens e direitos — colapsado por padrão
   showDebtInstallments: false, // Linha de parcelas das dívidas pessoais — colapsada por padrão
+  // Quais séries aparecem no gráfico "Investimentos Financeiros" — todas
+  // ligadas por padrão, usuário desmarca o que não quiser ver.
+  chartInvVisible: { inv: true, cdi: true, ibov: true, ipca: true, ipca4: true },
 };
 
 // Quantos meses de colunas mostrar na tabela de Patrimônio (0 = todo o

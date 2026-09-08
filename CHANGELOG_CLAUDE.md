@@ -12,6 +12,40 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-08 (6) — v4.88.16: IPCA/IPCA+4% no gráfico + benchmarks selecionáveis
+
+**Pedido do usuário**: no gráfico "Investimentos Financeiros" (aba
+Patrimônio → Gráficos), adicionar as linhas de IPCA e IPCA+4%, e deixar
+todos os benchmarks selecionáveis — mostrar todos, só um, ou qualquer
+combinação.
+
+**Implementação**:
+- `src/renderer.js`, `patRenderInvChart()`: acumula IPCA e IPCA+4%
+  (`ipcaPlus4Monthly`, já existente) mês a mês desde o início do período
+  selecionado, mesmo padrão já usado pra CDI/IBOVESPA (reset da base em
+  `effectiveFrom`). As 5 séries (Investimentos, CDI, IBOVESPA, IPCA,
+  IPCA+4%) agora passam por um filtro (`_pat.chartInvVisible[key]`)
+  antes de virar dataset do Chart.js — só entra no gráfico (e na
+  legenda) quem estiver marcado.
+- Novo `_pat.chartInvVisible` (objeto, todas as 5 chaves `true` por
+  padrão) e `patToggleInvSeries(key, checked)` (nova função — marca/
+  desmarca uma chave e re-renderiza).
+- `src/index.html`: 5 checkboxes (uma por série, cor combinando com a
+  linha do gráfico) entre o seletor de período e o canvas do gráfico de
+  investimentos.
+
+**Teste**: `node --check` no `renderer.js` e boot do app sem erros.
+Reaproveita cálculos já validados nesta sessão (`ipcaPlus4Monthly`
+contra o `cruzeiro_data.db` real do usuário, feito na v4.88.14/15) —
+não precisou de nova verificação numérica isolada, só a integração no
+gráfico.
+
+**Arquivos**: `src/renderer.js` (`patRenderInvChart`,
+`patToggleInvSeries`, `_pat.chartInvVisible`), `src/index.html`
+(checkboxes do gráfico de investimentos).
+
+---
+
 ## 2026-09-08 (5) — v4.88.15: acumulado 12m (em vez de méd.móv.) + linha "quanto acima do IPCA"
 
 **Ajustes pedidos pelo usuário sobre a v4.88.14** (rentabilidade vs.
