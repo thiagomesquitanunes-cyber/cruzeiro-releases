@@ -20598,6 +20598,18 @@ function movAvg12(arr, i) {
   return w.length ? w.reduce((s,v)=>s+v,0)/w.length : 0;
 }
 
+// Acumulado (composto) dos últimos até 12 meses de uma série de TAXAS —
+// diferente de movAvg12 (que tira a média aritmética simples): aqui os
+// fatores (1+taxa) são multiplicados entre si, igual a como "IPCA
+// acumulado em 12 meses"/"CDI acumulado em 12 meses" são sempre reportados
+// no Brasil. Retorna null (não 0) quando não há NENHUM dado real na janela,
+// pra distinguir "sem dado" de "acumulado deu exatamente 0%".
+function acc12(arr, i) {
+  const w = arr.slice(Math.max(0,i-11), i+1);
+  if (!w.some(v => v !== 0 && !isNaN(v))) return null;
+  return w.reduce((prod, v) => prod * (1 + (isNaN(v) ? 0 : v)), 1) - 1;
+}
+
 // ── Data ──
 async function getEvolucaoData() {
   const [sumRows, catRows] = await Promise.all([
@@ -21876,23 +21888,26 @@ function ipcaPlus4Monthly(ipcaMonthlyMap, m) {
   return (1 + ipcaM) * (1 + IPCA_PLUS4_MONTHLY_PREMIUM) - 1;
 }
 
-// Linhas "Rentabilidade (méd.móv.12m) vs. benchmarks" — 5 linhas (ativos,
-// IPCA, CDI, Ibovespa, IPCA+4%), cada uma com a média móvel de 12 meses do
-// retorno MENSAL daquela série, mês a mês — mesmo conceito de "méd.móv.12m"
-// já usado na aba Evolução (movAvg12), só que aplicado a uma série de TAXAS
-// (retorno %) em vez de uma série de valores (R$). Usada tanto no subtotal
-// de cada categoria de investimento quanto no total geral — `assets` já
-// vem filtrado pra categoria (ou `_inv.assets` inteiro, pro total geral).
-// `allMonths` precisa ser o HISTÓRICO COMPLETO (não só a janela visível):
-// a média móvel do primeiro mês exibido depende de até 11 meses ANTES dele.
+// Linhas "Rentabilidade (acum.12m) vs. benchmarks" — 5 linhas (ativos,
+// IPCA, CDI, Ibovespa, IPCA+4%) com o ACUMULADO (composto) dos últimos 12
+// meses de cada série, mês a mês, mais uma 6ª linha derivada mostrando
+// quanto a rentabilidade dos ativos ficou acima (ou abaixo) do IPCA nesse
+// mesmo acumulado — convenção "IPCA+x%" só que com o x calculado, não fixo.
+// Usada tanto no subtotal de cada categoria de investimento quanto no
+// total geral — `assets` já vem filtrado pra categoria (ou `_inv.assets`
+// inteiro, pro total geral). `allMonths` precisa ser o HISTÓRICO COMPLETO
+// (não só a janela visível): o acumulado do primeiro mês exibido depende
+// de até 11 meses ANTES dele.
 function buildBenchmarkCompareRows(assets, allMonths, visMonths2, curM, STICKY2, bg) {
   const wAvg = buildAggregateTWRFactors(assets, curM);
   const monthIndex = {};
   allMonths.forEach((m, i) => { monthIndex[m] = i; });
 
+  const assetArr = allMonths.map(m => wAvg[m] ?? 0);
+  const ipcaArr  = allMonths.map(m => _pat.ipcaMonthly[m] ?? 0);
   const series = [
-    { icon: '🎯', label: 'Rentabilidade dos ativos', arr: allMonths.map(m => wAvg[m] ?? 0) },
-    { icon: '📐', label: 'IPCA',                     arr: allMonths.map(m => _pat.ipcaMonthly[m] ?? 0) },
+    { icon: '🎯', label: 'Rentabilidade dos ativos', arr: assetArr },
+    { icon: '📐', label: 'IPCA',                     arr: ipcaArr },
     { icon: '📐', label: 'CDI',                      arr: allMonths.map(m => _benchmarks.cdi[m] ?? 0) },
     { icon: '📐', label: 'Ibovespa',                 arr: allMonths.map(m => _benchmarks.ibov[m] ?? 0) },
     { icon: '📐', label: 'IPCA+4% a.a.',             arr: allMonths.map(m => ipcaPlus4Monthly(_pat.ipcaMonthly, m) ?? 0) },
@@ -21900,22 +21915,47 @@ function buildBenchmarkCompareRows(assets, allMonths, visMonths2, curM, STICKY2,
 
   const projEmpty = `<td style="min-width:0;max-width:0;padding:0;border:none;overflow:hidden"></td>`;
   const editEmpty = `<td style="${STICKY2};right:0;min-width:60px;background:${bg}"></td>`;
+  const cellStyle = (cellBg) => `font-size:10px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace`;
 
-  return series.map(({ icon, label, arr }) => {
+  const seriesRows = series.map(({ icon, label, arr }) => {
     const cells = visMonths2.map(m => {
       const i = monthIndex[m];
-      const v = movAvg12(arr, i);
+      const v = acc12(arr, i);
       const isCur = m === curM;
       const cellBg = isCur ? 'var(--accent-lt)' : bg;
-      if (!v) return `<td class="right" style="font-size:10px;padding:3px 8px;background:${cellBg};color:var(--text3)">—</td>`;
+      if (v == null) return `<td class="right" style="font-size:10px;padding:3px 8px;background:${cellBg};color:var(--text3)">—</td>`;
       const cls = v >= 0 ? 'amt-inc' : 'amt-exp';
-      return `<td class="${cls} right" style="font-size:10px;padding:3px 8px;background:${cellBg};font-family:'DM Mono',monospace">${(v*100).toFixed(2)}%</td>`;
+      return `<td class="${cls} right" style="${cellStyle(cellBg)}">${(v*100).toFixed(2)}%</td>`;
     }).join('');
     return `<tr style="background:${bg}">
-      <td style="${STICKY2};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${bg}" colspan="4">${icon} ${esc(label)} (méd.móv.12m)</td>
+      <td style="${STICKY2};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${bg}" colspan="4">${icon} ${esc(label)} (acum.12m)</td>
       ${cells}${projEmpty}${editEmpty}
     </tr>`;
   }).join('');
+
+  // 6ª linha: prêmio real dos ativos sobre o IPCA, no mesmo acumulado de 12
+  // meses — (1+ativos)/(1+IPCA)−1. Como já é uma janela de 12 meses, esse
+  // valor já é diretamente o "x" de "IPCA+x% a.a.", sem precisar anualizar
+  // de novo (diferente de IPCA+4%, que parte de um alvo ANUAL fixo e
+  // precisa ser convertido pra mensal).
+  const premiumCells = visMonths2.map(m => {
+    const i = monthIndex[m];
+    const assetAcc = acc12(assetArr, i);
+    const ipcaAcc  = acc12(ipcaArr, i);
+    const isCur = m === curM;
+    const cellBg = isCur ? 'var(--accent-lt)' : bg;
+    if (assetAcc == null || ipcaAcc == null) return `<td class="right" style="font-size:10px;padding:3px 8px;background:${cellBg};color:var(--text3)">—</td>`;
+    const premium = (1 + assetAcc) / (1 + ipcaAcc) - 1;
+    const cls = premium >= 0 ? 'amt-inc' : 'amt-exp';
+    const sign = premium >= 0 ? '+' : '';
+    return `<td class="${cls} right" style="${cellStyle(cellBg)}">${sign}${(premium*100).toFixed(2)}%</td>`;
+  }).join('');
+  const premiumRow = `<tr style="background:${bg}">
+    <td style="${STICKY2};left:0;font-size:10px;color:var(--text3);padding:2px 12px;background:${bg}" colspan="4">🎯 Quanto acima do IPCA (IPCA+x%, acum.12m)</td>
+    ${premiumCells}${projEmpty}${editEmpty}
+  </tr>`;
+
+  return seriesRows + premiumRow;
 }
 
 function refreshPatrimonioChart() {

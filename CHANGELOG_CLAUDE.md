@@ -12,6 +12,44 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-08 (5) — v4.88.15: acumulado 12m (em vez de méd.móv.) + linha "quanto acima do IPCA"
+
+**Ajustes pedidos pelo usuário sobre a v4.88.14** (rentabilidade vs.
+benchmarks): (1) trocar "média móvel 12 meses" (média aritmética simples
+das taxas mensais) por "acumulado 12 meses" (composto — a convenção
+padrão de mercado no Brasil pra "IPCA acumulado em 12 meses"/"CDI
+acumulado em 12 meses"); (2) adicionar uma linha extra mostrando quanto
+a rentabilidade dos ativos ficou acima do IPCA, no formato "IPCA+x%".
+
+**Implementação** (`src/renderer.js`):
+- `acc12(arr, i)` (nova, ao lado de `movAvg12`): acumulado composto —
+  multiplica os fatores `(1+taxa)` da janela de até 12 meses em vez de
+  tirar a média aritmética. Retorna `null` (não `0`) quando não há
+  nenhum dado real na janela, pra distinguir "sem dado" (mostra "—") de
+  "acumulado deu exatamente 0%" — bug pequeno que também existia na
+  versão anterior com `movAvg12` (tratava 0 real e "sem dado" do mesmo
+  jeito) e corrigi de passagem aqui.
+- `buildBenchmarkCompareRows()`: as 5 linhas (ativos/IPCA/CDI/Ibovespa/
+  IPCA+4%) trocaram de `movAvg12` pra `acc12`, label "(acum.12m)" em vez
+  de "(méd.móv.12m)". Nova 6ª linha "🎯 Quanto acima do IPCA (IPCA+x%,
+  acum.12m)": `(1+acumulado dos ativos)/(1+acumulado do IPCA) − 1` — já
+  sai direto no mesmo acumulado de 12 meses, sem precisar anualizar de
+  novo (diferente do IPCA+4%, que parte de uma meta ANUAL fixa e por
+  isso precisa converter pra mensal antes de compor).
+
+**Verificação**: rodei a lógica isolada contra o `cruzeiro_data.db` real
+do usuário — números coerentes e mais fáceis de interpretar que a
+média móvel anterior: IPCA acum.12m ~4,6-4,8%, CDI ~14,6-14,8%, carteira
+~8,7-9,2% (rodando perto da meta IPCA+4%, que dá ~8,4-8,7% no mesmo
+período), prêmio real sobre o IPCA de +3,8% a +4,5% nos últimos 4 meses
+— bate com a diferença entre as colunas "Ativos" e "IPCA". `node --check`
+e boot do app sem erros.
+
+**Arquivos**: `src/renderer.js` (`acc12` nova, `buildBenchmarkCompareRows`
+reescrita).
+
+---
+
 ## 2026-09-08 (4) — v4.88.14: rentabilidade vs. benchmarks na aba Patrimônio
 
 **Pedido do usuário**: melhores comparações de resultado dos investimentos
