@@ -12,6 +12,54 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-08 (3) — v4.88.13: fix — modal de receita/despesa da Evolução não batia com a tabela
+
+**Relato do usuário**: em agosto, a aba Evolução (e a Visão Geral) mostra
+Renda R$147.528,57 e Despesa R$74.901,99. Ao clicar na receita, o modal
+mostra R$191.080,84; ao clicar na despesa, R$118.454,26. O lucro bate
+(a diferença entre os dois modais dá os mesmos R$72.626,58), mas os
+totais individuais não — "isso confunde o usuário, parece ser um erro".
+
+**Causa raiz**: confirmada com o arquivo de dados real do usuário
+(`cruzeiro_data.db`, deixado em `Projeto Cruzeiro/` pra investigação).
+O total do Resumo/Visão Geral usa uma metodologia deliberada de "líquido
+por categoria-mãe" (`groupAndClassifyByParent`/`netClassify`,
+documentada como usada de forma idêntica pelos três lugares que mostram
+totais — Resumo, Comparação mensal, Evolução): quando uma categoria-mãe
+tem lançamentos dos dois sinais no mesmo mês (ex.: "Viagens" com gasto
+E reembolso, "Renda Financeira" com rendimento E taxa), ela entra no
+total como receita OU despesa pelo saldo líquido da categoria, nunca os
+dois separados — evita que um reembolso infle a "receita" ou uma taxa
+infle a "despesa". O modal aberto ao clicar (`openEvDetailModal`),
+porém, filtrava as linhas só pelo SINAL de cada transação individual
+(bruto), sem essa mesma regra — dando um total maior nos dois lados.
+Reproduzi os dois valores exatos do usuário com um script isolado
+contra o `.db` real: bruto (por sinal de linha) = R$191.080,84/
+R$118.454,26; líquido por categoria-mãe = R$147.528,57/R$74.901,99 —
+bate exatamente. A diferença de R$43.552,27 em ambos os lados é sempre
+igual porque é a soma de `min(receita,despesa)` de cada categoria mista
+(a mesma parcela é subtraída dos dois totais brutos).
+
+**Fix** (`src/renderer.js`, `openEvDetailModal`): em vez de filtrar
+linhas por `amount>0`/`amount<0`, agora classifica cada categoria-mãe
+pelo líquido (mesma `netClassify` usada no Resumo) e mostra TODAS as
+linhas (os dois sinais) das categorias-mãe que caem do lado pedido —
+o total das linhas exibidas passa a bater exatamente com o valor da
+tabela. `openEvDetailModalCat` (clique numa célula específica da aba
+"Por Categoria") não foi tocado — não recebi relato de problema lá e
+não tive tempo de confirmar se o mesmo padrão se aplicaria sem risco de
+regressão; investigar se surgir queixa parecida.
+
+**Teste**: reproduzi os números exatos do bug e confirmei a correção
+rodando a lógica antiga e a nova isoladamente (Node + sql.js) contra o
+`.db` real do usuário — bate a centavo com o Resumo (R$147.528,57 /
+-R$74.901,99, 25+206=231 transações, nenhuma perdida). `node --check`
+no `renderer.js`.
+
+**Arquivos**: `src/renderer.js` (`openEvDetailModal`).
+
+---
+
 ## 2026-09-08 (2) — v4.88.12: fix de performance — janela congela DEPOIS de aparecer
 
 **Relato do usuário** (esclarecendo o report da v4.88.11): "O travamento

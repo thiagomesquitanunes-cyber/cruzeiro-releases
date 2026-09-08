@@ -21014,8 +21014,30 @@ async function openEvDetailModal(month, type, category) {
   catch(e) { G('cat-detail-period').textContent='Erro'; G('cat-detail-body').innerHTML=`<div class="empty" style="padding:2rem"><p>${esc(e.message)}</p></div>`; return; }
 
   let rows = result.rows.filter(r=>r.is_transfer===0&&r.category&&r.category.trim());
-  if (type==='income')   rows = rows.filter(r=>r.amount>0);
-  if (type==='expenses') rows = rows.filter(r=>r.amount<0);
+  if (type==='income' || type==='expenses') {
+    // Mesma metodologia "líquida por categoria-mãe" do total do Resumo (ver
+    // groupAndClassifyByParent/netClassify): uma categoria com lançamentos
+    // dos dois sinais no mês (ex.: "Viagens" com gasto E reembolso) entra
+    // como receita OU despesa pelo saldo líquido, nunca os dois separados.
+    // Antes este modal filtrava por sinal de cada LINHA em vez de pelo
+    // líquido da categoria-mãe — dava um total bruto maior (ou menor) que o
+    // valor da tabela, mesmo com o lucro batendo (a diferença se cancelava
+    // nos dois lados). Aqui: classifica cada categoria-mãe pelo líquido e
+    // mostra TODAS as linhas dela (os dois sinais) quando ela cai do lado
+    // pedido — o total das linhas exibidas bate exatamente com a tabela.
+    const byParent = {};
+    rows.forEach(r => {
+      const parent = (r.category || '').split(':')[0];
+      if (!byParent[parent]) byParent[parent] = { income: 0, expenses: 0 };
+      if (r.amount >= 0) byParent[parent].income   += r.amount;
+      else                byParent[parent].expenses += -r.amount;
+    });
+    const wantIncome = type === 'income';
+    const matchParents = new Set(Object.entries(byParent)
+      .filter(([, d]) => { const cls = netClassify(d.income, d.expenses); return wantIncome ? cls.income > 0 : cls.expenses > 0; })
+      .map(([p]) => p));
+    rows = rows.filter(r => matchParents.has((r.category || '').split(':')[0]));
+  }
 
   G('cat-detail-period').textContent = `${rows.length} transação${rows.length!==1?'ões':''}`;
   if (!rows.length) { G('cat-detail-body').innerHTML='<div class="empty" style="padding:2rem"><p>Sem transações</p></div>'; return; }
