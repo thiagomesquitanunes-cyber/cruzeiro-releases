@@ -12,6 +12,59 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-08 — v4.88.11: fix de performance — boot "travando" por 30+s
+
+**Relato do usuário**: "O app tem demorado bastante para carregar, dá até
+impressão de que travou. Coisa de mais de 30 segundos."
+
+**Causa raiz**: em `mainStartupFlow()` (`main.js`), a criação da janela
+(`createWindow()`/`createLoginWindow()`) só acontecia DEPOIS de um bloco
+inteiro de restauração de sessão Supabase — até 3 tentativas de
+`sb.refreshSession()` (cada uma uma chamada de rede), com backoff de até
+1500ms/3000ms/4500ms (~9s só de espera) em caso de falha transitória
+(Wi-Fi reconectando, VPN subindo, servidor lento no instante do boot).
+Nesse intervalo todo a `BrowserWindow` do Electron **não existia ainda**
+— nem uma janela vazia aparecia. Qualquer soluço de rede no boot virava
+30+ segundos sem nenhuma janela na tela, exatamente a sensação de app
+travado.
+
+O comentário original ("Tenta restaurar sessão Supabase ANTES de decidir
+se exibe login") sugeria que a ordem era necessária pra decidir qual
+janela mostrar — mas `isPasswordProtected` (a variável que decide entre
+`createLoginWindow()`/`createWindow()`) só depende de
+`settings.hasEncryptedDB`/`_dbPendingDecrypt`/`settings.passwordHash`,
+nenhum dos quais é alterado pelo bloco de restauração de sessão.
+Confirmei isso lendo o corpo inteiro do bloco antes de mexer. A tela de
+login local (`createLoginWindow()`) também é 100% autocontida (HTML
+inline, só senha local) — não tem nenhuma dependência de estado do
+Supabase.
+
+**Fix**: reordenado `mainStartupFlow()` — `createWindow()`/
+`createLoginWindow()` agora rodam logo depois do banco local carregar
+(init do DB + backup + migração + sync de recorrências, tudo local e
+rápido), ANTES do bloco de restauração de sessão Supabase. Esse bloco
+inteiro (com seus retries/backoff) foi movido pra uma IIFE assíncrona
+não aguardada (`(async () => {...})()`, sem `await` no nível de
+`mainStartupFlow()`) — roda em segundo plano depois que a janela já
+existe e o usuário já está vendo/usando o app. Removida a variável
+`sessionRestored`, que nunca era lida em lugar nenhum (dead code exposto
+ao mover o bloco). O fetch de índices de financiamento já era
+fire-and-forget via `setImmediate` antes disso — não precisou mudar.
+
+**Teste**: `node --check` no `main.js` (sintaxe válida) e boot sem erros
+relacionados à mudança. Não consegui cronometrar visualmente "quantos
+segundos até a janela aparecer" — o ambiente sandboxed onde rodei o
+teste não tem uma sessão de desktop/GPU real (o Chromium loga erros de
+cache de disco/GPU nesse ambiente specificamente, não relacionados ao
+código) e o processo do Electron encerra sozinho depois de alguns
+segundos ali, então não reproduz o cenário real de uso. Pedir pro
+usuário confirmar na prática que o boot ficou perceptivelmente mais
+rápido.
+
+**Arquivos**: `src/main.js` (`mainStartupFlow()`).
+
+---
+
 ## 2026-09-04 — v4.88.10: fix crítico — "Restaurar backup" não fazia nada
 
 **Relato do usuário**: "Tentei restaurar um backup no cruzeiro desktop e

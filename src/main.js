@@ -2846,10 +2846,37 @@ async function mainStartupFlow() {
     });
   }
 
-  // ── Tenta restaurar sessão Supabase ANTES de decidir se exibe login ──
   const settings = loadSettings();
-  let sessionRestored = false;
-  if (!_dbPendingDecrypt && settings.supabaseRefreshToken) {
+
+  // Mostra a tela de login (senha) SÓ quando o arquivo estiver de fato
+  // protegido por senha — DB criptografado (precisa decriptar) ou senha
+  // local configurada (modo legado). A ausência de sessão Supabase válida
+  // NÃO deve, por si só, forçar essa tela: essa tela só tem campo de senha
+  // local, não tem como o usuário "resolver" a falta de sessão de sync por
+  // ali — o app entra direto e a sincronização é tratada normalmente nas
+  // telas de Configurações.
+  const isPasswordProtected = !!(settings.hasEncryptedDB || _dbPendingDecrypt || settings.passwordHash);
+  if (isPasswordProtected) {
+    createLoginWindow();
+    // Don't pre-create main window — create it AFTER login so it loads with real DB
+  } else {
+    createWindow();
+    setupAutoUpdater();
+  }
+
+  // ── Restaura sessão Supabase em segundo plano, DEPOIS de criar a janela ──
+  // Antes, este bloco todo (até 3 tentativas, cada uma podendo demorar por
+  // conta própria + até ~9s de espera acumulada em backoff se a rede desse
+  // qualquer soluço transitório) rodava ANTES de createWindow()/
+  // createLoginWindow() — ou seja, a janela do Electron literalmente não
+  // existia ainda enquanto isso rodava. Num boot com rede lenta/instável, o
+  // usuário não via nem uma janela vazia por 10-30+s, exatamente a sensação
+  // de "app travado". Nada aqui (sessão de nuvem, sync do mobile, chave de
+  // criptografia de nuvem) é necessário pra renderizar os dados locais, que
+  // já vêm do SQLite local — não tem por que segurar a janela por causa
+  // disso. Não é `await`ado de propósito: roda por conta própria enquanto o
+  // usuário já está vendo e usando o app.
+  if (!_dbPendingDecrypt && settings.supabaseRefreshToken) (async () => {
     // Retry com backoff pra erro TRANSITÓRIO (rede/timeout/servidor fora
     // do ar no exato instante do boot — ex: laptop acordando do sleep
     // antes do Wi-Fi reconectar, VPN corporativa demorando a subir). Sem
@@ -2865,7 +2892,6 @@ async function mainStartupFlow() {
         const refreshed = await sb.refreshSession(settings.supabaseRefreshToken);
         console.log(`[sync] sessão restaurada para ${settings.supabaseEmail} (tentativa ${attempt}/${MAX_ATTEMPTS})`);
         logAuth(`OK sessão restaurada para ${settings.supabaseEmail} (tentativa ${attempt}/${MAX_ATTEMPTS})`);
-        sessionRestored = true;
 
         // Persiste o NOVO refresh token — o Supabase usa tokens rotativos:
         // cada uso invalida o anterior e gera um novo. Sem persistir aqui,
@@ -2907,7 +2933,6 @@ async function mainStartupFlow() {
           delete s2.supabaseRefreshToken;
           delete s2.supabaseEmail;
           saveSettings(s2);
-          sessionRestored = false;
           break;
         } else if (attempt < MAX_ATTEMPTS) {
           console.warn(`[sync] falha transitória ao restaurar sessão (tentativa ${attempt}/${MAX_ATTEMPTS}), tentando de novo:`, errMsg);
@@ -2918,27 +2943,10 @@ async function mainStartupFlow() {
           // token salvo pra tentar de novo na próxima abertura do app.
           console.warn('[sync] falha transitória ao restaurar sessão após todas as tentativas (token preservado):', errMsg);
           logAuth(`TRANSITORIO todas as ${MAX_ATTEMPTS} tentativas falharam, token preservado: ${errMsg}`);
-          sessionRestored = false;
         }
       }
     }
-  }
-
-  // Mostra a tela de login (senha) SÓ quando o arquivo estiver de fato
-  // protegido por senha — DB criptografado (precisa decriptar) ou senha
-  // local configurada (modo legado). A ausência de sessão Supabase válida
-  // NÃO deve, por si só, forçar essa tela: essa tela só tem campo de senha
-  // local, não tem como o usuário "resolver" a falta de sessão de sync por
-  // ali — o app entra direto e a sincronização é tratada normalmente nas
-  // telas de Configurações.
-  const isPasswordProtected = !!(settings.hasEncryptedDB || _dbPendingDecrypt || settings.passwordHash);
-  if (isPasswordProtected) {
-    createLoginWindow();
-    // Don't pre-create main window — create it AFTER login so it loads with real DB
-  } else {
-    createWindow();
-    setupAutoUpdater();
-  }
+  })();
 }
 
 app.whenReady().then(async () => {
