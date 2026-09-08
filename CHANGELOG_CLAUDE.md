@@ -12,6 +12,61 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-08 (2) — v4.88.12: fix de performance — janela congela DEPOIS de aparecer
+
+**Relato do usuário** (esclarecendo o report da v4.88.11): "O travamento
+acontece com a tela já aparecendo. Ela abre, mas fica congelada por
+vários segundos, só permite mexer (inclusive maximizar a tela) depois
+de descongelar."
+
+**Causa raiz**: a v4.88.11 moveu a restauração de sessão Supabase (e o
+`runMobileSync('startup')` que ela dispara) pra rodar em segundo plano
+DEPOIS de criar a janela — o que resolveu "a janela nem aparece", mas
+expôs um problema separado que já existia, só estava escondido dentro
+do mesmo bloqueio: `syncPush.pushAll()` (`sync-push.js`) processa todas
+as tabelas (saldos, transações da janela de 90 dias, orçamentos, metas,
+patrimônio, evolução...) de forma **100% síncrona** — cifrando cada
+campo sensível (AES/XChaCha20-Poly1305, uma chamada síncrona por campo)
+e, no caso de patrimônio/evolução, fazendo cálculo financeiro
+(correção monetária, médias móveis, IRR) linha a linha, tudo sem nunca
+ceder o processo. No Electron, o processo principal é o mesmo que
+atende a fila de mensagens da janela nativa do Windows — enquanto ele
+está ocupado processando isso de forma síncrona, a janela inteira para
+de responder (nem maximizar funciona), mesmo já estando visível na
+tela.
+
+**Fix** (`src/sync/sync-push.js`):
+- `encFields()` (usada pelas 9 etapas de `pushAll` que cifram dados)
+  virou `async`, cedendo o processo a cada 200 linhas
+  (`await new Promise(r => setImmediate(r))`) durante a cifra. Todos os
+  8 pontos de chamada atualizados pra `await encFields(...)`.
+- `pushAll()`: adicionado um `await` de cessão do processo **entre cada
+  etapa** (saldos → transações → orçamentos → metas → agendados →
+  patrimônio → itens de patrimônio → evolução → regras de ML → config
+  de IA), isolando o bloqueio de qualquer etapa pesada em vez de somar
+  tudo num único bloco contínuo — cobre também o cálculo financeiro de
+  patrimônio/evolução, que não passa só por `encFields`.
+
+Não mexi no cálculo financeiro em si (IRR, correção monetária) — só
+adicionei pontos de cessão ao redor dele. `sync-pull.js` não foi
+alterado: os laços de lá são sobre filas pequenas vindas do mobile
+(quick entries, pedidos de edição/conciliação), não a base de dados
+inteira, e não pareceram um candidato plausível pra "vários segundos".
+
+**Teste**: `node --check` nos dois arquivos tocados (sintaxe válida) e
+boot sem erros. De novo não consegui cronometrar visualmente o antes/
+depois — o ambiente sandboxed onde testo não sustenta uma sessão longa
+o bastante (o processo do Electron encerra sozinho depois de poucos
+segundos ali, sem chegar a logar o "[sync:push] concluído"). Pedir pro
+usuário confirmar que a janela fica utilizável (arrastar, maximizar,
+clicar) imediatamente depois de abrir, mesmo enquanto o sync roda por
+trás.
+
+**Arquivos**: `src/sync/sync-push.js` (`encFields`, `pushAll`, e os 8
+call sites de `encFields` dentro de cada `push*`).
+
+---
+
 ## 2026-09-08 — v4.88.11: fix de performance — boot "travando" por 30+s
 
 **Relato do usuário**: "O app tem demorado bastante para carregar, dá até

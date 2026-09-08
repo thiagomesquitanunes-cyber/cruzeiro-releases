@@ -37,10 +37,21 @@ function encJSON(obj) {
 // depois do hash (que agora é calculado sobre o texto em claro), o hash fica
 // estável entre execuções e IDÊNTICO entre máquinas com os mesmos dados.
 // Campos null/undefined são preservados como estão (não são cifrados).
-function encFields(rows, scalarFields, jsonFields) {
-  for (const r of rows) {
+// Assíncrona DE PROPÓSITO, mesmo sem nenhum await "de verdade" dentro do
+// laço em si: cifrar centenas/milhares de linhas (AES/XChaCha20-Poly1305,
+// uma chamada síncrona por campo) de uma vez trava o processo principal do
+// Electron por vários segundos — e como esse processo também é quem atende
+// a fila de mensagens da janela nativa do Windows, a janela inteira fica
+// sem responder nesse meio tempo (nem maximizar funciona) até terminar.
+// Cedendo o processo a cada 200 linhas (setImmediate) o SO consegue
+// processar a janela entre os lotes, e o app continua usável durante o
+// sync em vez de "congelar".
+async function encFields(rows, scalarFields, jsonFields) {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
     (scalarFields || []).forEach(f => { if (r[f] !== null && r[f] !== undefined) r[f] = enc(r[f]); });
     (jsonFields   || []).forEach(f => { if (r[f] !== null && r[f] !== undefined) r[f] = encJSON(r[f]); });
+    if (i > 0 && i % 200 === 0) await new Promise(resolve => setImmediate(resolve));
   }
   return rows;
 }
@@ -196,7 +207,7 @@ async function pushBalances(all, userId, syncInvestments) {
   }
   const syncedAt = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAt);
-  encFields(rows, ['balance']);
+  await encFields(rows, ['balance']);
 
   await sb.upsert('mobile_balances', rows, 'user_id,account_name');
 
@@ -265,7 +276,7 @@ async function pushTransactions(all, userId, syncInvestments) {
   }
   const syncedAt = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAt);
-  encFields(rows, ['description', 'amount', 'memo']);
+  await encFields(rows, ['description', 'amount', 'memo']);
 
   // Upsert em lotes de 500 para não estourar limites HTTP
   for (let i = 0; i < rows.length; i += 500) {
@@ -345,7 +356,7 @@ async function pushBudgets(all, userId) {
   }
   const syncedAtB = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtB);
-  encFields(rows, ['monthly_limit', 'spent']);
+  await encFields(rows, ['monthly_limit', 'spent']);
   await sb.upsert('mobile_budgets', rows, 'user_id,month,category');
   await sb.pruneNotIn('mobile_budgets', userId, 'category', budgets.map(b => b.category))
     .catch(() => {});
@@ -434,7 +445,7 @@ async function pushGoals(all, userId) {
   }
   const syncedAtG = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtG);
-  encFields(rows, ['target_amount', 'monthly_amount', 'current_amount']);
+  await encFields(rows, ['target_amount', 'monthly_amount', 'current_amount']);
   await sb.upsert('mobile_goals', rows, 'user_id,desktop_id');
   await sb.pruneNotIn('mobile_goals', userId, 'desktop_id', goals.map(g => String(g.id)));
   markSynced('goals', hashableRows);
@@ -493,7 +504,7 @@ async function pushScheduled(all, userId, syncInvestments) {
   }
   const syncedAtS = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtS);
-  encFields(rows, ['memo', 'amount']);
+  await encFields(rows, ['memo', 'amount']);
   await sb.upsert('mobile_scheduled', rows, 'user_id,desktop_id');
   await sb.pruneNotIn('mobile_scheduled', userId, 'desktop_id', rows.map(r => r.desktop_id));
   markSynced('scheduled', hashableRows);
@@ -850,7 +861,7 @@ async function pushPatrimonioItems(all, userId, syncInvestments, getDbPath, fs) 
   }
   const syncedAtPI = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtPI);
-  encFields(rows,
+  await encFields(rows,
     ['name', 'subtype', 'category', 'broker', 'maturity_month', 'liquidity', 'benchmark',
      'current_value', 'debt_balance', 'interest_rate', 'tir_nominal', 'tir_real', 'gain_loss', 'benchmark_return'],
     []
@@ -973,7 +984,7 @@ async function pushPatrimonio(all, userId, syncInvestments) {
   }
   const syncedAtP = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtP);
-  encFields(rows, ['total_assets', 'total_debts', 'net_worth'], ['breakdown']);
+  await encFields(rows, ['total_assets', 'total_debts', 'net_worth'], ['breakdown']);
   await sb.upsert('mobile_patrimonio', rows, 'user_id,month');
   markSynced('patrimonio', hashableRows);
 }
@@ -1173,7 +1184,7 @@ async function pushEvolution(all, userId, getDbPath, fs) {
   }
   const syncedAtE = new Date().toISOString();
   rows.forEach(r => r.synced_at = syncedAtE);
-  encFields(rows, ['income', 'expenses', 'balance', 'income_ma', 'expenses_ma'], ['by_category']);
+  await encFields(rows, ['income', 'expenses', 'balance', 'income_ma', 'expenses_ma'], ['by_category']);
 
   // DELETE + INSERT: elimina dados de versões antigas e meses fora da
   // janela de 12 meses atual
@@ -1282,6 +1293,11 @@ async function pushAll(all, userId, getAiConfig, getSyncInvestmentsPref, getDbPa
       console.error(`[sync:push] ${name} falhou:`, e.message);
       results[name] = `erro: ${e.message}`;
     }
+    // Cede o processo principal entre cada tabela — alguns passos (evolução,
+    // patrimônio) fazem bastante cálculo síncrono além da criptografia
+    // (já cedida dentro de encFields), então isolar por etapa evita que uma
+    // única etapa pesada some com as outras num bloqueio único e maior.
+    await new Promise(resolve => setImmediate(resolve));
   }
 
   // Persiste hashes para a próxima sessão
