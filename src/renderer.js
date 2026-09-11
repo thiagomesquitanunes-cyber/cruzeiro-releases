@@ -1958,7 +1958,6 @@ async function renderDashBudget(monthStr) {
 
   const budgets = (await ff.budgetList().catch(() => [])).filter(b => b.type !== 'income');
   const actuals = await ff.budgetActuals({ month: monthStr }).catch(() => []);
-  const rolloverMap = await ff.budgetRolloverBalance({ beforeMonth: monthStr }).catch(() => ({}));
 
   // Gasto realizado por orçamento: soma SUBCATEGORIAS (quando consolidate_subs)
   // e desconta estornos (received) — mesma regra da aba Orçamento. Antes usava
@@ -1976,12 +1975,20 @@ async function renderDashBudget(monthStr) {
     return Math.max(0, spent - received);
   };
 
+  // % sempre contra o planejado MENSAL puro, sem rollover — mesma regra da
+  // aba Orçamento (rollover é só uma folga/déficit de meses anteriores,
+  // informativo, nunca somado ao limite pra calcular percentual — ver
+  // tooltip da coluna "Rollover" lá). Antes este card somava o rollover ao
+  // limite (effLimit = monthly_limit + rollAcc) antes de calcular o %: uma
+  // categoria com rollover bem negativo acumulado de quando o limite era
+  // menor (ex.: "Viagens" subiu de ~R$2.500 pra R$13.000/mês) fazia o %
+  // aqui divergir MUITO do que a aba Orçamento mostra pra mesma categoria/
+  // mês (bug real reportado: R$5.087,02 aparecendo como 199,5%, como se o
+  // limite fosse ~R$2.550, quando o limite mensal real era R$13.000).
   const enriched = budgets.map(b => {
-    const rollAcc = (b.rollover && rolloverMap[b.category]) ? rolloverMap[b.category] : 0;
-    const effLimit = b.monthly_limit + rollAcc;
     const spent = spentFor(b);
-    return { category: b.category, spent, effLimit, pct: effLimit > 0 ? (spent / effLimit * 100) : 0 };
-  }).filter(b => b.effLimit > 0).sort((a,b) => b.pct - a.pct);
+    return { category: b.category, spent, pct: b.monthly_limit > 0 ? (spent / b.monthly_limit * 100) : 0 };
+  }).filter(b => b.monthly_limit > 0).sort((a,b) => b.pct - a.pct);
 
   const barsEl = G('dash-budget-bars');
   if (barsEl) {

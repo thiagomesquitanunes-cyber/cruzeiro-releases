@@ -10,6 +10,46 @@ precisar reconstituir o histórico da conversa original.
 publicar uma versão), adicione uma entrada nova no TOPO deste changelog,
 antes de considerar o trabalho terminado.
 
+---
+
+## 2026-09-11 (3) — v4.88.20: fix — card "Orçado vs. Realizado" da Visão Geral divergia da aba Orçamento
+
+**Relato do usuário**: card "Orçado vs. Realizado" (Visão Geral),
+categoria Viagens, mostrando R$5.087,02 como 199,5% — como se o
+orçamento fosse ~R$2.500, quando o orçamento mensal real é R$13.000
+(confirmado na aba Orçamento).
+
+**Causa raiz**: `renderDashBudget()` somava o saldo de rollover ao
+limite mensal antes de calcular o % (`effLimit = monthly_limit +
+rollAcc`) — mas em TODO o resto do app (aba Orçamento, inclusive já
+documentado no tooltip da própria coluna "Rollover": *"É um extra — NÃO
+entra no planejamento mensal nem em nenhum dos percentuais"*), rollover
+é só informativo, nunca entra no cálculo do %. "Viagens" tem rollover
+ativado (janela de 12 meses) e, nos 12 meses anteriores a set/2026,
+gastou R$166.450,52 contra um limite de 12×R$13.000 = R$156.000 (meses
+como fev/2026 com R$49.629,18 e jun/2026 com R$28.285,23 estouraram
+bastante) — rollover acumulado de **-R$10.450,52**. Limite efetivo
+resultante: R$13.000 − R$10.450,52 = R$2.549,48, e R$5.087,02 ÷
+R$2.549,48 = 199,53% — bate exatamente com o bug relatado.
+
+Verificado com o `cruzeiro_data.db` real do usuário: `budgets` tem
+`monthly_limit=13000, rollover=1, rollover_months=12` pra "Viagens";
+reproduzi o cálculo do rollover mês a mês contra o histórico real de
+transações e cheguei exatamente aos mesmos R$5.087,02/199,5% do
+relato, confirmando a causa antes de mexer no código.
+
+**Fix**: `renderDashBudget()` agora calcula o % sempre contra
+`monthly_limit` puro, sem somar rollover — mesma regra da aba Orçamento
+(`renderBudgetTable`). Removida também a chamada a
+`ff.budgetRolloverBalance()` deste card (só era usada pro cálculo
+removido; a aba Orçamento continua chamando a sua própria, pra exibir
+o rollover na coluna dedicada). Com o fix, o card mostra 5087,02/13000
+= 39,1%, batendo com a aba Orçamento.
+
+**Arquivos**: `src/renderer.js` (`renderDashBudget`).
+
+---
+
 ## 2026-09-11 (2) — v4.88.19: reconsiderado — campo "A partir de" volta a ficar vazio por padrão
 
 **Pedido do usuário**: "pensando melhor, o 'pré-preenchida' vai trazer
