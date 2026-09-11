@@ -4847,15 +4847,6 @@ let _builtinOverrides = {}; // {id: {name, logoUrl, sort_order}}
 let _customBankParsers = []; // [{id, name, type:'bank'|'card', config:{...}}]
 
 async function initImportPage() {
-  // Pré-preenche "A partir de" com hoje — na prática quase sempre a data
-  // usada é do mês corrente ou do anterior (raramente mais antiga), então
-  // partir de hoje e deixar o usuário ajustar (botões ◀ dia/◀ mês) poupa
-  // digitação no caso comum. Só se ainda estiver vazio: a página não é
-  // recriada ao trocar de aba, então o valor sobrevive entre navegações —
-  // não queremos sobrescrever um ajuste que o usuário já tenha feito.
-  const dateFromEl = G('bank-date-from');
-  if (dateFromEl && !dateFromEl.value) dateFromEl.value = todayStr();
-
   const all = await ff.bankParsersList();
   // Separate builtin overrides from custom parsers
   const ovEntry = all.find(p => p.id === '__builtin_overrides__');
@@ -5580,15 +5571,19 @@ function renderBankPreview(rows) {
   if (G('bank-result')) G('bank-result').innerHTML = '';
 }
 
-// Botões "◀ dia"/"◀ mês" ao lado de "A partir de" — recuam a data já
-// preenchida (ou hoje, se por algum motivo estiver vazia) em vez de exigir
-// digitar/abrir o calendário pros dois casos mais comuns na prática (mês
-// corrente ou anterior). Clicar várias vezes acumula (ex.: 2x "◀ mês" = 2
-// meses atrás).
+// Botões "Hoje"/"◀ dia"/"◀ mês" ao lado de "A partir de" — o campo fica
+// VAZIO por padrão (importa o arquivo inteiro; pré-preencher com hoje
+// confundia, o usuário achava que a importação tinha dado errado ao ver
+// quase nenhuma transação baixada), mas o preenchimento mais comum na
+// prática é do mês corrente ou do anterior, daí os atalhos. Clicar em
+// "◀ dia"/"◀ mês" várias vezes acumula (ex.: 2x "◀ mês" = 2 meses atrás).
 function shiftBankDateFrom(unit) {
   const el = G('bank-date-from');
   if (!el) return;
-  const base = el.value ? new Date(el.value + 'T00:00:00') : new Date();
+  // 'today' sempre parte de agora (ignora o que já estava no campo); os
+  // outros dois recuam a partir do valor já preenchido (ou de hoje, se o
+  // campo ainda estiver vazio).
+  const base = (unit !== 'today' && el.value) ? new Date(el.value + 'T00:00:00') : new Date();
   if (unit === 'day') base.setDate(base.getDate() - 1);
   else if (unit === 'month') base.setMonth(base.getMonth() - 1);
   el.value = `${base.getFullYear()}-${String(base.getMonth()+1).padStart(2,'0')}-${String(base.getDate()).padStart(2,'0')}`;

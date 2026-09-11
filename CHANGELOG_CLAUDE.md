@@ -10,6 +10,34 @@ precisar reconstituir o histórico da conversa original.
 publicar uma versão), adicione uma entrada nova no TOPO deste changelog,
 antes de considerar o trabalho terminado.
 
+## 2026-09-11 (2) — v4.88.19: reconsiderado — campo "A partir de" volta a ficar vazio por padrão
+
+**Pedido do usuário**: "pensando melhor, o 'pré-preenchida' vai trazer
+uma confusão para o usuário, que pode não perceber isso e, ao tentar
+importar, achar que deu algum erro por não ter baixado nenhuma (ou
+quase nenhuma) transação." Reverteu a decisão da v4.88.18 — o campo
+volta a ficar vazio por padrão (importa o arquivo inteiro), mas pediu
+pra manter os botões de atalho e acrescentar um de "Hoje".
+
+**Implementação**:
+- `src/renderer.js`, `initImportPage()`: removido o pré-preenchimento
+  com `todayStr()` — o campo volta a nascer vazio.
+- `shiftBankDateFrom(unit)`: aceita `'today'` além de `'day'`/`'month'`
+  — parte sempre de agora (ignora o valor atual do campo), diferente
+  dos outros dois, que recuam a partir do que já estiver preenchido.
+- `src/index.html`: novo botão "Hoje" antes de "◀ dia"/"◀ mês"; label
+  do campo ganhou o texto "(opcional — em branco importa o arquivo
+  inteiro)" pra deixar o comportamento padrão explícito e evitar a
+  confusão que motivou essa reversão. Container dos botões ganhou
+  `flex-wrap:wrap` pra caber os 3 botões + input sem estourar a coluna
+  (o field-row é um grid de 2 colunas dentro de `max-width:560px`,
+  pouco espaço pra 3 botões lado a lado).
+
+**Teste**: `node --check` no `renderer.js` e boot do app sem erros.
+
+**Arquivos**: `src/renderer.js` (`initImportPage`, `shiftBankDateFrom`),
+`src/index.html` (campo "A partir de").
+
 ---
 
 ## 2026-09-11 — v4.88.18: campo "A partir de" da importação vem pré-preenchido
