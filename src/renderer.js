@@ -4847,6 +4847,15 @@ let _builtinOverrides = {}; // {id: {name, logoUrl, sort_order}}
 let _customBankParsers = []; // [{id, name, type:'bank'|'card', config:{...}}]
 
 async function initImportPage() {
+  // Pré-preenche "A partir de" com hoje — na prática quase sempre a data
+  // usada é do mês corrente ou do anterior (raramente mais antiga), então
+  // partir de hoje e deixar o usuário ajustar (botões ◀ dia/◀ mês) poupa
+  // digitação no caso comum. Só se ainda estiver vazio: a página não é
+  // recriada ao trocar de aba, então o valor sobrevive entre navegações —
+  // não queremos sobrescrever um ajuste que o usuário já tenha feito.
+  const dateFromEl = G('bank-date-from');
+  if (dateFromEl && !dateFromEl.value) dateFromEl.value = todayStr();
+
   const all = await ff.bankParsersList();
   // Separate builtin overrides from custom parsers
   const ovEntry = all.find(p => p.id === '__builtin_overrides__');
@@ -5569,6 +5578,20 @@ function renderBankPreview(rows) {
 
   preview.style.display = 'block';
   if (G('bank-result')) G('bank-result').innerHTML = '';
+}
+
+// Botões "◀ dia"/"◀ mês" ao lado de "A partir de" — recuam a data já
+// preenchida (ou hoje, se por algum motivo estiver vazia) em vez de exigir
+// digitar/abrir o calendário pros dois casos mais comuns na prática (mês
+// corrente ou anterior). Clicar várias vezes acumula (ex.: 2x "◀ mês" = 2
+// meses atrás).
+function shiftBankDateFrom(unit) {
+  const el = G('bank-date-from');
+  if (!el) return;
+  const base = el.value ? new Date(el.value + 'T00:00:00') : new Date();
+  if (unit === 'day') base.setDate(base.getDate() - 1);
+  else if (unit === 'month') base.setMonth(base.getMonth() - 1);
+  el.value = `${base.getFullYear()}-${String(base.getMonth()+1).padStart(2,'0')}-${String(base.getDate()).padStart(2,'0')}`;
 }
 
 function cancelBankImport() {

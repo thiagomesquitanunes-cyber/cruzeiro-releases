@@ -1453,7 +1453,11 @@ select.inp option{background:var(--bg2);}
         </div>
         <div class="field" style="margin:0">
           <label class="lbl">A partir de (opcional)</label>
-          <input type="date" class="inp" id="bank-date-from">
+          <div style="display:flex;gap:4px;align-items:center">
+            <input type="date" class="inp" id="bank-date-from" style="flex:1;min-width:0">
+            <button type="button" class="btn xs" title="Voltar 1 dia" onclick="shiftBankDateFrom('day')" style="padding:5px 7px;white-space:nowrap">◀ dia</button>
+            <button type="button" class="btn xs" title="Voltar 1 mês" onclick="shiftBankDateFrom('month')" style="padding:5px 7px;white-space:nowrap">◀ mês</button>
+          </div>
         </div>
       </div>
 

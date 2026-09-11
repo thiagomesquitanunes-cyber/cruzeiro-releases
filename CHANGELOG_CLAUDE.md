@@ -12,6 +12,38 @@ antes de considerar o trabalho terminado.
 
 ---
 
+## 2026-09-11 — v4.88.18: campo "A partir de" da importação vem pré-preenchido
+
+**Pedido do usuário**: o campo "A partir de (opcional)" da importação de
+extrato/fatura sempre exigia preencher do zero, mesmo sendo quase sempre
+(99% dos casos, segundo o usuário) do mês corrente ou do anterior. Pediu
+pra vir com o dia atual já preenchido, e facilitar a troca pro dia/mês
+anterior.
+
+**Implementação**:
+- `src/renderer.js`, `initImportPage()`: pré-preenche `#bank-date-from`
+  com `todayStr()` ao entrar na página de importação — só se o campo
+  ainda estiver vazio (a página não é recriada ao trocar de aba, então
+  não sobrescreve um ajuste que o usuário já tenha feito ao navegar pra
+  fora e voltar).
+- Nova `shiftBankDateFrom(unit)`: recua a data já no campo (ou hoje, se
+  vazio) em 1 dia ou 1 mês — acumula a cada clique (2x "◀ mês" = 2 meses
+  atrás).
+- `src/index.html`: dois botões pequenos "◀ dia"/"◀ mês" ao lado do
+  campo de data, dentro do mesmo `.field-row` (grid 1fr 1fr) — o input
+  ganhou `flex:1;min-width:0` pra dividir espaço com os botões sem
+  estourar a coluna.
+
+**Teste**: `node --check` no `renderer.js` e boot do app sem erros. Não
+consegui exercitar a tela de importação de fato (não tenho automação de
+UI pra janelas Electron nativas) — pedir pro usuário confirmar que o
+campo já chega preenchido e que os botões funcionam como esperado.
+
+**Arquivos**: `src/renderer.js` (`initImportPage`, `shiftBankDateFrom`
+nova), `src/index.html` (campo "A partir de").
+
+---
+
 ## 2026-09-08 (7) — v4.88.17: remove botão "Verificar quedas suspeitas na rentabilidade"
 
 **Pedido do usuário**: "pode retirar o botão de 'verificar quedas
